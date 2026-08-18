@@ -1,0 +1,24 @@
+[package]
+name = "rest-engine-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Self-contained REST execution engine with a stable black-box contract"
+
+[dependencies]
+base64.workspace = true
+csv.workspace = true
+futures-util.workspace = true
+httpdate.workspace = true
+percent-encoding.workspace = true
+quick-xml.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["io-util", "macros"] }
