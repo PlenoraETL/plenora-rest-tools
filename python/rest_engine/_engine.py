@@ -73,10 +73,14 @@ class Engine:
         *,
         params: Optional[Mapping[str, Any]] = None,
         continue_on_error: bool = True,
+        concurrency: int = 1,
     ) -> ExecutionResult:
         request = _request("enrich", connection, params=params)
         request["input"]["records"] = [dict(record) for record in records]
-        request["options"] = {"continue_on_error": continue_on_error}
+        request["options"] = {
+            "continue_on_error": continue_on_error,
+            "enrichment_concurrency": concurrency,
+        }
         return self.execute(request)
 
 
