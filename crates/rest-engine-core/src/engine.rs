@@ -162,6 +162,7 @@ impl Engine {
         let target = DownloadTarget {
             path: target_path,
             overwrite: file.overwrite,
+            resume: file.resume,
             max_bytes: transfer_limit(&self.config, file)?,
             expected_sha256: validated_checksum(file.expected_sha256.as_deref())?,
         };
@@ -207,7 +208,7 @@ impl Engine {
             .saturating_add(response.rate_limit_wait_ms);
         metrics.bytes_downloaded = metrics
             .bytes_downloaded
-            .saturating_add(response.bytes_written);
+            .saturating_add(response.bytes_received);
         if is_poll_result {
             metrics.poll_requests = metrics.poll_requests.saturating_add(
                 response

@@ -12,8 +12,9 @@ use futures_util::StreamExt;
 use reqwest::{
     Body, Certificate, Client, Identity, Method, Proxy, Url,
     header::{
-        CACHE_CONTROL, CONTENT_LENGTH, CONTENT_TYPE, ETAG, HeaderMap, HeaderName, HeaderValue,
-        IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED, LOCATION, RETRY_AFTER, VARY,
+        ACCEPT_ENCODING, CACHE_CONTROL, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, ETAG,
+        HeaderMap, HeaderName, HeaderValue, IF_MODIFIED_SINCE, IF_NONE_MATCH, IF_RANGE,
+        LAST_MODIFIED, LOCATION, RANGE, RETRY_AFTER, VARY,
     },
     multipart::{Form, Part},
     redirect::Policy,
@@ -109,6 +110,7 @@ pub(crate) struct ResponseData {
 pub(crate) struct DownloadTarget {
     pub path: PathBuf,
     pub overwrite: bool,
+    pub resume: bool,
     pub max_bytes: u64,
     pub expected_sha256: Option<String>,
 }
@@ -124,7 +126,18 @@ pub(crate) struct DownloadData {
     pub headers: BTreeMap<String, String>,
     pub path: PathBuf,
     pub bytes_written: u64,
+    pub bytes_received: u64,
     pub sha256: String,
+}
+
+struct DownloadState {
+    temporary: PathBuf,
+    file: Option<fs::File>,
+    bytes_written: u64,
+    bytes_received: u64,
+    digest: Sha256,
+    etag: Option<String>,
+    expected_total: Option<u64>,
 }
 
 struct PendingResponse {
@@ -257,6 +270,31 @@ impl Transport {
         success_statuses: &[u16],
     ) -> Result<DownloadData, EngineError> {
         self.validate_request(&request)?;
+        if target.resume {
+            if request.method != HttpMethod::Get {
+                return Err(EngineError::InvalidInput(
+                    "resumable downloads require the GET method".to_owned(),
+                ));
+            }
+            if request
+                .headers
+                .keys()
+                .any(|name| name.eq_ignore_ascii_case(RANGE.as_str()))
+                || request
+                    .headers
+                    .keys()
+                    .any(|name| name.eq_ignore_ascii_case(IF_RANGE.as_str()))
+            {
+                return Err(EngineError::InvalidInput(
+                    "managed resume cannot be combined with Range or If-Range headers".to_owned(),
+                ));
+            }
+            set_request_header(
+                &mut request.headers,
+                ACCEPT_ENCODING.as_str(),
+                "identity".to_owned(),
+            );
+        }
         let auth_stats = self.resolve_auth(&mut request).await?;
         let mut response = self
             .download_with_circuit(&request, target, success_statuses)
@@ -602,13 +640,51 @@ impl Transport {
         target: &DownloadTarget,
         success_statuses: &[u16],
     ) -> Result<DownloadData, EngineError> {
+        if !target.overwrite && fs::try_exists(&target.path).await.map_err(file_io)? {
+            return Err(EngineError::FileIo(format!(
+                "destination '{}' already exists",
+                target.path.display()
+            )));
+        }
+        let mut state = create_download_state(&target.path).await?;
+        let result = self
+            .download_authenticated_with_state(request, target, success_statuses, &mut state)
+            .await;
+        if result.is_err() {
+            discard_download_state(&mut state).await;
+        }
+        result
+    }
+
+    async fn download_authenticated_with_state(
+        &self,
+        request: &PreparedRequest,
+        target: &DownloadTarget,
+        success_statuses: &[u16],
+        state: &mut DownloadState,
+    ) -> Result<DownloadData, EngineError> {
         let max_attempts = request.retry.max_attempts.max(1);
         let can_retry = request.method.is_idempotent() || request.retry.retry_non_idempotent;
         let mut network_requests = 0_u64;
         let mut rate_limit_wait_ms = 0_u64;
 
         for attempt in 1..=max_attempts {
-            let pending = match self.send_once_response(request).await {
+            let mut attempt_request = request.clone();
+            let resume_etag = if target.resume && state.bytes_written > 0 {
+                state.etag.clone()
+            } else {
+                None
+            };
+            let resumed = resume_etag.is_some();
+            if let Some(etag) = resume_etag {
+                set_request_header(
+                    &mut attempt_request.headers,
+                    RANGE.as_str(),
+                    format!("bytes={}-", state.bytes_written),
+                );
+                set_request_header(&mut attempt_request.headers, IF_RANGE.as_str(), etag);
+            }
+            let pending = match self.send_once_response(&attempt_request).await {
                 Ok(pending) => pending,
                 Err(error)
                     if can_retry
@@ -632,7 +708,10 @@ impl Transport {
                 continue;
             }
 
-            match self.write_download(pending, target, success_statuses).await {
+            match self
+                .write_download_attempt(pending, target, success_statuses, state, resumed)
+                .await
+            {
                 Ok(mut response) => {
                     response.attempts = attempt;
                     response.network_requests = network_requests;
@@ -644,6 +723,12 @@ impl Transport {
                         && attempt < max_attempts
                         && is_retryable_transport_error(&error) =>
                 {
+                    if !(target.resume
+                        && state.bytes_written > 0
+                        && state.etag.as_deref().is_some())
+                    {
+                        reset_download_state(state).await?;
+                    }
                     sleep(retry_delay(&request.retry, attempt, None)).await;
                 }
                 Err(error) => return Err(error),
@@ -934,11 +1019,13 @@ impl Transport {
         })
     }
 
-    async fn write_download(
+    async fn write_download_attempt(
         &self,
         pending: PendingResponse,
         target: &DownloadTarget,
         success_statuses: &[u16],
+        state: &mut DownloadState,
+        resumed: bool,
     ) -> Result<DownloadData, EngineError> {
         let PendingResponse {
             response,
@@ -955,68 +1042,125 @@ impl Transport {
                 body_preview: response_body_preview(response).await?,
             });
         }
-        if response
-            .headers()
-            .get(CONTENT_LENGTH)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.parse::<u64>().ok())
-            .is_some_and(|length| length > target.max_bytes)
-        {
+        if resumed && !matches!(status, 200 | 206) {
+            return Err(EngineError::InvalidResponse(format!(
+                "resumed download returned HTTP {status}; expected 200 or 206"
+            )));
+        }
+        let content_length = response_content_length(&response);
+        let response_etag = strong_response_etag(&response);
+        let expected_total = if status == 206 {
+            let content_range = satisfied_content_range(&response)?;
+            let total = content_range.total;
+            let segment_length = content_range
+                .end
+                .checked_sub(content_range.start)
+                .and_then(|length| length.checked_add(1))
+                .ok_or_else(|| {
+                    EngineError::InvalidResponse(
+                        "download Content-Range has invalid bounds".to_owned(),
+                    )
+                })?;
+            if content_length.is_some_and(|length| length != segment_length) {
+                return Err(EngineError::InvalidResponse(
+                    "download Content-Length does not match Content-Range".to_owned(),
+                ));
+            }
+            if resumed {
+                if content_range.start != state.bytes_written {
+                    return Err(EngineError::InvalidResponse(format!(
+                        "resumed download started at byte {}, expected {}",
+                        content_range.start, state.bytes_written
+                    )));
+                }
+                if response_etag.as_deref() != state.etag.as_deref() {
+                    return Err(EngineError::InvalidResponse(
+                        "resumed download returned a missing or different strong ETag".to_owned(),
+                    ));
+                }
+                if state
+                    .expected_total
+                    .is_some_and(|expected| expected != total)
+                {
+                    return Err(EngineError::InvalidResponse(
+                        "resumed download changed the complete representation length".to_owned(),
+                    ));
+                }
+            } else if content_range.start != 0 || content_range.end.checked_add(1) != Some(total) {
+                return Err(EngineError::InvalidResponse(
+                    "partial response cannot be promoted as a complete download".to_owned(),
+                ));
+            } else {
+                state.etag = response_etag;
+            }
+            state.expected_total = Some(total);
+            Some(total)
+        } else {
+            if state.bytes_written > 0 {
+                reset_download_state(state).await?;
+            }
+            state.etag = response_etag;
+            state.expected_total = content_length;
+            content_length
+        };
+        if expected_total.is_some_and(|length| length > target.max_bytes) {
             return Err(EngineError::FileTooLarge {
                 limit_bytes: target.max_bytes,
             });
         }
-        if !target.overwrite && fs::try_exists(&target.path).await.map_err(file_io)? {
-            return Err(EngineError::FileIo(format!(
-                "destination '{}' already exists",
-                target.path.display()
-            )));
+
+        let attempt_start = state.bytes_written;
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(map_reqwest_error)?;
+            let chunk_length = u64::try_from(chunk.len()).map_err(|_| {
+                EngineError::Runtime("download chunk length overflowed u64".to_owned())
+            })?;
+            if state.bytes_written.saturating_add(chunk_length) > target.max_bytes {
+                return Err(EngineError::FileTooLarge {
+                    limit_bytes: target.max_bytes,
+                });
+            }
+            state
+                .file
+                .as_mut()
+                .ok_or_else(|| EngineError::Runtime("download staging file is closed".to_owned()))?
+                .write_all(&chunk)
+                .await
+                .map_err(file_io)?;
+            state.digest.update(&chunk);
+            state.bytes_written = state.bytes_written.saturating_add(chunk_length);
+            state.bytes_received = state.bytes_received.saturating_add(chunk_length);
         }
-
-        let (temporary, mut file) = create_download_file(&target.path).await?;
-        let transfer = async {
-            let mut bytes_written = 0_u64;
-            let mut digest = Sha256::new();
-            let mut stream = response.bytes_stream();
-            while let Some(chunk) = stream.next().await {
-                let chunk = chunk.map_err(map_reqwest_error)?;
-                let chunk_length = u64::try_from(chunk.len()).map_err(|_| {
-                    EngineError::Runtime("download chunk length overflowed u64".to_owned())
-                })?;
-                if bytes_written.saturating_add(chunk_length) > target.max_bytes {
-                    return Err(EngineError::FileTooLarge {
-                        limit_bytes: target.max_bytes,
-                    });
-                }
-                file.write_all(&chunk).await.map_err(file_io)?;
-                digest.update(&chunk);
-                bytes_written = bytes_written.saturating_add(chunk_length);
-            }
-            file.flush().await.map_err(file_io)?;
-            file.sync_all().await.map_err(file_io)?;
-            drop(file);
-
-            let sha256 = format!("{:x}", digest.finalize());
-            if let Some(expected) = &target.expected_sha256 {
-                if !sha256.eq_ignore_ascii_case(expected) {
-                    return Err(EngineError::ChecksumMismatch {
-                        expected: expected.clone(),
-                        actual: sha256,
-                    });
-                }
-            }
-            persist_download(&temporary, &target.path, target.overwrite).await?;
-            Ok((bytes_written, sha256))
+        let attempt_bytes = state.bytes_written.saturating_sub(attempt_start);
+        if content_length.is_some_and(|length| length != attempt_bytes) {
+            return Err(EngineError::InvalidResponse(
+                "download body length does not match Content-Length".to_owned(),
+            ));
         }
-        .await;
+        if expected_total.is_some_and(|total| state.bytes_written != total) {
+            return Err(EngineError::InvalidResponse(
+                "download body length does not match the complete representation".to_owned(),
+            ));
+        }
+        let file = state
+            .file
+            .as_mut()
+            .ok_or_else(|| EngineError::Runtime("download staging file is closed".to_owned()))?;
+        file.flush().await.map_err(file_io)?;
+        file.sync_all().await.map_err(file_io)?;
+        drop(state.file.take());
 
-        let (bytes_written, sha256) = match transfer {
-            Ok(result) => result,
-            Err(error) => {
-                let _ = fs::remove_file(&temporary).await;
-                return Err(error);
+        let sha256 = format!("{:x}", state.digest.clone().finalize());
+        if let Some(expected) = &target.expected_sha256 {
+            if !sha256.eq_ignore_ascii_case(expected) {
+                return Err(EngineError::ChecksumMismatch {
+                    expected: expected.clone(),
+                    actual: sha256,
+                });
             }
-        };
+        }
+        persist_download(&state.temporary, &target.path, target.overwrite).await?;
         Ok(DownloadData {
             status,
             final_url,
@@ -1027,7 +1171,8 @@ impl Transport {
             rate_limit_wait_ms,
             headers,
             path: target.path.clone(),
-            bytes_written,
+            bytes_written: state.bytes_written,
+            bytes_received: state.bytes_received,
             sha256,
         })
     }
@@ -1231,6 +1376,11 @@ fn validate_url(url: &Url) -> Result<(), EngineError> {
     Ok(())
 }
 
+fn set_request_header(headers: &mut BTreeMap<String, String>, name: &str, value: String) {
+    headers.retain(|existing, _| !existing.eq_ignore_ascii_case(name));
+    headers.insert(name.to_owned(), value);
+}
+
 fn request_headers(request: &PreparedRequest) -> Result<HeaderMap, EngineError> {
     let mut headers = HeaderMap::new();
     for (name, value) in &request.headers {
@@ -1362,6 +1512,77 @@ fn response_retry_after(response: &reqwest::Response) -> Option<u64> {
         .and_then(|value| parse_retry_after(value, SystemTime::now()))
 }
 
+fn response_content_length(response: &reqwest::Response) -> Option<u64> {
+    response
+        .headers()
+        .get(CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+}
+
+fn strong_response_etag(response: &reqwest::Response) -> Option<String> {
+    let value = response.headers().get(ETAG)?.to_str().ok()?.trim();
+    if value.starts_with("W/")
+        || value.len() < 2
+        || !value.starts_with('"')
+        || !value.ends_with('"')
+    {
+        None
+    } else {
+        Some(value.to_owned())
+    }
+}
+
+struct ContentRange {
+    start: u64,
+    end: u64,
+    total: u64,
+}
+
+fn satisfied_content_range(response: &reqwest::Response) -> Result<ContentRange, EngineError> {
+    let value = response
+        .headers()
+        .get(CONTENT_RANGE)
+        .ok_or_else(|| {
+            EngineError::InvalidResponse("206 response has no Content-Range header".to_owned())
+        })?
+        .to_str()
+        .map_err(|_| {
+            EngineError::InvalidResponse("download Content-Range is not valid text".to_owned())
+        })?;
+    let (unit, range_and_total) = value.trim().split_once(' ').ok_or_else(|| {
+        EngineError::InvalidResponse("download Content-Range is malformed".to_owned())
+    })?;
+    if !unit.eq_ignore_ascii_case("bytes") {
+        return Err(EngineError::InvalidResponse(
+            "download Content-Range must use byte units".to_owned(),
+        ));
+    }
+    let (range, total) = range_and_total.split_once('/').ok_or_else(|| {
+        EngineError::InvalidResponse("download Content-Range is malformed".to_owned())
+    })?;
+    let (start, end) = range.split_once('-').ok_or_else(|| {
+        EngineError::InvalidResponse(
+            "download Content-Range does not describe a satisfied range".to_owned(),
+        )
+    })?;
+    let start = start.parse::<u64>().map_err(|_| {
+        EngineError::InvalidResponse("download Content-Range start is invalid".to_owned())
+    })?;
+    let end = end.parse::<u64>().map_err(|_| {
+        EngineError::InvalidResponse("download Content-Range end is invalid".to_owned())
+    })?;
+    let total = total.parse::<u64>().map_err(|_| {
+        EngineError::InvalidResponse("download Content-Range total is invalid".to_owned())
+    })?;
+    if start > end || end >= total {
+        return Err(EngineError::InvalidResponse(
+            "download Content-Range bounds are invalid".to_owned(),
+        ));
+    }
+    Ok(ContentRange { start, end, total })
+}
+
 async fn response_body_preview(response: reqwest::Response) -> Result<Option<String>, EngineError> {
     const PREVIEW_BYTES: usize = 2_048;
     let mut body = Vec::new();
@@ -1391,6 +1612,40 @@ fn download_temporary_path(target: &Path) -> PathBuf {
         ".{filename}.rest-engine-{}-{sequence}.part",
         std::process::id()
     ))
+}
+
+async fn create_download_state(target: &Path) -> Result<DownloadState, EngineError> {
+    let (temporary, file) = create_download_file(target).await?;
+    Ok(DownloadState {
+        temporary,
+        file: Some(file),
+        bytes_written: 0,
+        bytes_received: 0,
+        digest: Sha256::new(),
+        etag: None,
+        expected_total: None,
+    })
+}
+
+async fn reset_download_state(state: &mut DownloadState) -> Result<(), EngineError> {
+    drop(state.file.take());
+    let file = OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(&state.temporary)
+        .await
+        .map_err(file_io)?;
+    state.file = Some(file);
+    state.bytes_written = 0;
+    state.digest = Sha256::new();
+    state.etag = None;
+    state.expected_total = None;
+    Ok(())
+}
+
+async fn discard_download_state(state: &mut DownloadState) {
+    drop(state.file.take());
+    let _ = fs::remove_file(&state.temporary).await;
 }
 
 async fn create_download_file(target: &Path) -> Result<(PathBuf, fs::File), EngineError> {

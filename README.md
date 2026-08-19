@@ -249,6 +249,39 @@ result = engine.download(
 )
 ~~~
 
+Per riprendere automaticamente uno stream interrotto durante i retry della
+stessa esecuzione:
+
+~~~python
+result = engine.download(
+    {
+        "url": "https://api.example.com/exports/latest",
+        "method": "GET",
+        "retry": {
+            "max_attempts": 4,
+            "backoff_base_ms": 500,
+        },
+    },
+    transfer_root / "latest.parquet",
+    resume=True,
+    overwrite=True,
+    expected_sha256="0123456789abcdef" * 4,
+)
+~~~
+
+Il resume è opt-in e gestito interamente dal core. Dopo un'interruzione, un
+ETag forte abilita Range: bytes=<offset>- e If-Range; la risposta 206 viene
+accettata solo se ETag e Content-Range coincidono con lo staging. Se il server
+risponde 200, il file temporaneo viene azzerato e il trasferimento riparte da
+zero. ETag deboli o assenti causano lo stesso restart sicuro.
+Accept-Encoding: identity evita offset ambigui dovuti alla compressione.
+
+Lo staging non sopravvive alla fine dell'esecuzione: resume=True recupera i
+retry della chiamata corrente, non riutilizza un file finale preesistente e
+non lascia file parziali dopo un errore terminale. bytes_transferred indica la
+dimensione finale; metrics.bytes_downloaded include anche i byte poi scartati
+da un eventuale restart completo.
+
 Lo stesso metodo copre gli export asincroni senza adapter specifici del
 servizio. La richiesta iniziale e le risposte di stato restano JSON; quando il
 job termina, il risultato viene trasferito direttamente su file:
@@ -499,7 +532,7 @@ ancora inclusi:
 
 - stili OpenAPI label/matrix per path, allowReserved e serializzazione
   avanzata dei campi form URL-encoded;
-- resume automatico tramite Range e upload multipart resumable;
+- resume persistente tra esecuzioni e upload multipart resumable;
 - YAML, decodifica protobuf e parser personalizzati;
 - autenticazioni firmate come Digest, NTLM, Kerberos o AWS SigV4;
 - SSE, WebSocket, webhook callback e protocolli non request/response;
@@ -525,8 +558,9 @@ Verifiche:
 
 Il comando costruisce Dockerfile.verify ed esegue rustfmt, Clippy, tutti i
 test Rust, la wheel release e gli smoke test Python sulla wheel installata in
-un virtualenv pulito. Non richiede GitHub Actions o crediti per runner hosted.
-Su sistemi non Windows si può eseguire direttamente:
+un virtualenv pulito. È autonomo e non richiede GitHub Actions; il workflow
+Verify esegue lo stesso gate sulle pull request e sui push a main. Su sistemi
+non Windows si può eseguire direttamente:
 
 ~~~text
 docker build --file Dockerfile.verify --tag plenora-rest-tools-verify .

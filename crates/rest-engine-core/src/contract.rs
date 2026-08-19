@@ -652,6 +652,7 @@ pub struct ExecutionInput {
 pub struct FileTransferInput {
     pub path: String,
     pub overwrite: bool,
+    pub resume: bool,
     pub max_bytes: Option<u64>,
     pub expected_sha256: Option<String>,
     pub content_type: Option<String>,
@@ -664,6 +665,7 @@ impl Default for FileTransferInput {
         Self {
             path: String::new(),
             overwrite: false,
+            resume: false,
             max_bytes: None,
             expected_sha256: None,
             content_type: None,

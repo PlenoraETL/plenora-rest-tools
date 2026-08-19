@@ -1,17 +1,24 @@
 import hashlib
 import pathlib
+import socket
 import tempfile
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import List, Optional, Tuple
 
 from rest_engine import Engine, RestEngineError
 
 
 class JsonHandler(BaseHTTPRequestHandler):
     uploaded = b""
+    resumable_body = b"resumable-download" * 4096
+    resume_requests: List[Tuple[Optional[str], Optional[str]]] = []
 
     def do_GET(self) -> None:
+        if self.path == "/resumable":
+            self._resumable_download()
+            return
         if self.path == "/artifact" or self.path.startswith("/artifacts/"):
             body = b"streamed-download" * 4096
             content_type = "application/octet-stream"
@@ -26,6 +33,35 @@ class JsonHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _resumable_download(self) -> None:
+        range_header = self.headers.get("Range")
+        if_range = self.headers.get("If-Range")
+        type(self).resume_requests.append((range_header, if_range))
+        body = type(self).resumable_body
+        if range_header is None:
+            split = 4096
+            self.send_response(200)
+            self.send_header("ETag", "\"python-v1\"")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body[:split])
+            self.wfile.flush()
+            self.connection.shutdown(socket.SHUT_WR)
+            self.close_connection = True
+            return
+
+        offset = int(range_header.removeprefix("bytes=").removesuffix("-"))
+        remaining = body[offset:]
+        self.send_response(206)
+        self.send_header("ETag", "\"python-v1\"")
+        self.send_header(
+            "Content-Range",
+            f"bytes {offset}-{len(body) - 1}/{len(body)}",
+        )
+        self.send_header("Content-Length", str(len(remaining)))
+        self.end_headers()
+        self.wfile.write(remaining)
 
     def do_POST(self) -> None:
         self.send_response(202)
@@ -146,6 +182,22 @@ class PythonSdkSmokeTest(unittest.TestCase):
                     },
                     async_destination,
                 )
+                JsonHandler.resume_requests = []
+                resumed_destination = root / "resumed-download.bin"
+                resumed = engine.download(
+                    {
+                        "url": (
+                            f"http://127.0.0.1:{server.server_port}/resumable"
+                        ),
+                        "method": "GET",
+                        "retry": {
+                            "max_attempts": 2,
+                            "backoff_base_ms": 0,
+                        },
+                    },
+                    resumed_destination,
+                    resume=True,
+                )
                 uploaded = engine.upload(
                     {
                         "url": f"http://127.0.0.1:{server.server_port}/upload",
@@ -166,6 +218,16 @@ class PythonSdkSmokeTest(unittest.TestCase):
                 self.assertEqual(
                     async_downloaded["output"]["sha256"],
                     hashlib.sha256(async_destination.read_bytes()).hexdigest(),
+                )
+                self.assertEqual(resumed["status"], "success")
+                self.assertEqual(resumed["metrics"]["requests"], 2)
+                self.assertEqual(
+                    resumed_destination.read_bytes(),
+                    JsonHandler.resumable_body,
+                )
+                self.assertEqual(
+                    JsonHandler.resume_requests,
+                    [(None, None), ("bytes=4096-", "\"python-v1\"")],
                 )
                 self.assertEqual(uploaded["status"], "success")
                 self.assertEqual(uploaded["output"]["response"]["uploaded"], True)
