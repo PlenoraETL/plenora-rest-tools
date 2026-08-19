@@ -5,6 +5,7 @@ use std::{
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use futures_util::{StreamExt, stream};
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use reqwest::Url;
 use serde_json::{Map, Number, Value};
@@ -12,12 +13,12 @@ use sha2::{Digest, Sha256};
 use tokio::{fs, io::AsyncReadExt, time::sleep};
 
 use crate::{
-    BatchConfig, BatchInputFormat, BodyType, ConnectionConfig, EngineConfig, EngineError,
-    ExecutionError, ExecutionMetrics, ExecutionOperation, ExecutionOutput, ExecutionRequest,
-    ExecutionResult, ExecutionStatus, FileTransferDirection, FileTransferInput, HttpMethod,
-    HttpResponseMetadata, JsonObject, OutputMapping, PaginationConfig, ParameterLocation,
-    ParameterMode, PollingConfig, QuerySerialization, QueryStyle, ResponseConfig,
-    ResponseTransform, SCHEMA_VERSION, json_path, response_body,
+    BatchConfig, BatchInputFormat, BodyType, CachePolicy, ConnectionConfig, EngineConfig,
+    EngineError, ExecutionError, ExecutionMetrics, ExecutionOperation, ExecutionOutput,
+    ExecutionRequest, ExecutionResult, ExecutionStatus, FileTransferDirection, FileTransferInput,
+    HttpMethod, HttpResponseMetadata, JsonObject, OutputMapping, PaginationConfig,
+    ParameterLocation, ParameterMode, PollingConfig, QuerySerialization, QueryStyle,
+    ResponseConfig, ResponseTransform, SCHEMA_VERSION, json_path, response_body,
     transport::{
         DownloadTarget, PreparedBody, PreparedFile, PreparedFileSource, PreparedRequest,
         PreparedStream, ResponseData, Transport, same_origin,
@@ -39,6 +40,14 @@ struct PollCompletion {
     value: Value,
     response: ResponseData,
     job_id: Option<Value>,
+}
+
+struct EnrichmentOutcome {
+    index: usize,
+    record: JsonObject,
+    result: Result<Vec<JsonObject>, EngineError>,
+    metrics: ExecutionMetrics,
+    responses: Vec<HttpResponseMetadata>,
 }
 
 impl Engine {
@@ -383,6 +392,14 @@ impl Engine {
         {
             return self.enrich_batch(request, batch, metrics, responses).await;
         }
+        if request.options.enrichment_concurrency == 0 {
+            return Err(EngineError::InvalidInput(
+                "enrichment_concurrency must be greater than zero".to_owned(),
+            ));
+        }
+        if request.options.enrichment_concurrency > 1 && request.options.continue_on_error {
+            return self.enrich_concurrent(request, metrics, responses).await;
+        }
         let mut output = Vec::with_capacity(request.input.records.len());
         let mut errors = Vec::new();
         let mut succeeded = 0;
@@ -429,6 +446,90 @@ impl Engine {
                     if !request.options.continue_on_error {
                         break;
                     }
+                }
+            }
+        }
+
+        Ok(OperationResult {
+            output: ExecutionOutput::Records { records: output },
+            errors,
+            succeeded,
+        })
+    }
+
+    async fn enrich_concurrent(
+        &self,
+        request: &ExecutionRequest,
+        metrics: &mut ExecutionMetrics,
+        responses: &mut Vec<HttpResponseMetadata>,
+    ) -> Result<OperationResult, EngineError> {
+        let concurrency = request.options.enrichment_concurrency;
+        let outcomes = stream::iter(request.input.records.iter().cloned().enumerate().map(
+            |(index, record)| async move {
+                let mut local_metrics = ExecutionMetrics::default();
+                let mut local_responses = Vec::new();
+                let mut source = request.input.params.clone();
+                source.extend(record.clone());
+                let result = match resolve_parameters(&request.connection, &source) {
+                    Ok(parameters) => self
+                        .request_json(
+                            &request.connection,
+                            &parameters,
+                            None,
+                            &mut local_metrics,
+                            &mut local_responses,
+                            &request.options,
+                        )
+                        .await
+                        .map(|(value, _, _, _)| value)
+                        .and_then(|value| {
+                            response_records(&request.connection, &value)
+                                .map(|values| map_records(values, &request.connection.response))
+                        }),
+                    Err(error) => Err(error),
+                };
+                EnrichmentOutcome {
+                    index,
+                    record,
+                    result,
+                    metrics: local_metrics,
+                    responses: local_responses,
+                }
+            },
+        ))
+        .buffer_unordered(concurrency)
+        .collect::<Vec<_>>()
+        .await;
+
+        let mut ordered: Vec<Option<EnrichmentOutcome>> =
+            (0..request.input.records.len()).map(|_| None).collect();
+        for outcome in outcomes {
+            let index = outcome.index;
+            ordered[index] = Some(outcome);
+        }
+
+        let mut output = Vec::with_capacity(request.input.records.len());
+        let mut errors = Vec::new();
+        let mut succeeded = 0_usize;
+        for outcome in ordered.into_iter().flatten() {
+            merge_execution_metrics(metrics, &outcome.metrics);
+            responses.extend(outcome.responses);
+            match outcome.result {
+                Ok(additions) if additions.is_empty() => {
+                    output.push(outcome.record);
+                    succeeded = succeeded.saturating_add(1);
+                }
+                Ok(additions) => {
+                    for additions in additions {
+                        let mut enriched = outcome.record.clone();
+                        enriched.extend(additions);
+                        output.push(enriched);
+                        succeeded = succeeded.saturating_add(1);
+                    }
+                }
+                Err(error) => {
+                    output.push(outcome.record);
+                    errors.push(error.execution_error(Some(outcome.index)));
                 }
             }
         }
@@ -811,6 +912,10 @@ impl Engine {
             .saturating_add(u64::from(response.attempts.saturating_sub(1)))
             .saturating_add(response.auth_retries);
         metrics.auth_requests = metrics.auth_requests.saturating_add(response.auth_requests);
+        metrics.cache_hits = metrics.cache_hits.saturating_add(response.cache_hits);
+        metrics.cache_revalidations = metrics
+            .cache_revalidations
+            .saturating_add(response.cache_revalidations);
         metrics.rate_limit_wait_ms = metrics
             .rate_limit_wait_ms
             .saturating_add(response.rate_limit_wait_ms);
@@ -928,6 +1033,9 @@ impl Engine {
                 allow_redirects: connection.request.allow_redirects,
                 max_redirects: connection.request.max_redirects,
                 retry: connection.retry.clone(),
+                cookies: connection.cookies.clone(),
+                cache: CachePolicy::default(),
+                circuit_breaker: connection.circuit_breaker.clone(),
                 requests_per_second: connection.requests_per_second,
                 tls: connection.tls.clone(),
                 proxy: connection.proxy.clone(),
@@ -1031,6 +1139,9 @@ impl Engine {
             allow_redirects: connection.request.allow_redirects,
             max_redirects: connection.request.max_redirects,
             retry: connection.retry.clone(),
+            cookies: connection.cookies.clone(),
+            cache: connection.cache.clone(),
+            circuit_breaker: connection.circuit_breaker.clone(),
             requests_per_second: connection.requests_per_second,
             tls: connection.tls.clone(),
             proxy: connection.proxy.clone(),
@@ -1255,6 +1366,9 @@ impl Engine {
             allow_redirects: connection.request.allow_redirects,
             max_redirects: connection.request.max_redirects,
             retry: connection.retry.clone(),
+            cookies: connection.cookies.clone(),
+            cache: connection.cache.clone(),
+            circuit_breaker: connection.circuit_breaker.clone(),
             requests_per_second: connection.requests_per_second,
             tls: connection.tls.clone(),
             proxy: connection.proxy.clone(),
@@ -2247,6 +2361,20 @@ fn ensure_page_size(page_size: usize) -> Result<(), EngineError> {
 fn append_limited(output: &mut Vec<Value>, values: Vec<Value>, max_rows: usize) {
     let remaining = max_rows.saturating_sub(output.len());
     output.extend(values.into_iter().take(remaining));
+}
+
+fn merge_execution_metrics(target: &mut ExecutionMetrics, source: &ExecutionMetrics) {
+    target.requests = target.requests.saturating_add(source.requests);
+    target.retries = target.retries.saturating_add(source.retries);
+    target.auth_requests = target.auth_requests.saturating_add(source.auth_requests);
+    target.poll_requests = target.poll_requests.saturating_add(source.poll_requests);
+    target.cache_hits = target.cache_hits.saturating_add(source.cache_hits);
+    target.cache_revalidations = target
+        .cache_revalidations
+        .saturating_add(source.cache_revalidations);
+    target.rate_limit_wait_ms = target
+        .rate_limit_wait_ms
+        .saturating_add(source.rate_limit_wait_ms);
 }
 
 fn pagination_url(base: &Url, target: &str, allow_cross_origin: bool) -> Result<Url, EngineError> {

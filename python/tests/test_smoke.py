@@ -97,6 +97,15 @@ class PythonSdkSmokeTest(unittest.TestCase):
                     "auth": {"type": "none"},
                 }
             )
+            enriched = engine.enrich(
+                {
+                    "url": f"http://127.0.0.1:{server.server_port}/profile",
+                    "method": "GET",
+                    "auth": {"type": "none"},
+                },
+                [{"id": 1}, {"id": 2}],
+                concurrency=2,
+            )
         finally:
             server.shutdown()
             server.server_close()
@@ -105,6 +114,11 @@ class PythonSdkSmokeTest(unittest.TestCase):
         self.assertEqual(result["status"], "success")
         self.assertEqual(result["output"]["value"]["profile"]["name"], "Ada")
         self.assertEqual(result["responses"], [])
+        self.assertEqual(
+            [record["id"] for record in enriched["output"]["records"]],
+            [1, 2],
+        )
+        self.assertEqual(enriched["metrics"]["requests"], 2)
 
     def test_invalid_contract_raises_the_public_error(self) -> None:
         engine = Engine()

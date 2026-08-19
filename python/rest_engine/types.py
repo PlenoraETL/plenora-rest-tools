@@ -22,6 +22,10 @@ class EngineConfig(TypedDict, total=False):
     file_root: Optional[str]
     automatic_decompression: bool
     allowed_custom_methods: List[str]
+    allow_cookie_store: bool
+    max_cache_entries: int
+    max_cache_bytes: int
+    max_circuit_origins: int
     user_agent: str
 
 
@@ -40,6 +44,25 @@ class ParameterSpec(TypedDict, total=False):
     query_serialization: QuerySerialization
 
 
+class CookiePolicy(TypedDict, total=False):
+    enabled: bool
+    jar_id: str
+
+
+class CachePolicy(TypedDict, total=False):
+    enabled: bool
+    fresh_for_ms: int
+    allow_authenticated: bool
+
+
+class CircuitBreakerPolicy(TypedDict, total=False):
+    enabled: bool
+    group: str
+    failure_threshold: int
+    recovery_timeout_ms: int
+    failure_statuses: List[int]
+
+
 class ConnectionConfig(TypedDict, total=False):
     url: str
     method: str
@@ -50,6 +73,9 @@ class ConnectionConfig(TypedDict, total=False):
     request: JsonObject
     response: JsonObject
     retry: JsonObject
+    cookies: CookiePolicy
+    cache: CachePolicy
+    circuit_breaker: CircuitBreakerPolicy
     pagination: Optional[JsonObject]
     polling: Optional[JsonObject]
     batch: Optional[JsonObject]
@@ -73,6 +99,8 @@ class ExecutionMetrics(TypedDict):
     retries: int
     auth_requests: int
     poll_requests: int
+    cache_hits: int
+    cache_revalidations: int
     rate_limit_wait_ms: int
     input_records: int
     output_records: int
@@ -105,6 +133,7 @@ class ExecutionOptions(TypedDict, total=False):
     continue_on_error: bool
     capture_response_metadata: bool
     response_headers: List[str]
+    enrichment_concurrency: int
 
 
 class HttpResponseMetadata(TypedDict):
