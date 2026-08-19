@@ -1,6 +1,12 @@
 use rest_engine_core::{Engine, EngineConfig};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use std::{
+    path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
+};
 use tokio::{
+    fs,
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     sync::Barrier,
@@ -553,13 +559,248 @@ async fn multipart_is_encoded_entirely_inside_the_engine() {
     server.await.unwrap();
 
     assert_eq!(result["status"], "success");
-    let request = &observed.lock().unwrap()[0];
+    let request = observed.lock().unwrap()[0].clone();
     assert!(request.contains("name=\"description\""));
     assert!(request.contains("document"));
     assert!(request.contains("name=\"attachment\""));
     assert!(request.contains("filename=\"hello.txt\""));
     assert!(request.contains("Content-Type: text/plain"));
     assert!(request.contains("hello"));
+}
+
+#[tokio::test]
+async fn file_transfers_are_denied_by_default() {
+    let result = execute(
+        &Engine::default(),
+        json!({
+            "schema_version": 1,
+            "operation": "download",
+            "connection": {"url": "http://127.0.0.1:9/", "method": "GET"},
+            "input": {"file": {"path": "denied.bin"}}
+        }),
+    )
+    .await;
+
+    assert_eq!(result["status"], "failed");
+    assert_eq!(result["errors"][0]["code"], "policy_violation");
+}
+
+#[tokio::test]
+async fn file_root_blocks_escape_and_downloads_do_not_clobber_by_default() {
+    let directory = transfer_directory("file-policy");
+    let engine = transfer_engine(&directory, 1024, 64);
+    let escaped = execute(
+        &engine,
+        json!({
+            "schema_version": 1,
+            "operation": "download",
+            "connection": {"url": "http://127.0.0.1:9/", "method": "GET"},
+            "input": {"file": {"path": "../outside.bin"}}
+        }),
+    )
+    .await;
+    assert_eq!(escaped["errors"][0]["code"], "policy_violation");
+
+    let destination = directory.join("existing.bin");
+    fs::write(&destination, b"keep-me").await.unwrap();
+    let existing = execute(
+        &engine,
+        json!({
+            "schema_version": 1,
+            "operation": "download",
+            "connection": {"url": "http://127.0.0.1:9/", "method": "GET"},
+            "input": {"file": {"path": "existing.bin"}}
+        }),
+    )
+    .await;
+    assert_eq!(existing["errors"][0]["code"], "file_io");
+    assert_eq!(fs::read(&destination).await.unwrap(), b"keep-me");
+    fs::remove_dir_all(directory).await.unwrap();
+}
+
+#[tokio::test]
+async fn download_streams_beyond_the_in_memory_limit_and_replaces_on_success() {
+    let directory = transfer_directory("download");
+    let destination = directory.join("artifact.bin");
+    fs::write(&destination, b"old").await.unwrap();
+    let body = vec![b'x'; 256 * 1024];
+    let expected_sha256 = sha256(&body);
+    let (url, server) = binary_server(
+        200,
+        body.clone(),
+        vec![("Content-Type", "application/octet-stream")],
+    )
+    .await;
+    let engine = transfer_engine(&directory, 1024 * 1024, 8);
+    let result = execute(
+        &engine,
+        json!({
+            "schema_version": 1,
+            "operation": "download",
+            "connection": {"url": url, "method": "GET"},
+            "input": {
+                "file": {
+                    "path": "artifact.bin",
+                    "overwrite": true,
+                    "expected_sha256": expected_sha256
+                }
+            },
+            "options": {
+                "capture_response_metadata": true,
+                "response_headers": ["content-type"]
+            }
+        }),
+    )
+    .await;
+    server.await.unwrap();
+
+    assert_eq!(result["status"], "success");
+    assert_eq!(result["output"]["type"], "file");
+    assert_eq!(result["output"]["direction"], "download");
+    assert_eq!(result["output"]["bytes_transferred"], body.len());
+    assert_eq!(result["output"]["sha256"], sha256(&body));
+    assert_eq!(result["metrics"]["bytes_downloaded"], body.len());
+    assert_eq!(
+        result["responses"][0]["headers"]["content-type"],
+        "application/octet-stream"
+    );
+    assert_eq!(fs::read(&destination).await.unwrap(), body);
+    assert_no_partial_files(&directory).await;
+    fs::remove_dir_all(directory).await.unwrap();
+}
+
+#[tokio::test]
+async fn download_limit_and_checksum_failures_leave_no_output() {
+    let directory = transfer_directory("download-failures");
+    let body = vec![b'z'; 64];
+    let (limit_url, limit_server) = binary_server(200, body.clone(), vec![]).await;
+    let engine = transfer_engine(&directory, 1024, 8);
+    let limited = execute(
+        &engine,
+        json!({
+            "schema_version": 1,
+            "operation": "download",
+            "connection": {"url": limit_url, "method": "GET"},
+            "input": {"file": {"path": "limited.bin", "max_bytes": 16}}
+        }),
+    )
+    .await;
+    limit_server.await.unwrap();
+    assert_eq!(limited["errors"][0]["code"], "file_too_large");
+    assert!(!fs::try_exists(directory.join("limited.bin")).await.unwrap());
+
+    let (checksum_url, checksum_server) = binary_server(200, body, vec![]).await;
+    let checksum = execute(
+        &engine,
+        json!({
+            "schema_version": 1,
+            "operation": "download",
+            "connection": {"url": checksum_url, "method": "GET"},
+            "input": {
+                "file": {
+                    "path": "checksum.bin",
+                    "expected_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+                }
+            }
+        }),
+    )
+    .await;
+    checksum_server.await.unwrap();
+    assert_eq!(checksum["errors"][0]["code"], "checksum_mismatch");
+    assert!(
+        !fs::try_exists(directory.join("checksum.bin"))
+            .await
+            .unwrap()
+    );
+    assert_no_partial_files(&directory).await;
+    fs::remove_dir_all(directory).await.unwrap();
+}
+
+#[tokio::test]
+async fn raw_upload_streams_beyond_the_in_memory_request_limit() {
+    let directory = transfer_directory("raw-upload");
+    let source = directory.join("payload.bin");
+    let body = vec![b'u'; 128 * 1024];
+    fs::write(&source, &body).await.unwrap();
+    let (url, server, observed) =
+        recorded_server(vec![(200, r#"{"uploaded":true}"#, vec![])]).await;
+    let result = execute(
+        &transfer_engine(&directory, 1024 * 1024, 64),
+        json!({
+            "schema_version": 1,
+            "operation": "upload",
+            "connection": {
+                "url": url,
+                "method": "PUT",
+                "request": {"body_type": "raw"}
+            },
+            "input": {
+                "file": {
+                    "path": "payload.bin",
+                    "content_type": "application/octet-stream"
+                }
+            }
+        }),
+    )
+    .await;
+    server.await.unwrap();
+
+    assert_eq!(result["status"], "success");
+    assert_eq!(result["output"]["direction"], "upload");
+    assert_eq!(result["output"]["bytes_transferred"], body.len());
+    assert_eq!(result["output"]["sha256"], sha256(&body));
+    assert_eq!(result["output"]["response"], json!({"uploaded": true}));
+    assert_eq!(result["metrics"]["bytes_uploaded"], body.len());
+    let request = observed.lock().unwrap()[0].clone();
+    assert!(request.starts_with("PUT / "));
+    assert!(
+        request
+            .to_ascii_lowercase()
+            .contains("content-type: application/octet-stream")
+    );
+    assert!(request.contains(&format!("content-length: {}", body.len())));
+    fs::remove_dir_all(directory).await.unwrap();
+}
+
+#[tokio::test]
+async fn multipart_upload_streams_the_file_and_keeps_regular_fields() {
+    let directory = transfer_directory("multipart-upload");
+    let source = directory.join("payload.txt");
+    fs::write(&source, b"streamed-file-content").await.unwrap();
+    let (url, server, observed) =
+        recorded_server(vec![(200, r#"{"uploaded":true}"#, vec![])]).await;
+    let result = execute(
+        &transfer_engine(&directory, 1024, 1024),
+        json!({
+            "schema_version": 1,
+            "operation": "upload",
+            "connection": {
+                "url": url,
+                "method": "POST",
+                "request": {"body_type": "multipart"}
+            },
+            "input": {
+                "params": {"description": "document"},
+                "file": {
+                    "path": "payload.txt",
+                    "field_name": "attachment",
+                    "filename": "remote.txt",
+                    "content_type": "text/plain"
+                }
+            }
+        }),
+    )
+    .await;
+    server.await.unwrap();
+
+    assert_eq!(result["status"], "success");
+    let request = observed.lock().unwrap()[0].clone();
+    assert!(request.contains("description"));
+    assert!(request.contains("document"));
+    assert!(request.contains("attachment"));
+    assert!(request.contains("remote.txt"));
+    assert!(request.contains("streamed-file-content"));
+    fs::remove_dir_all(directory).await.unwrap();
 }
 
 #[tokio::test]
@@ -897,6 +1138,45 @@ fn local_engine() -> Engine {
     })
 }
 
+fn transfer_engine(directory: &Path, max_file_bytes: u64, max_memory_bytes: usize) -> Engine {
+    Engine::new(EngineConfig {
+        allow_private_networks: true,
+        allow_file_transfers: true,
+        file_root: Some(directory.to_string_lossy().into_owned()),
+        max_file_transfer_bytes: max_file_bytes,
+        max_request_bytes: max_memory_bytes,
+        max_response_bytes: max_memory_bytes,
+        ..EngineConfig::default()
+    })
+}
+
+fn transfer_directory(label: &str) -> PathBuf {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "rest-engine-{label}-{}-{unique}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&path).unwrap();
+    path
+}
+
+fn sha256(value: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(value))
+}
+
+async fn assert_no_partial_files(directory: &Path) {
+    let mut entries = fs::read_dir(directory).await.unwrap();
+    while let Some(entry) = entries.next_entry().await.unwrap() {
+        assert!(
+            !entry.file_name().to_string_lossy().ends_with(".part"),
+            "partial download was not cleaned up"
+        );
+    }
+}
+
 async fn execute(engine: &Engine, request: Value) -> Value {
     serde_json::from_str(&engine.execute_json(&request.to_string()).await.unwrap()).unwrap()
 }
@@ -1028,6 +1308,23 @@ async fn read_request(stream: &mut TcpStream) -> String {
                 })
             })
             .unwrap_or(0);
+        let chunked = headers.lines().any(|line| {
+            line.split_once(':').is_some_and(|(name, value)| {
+                name.eq_ignore_ascii_case("transfer-encoding")
+                    && value
+                        .split(',')
+                        .any(|encoding| encoding.trim().eq_ignore_ascii_case("chunked"))
+            })
+        });
+        if chunked {
+            if request[header_end + 4..]
+                .windows(5)
+                .any(|value| value == b"0\r\n\r\n")
+            {
+                break;
+            }
+            continue;
+        }
         if request.len() >= header_end + 4 + content_length {
             break;
         }

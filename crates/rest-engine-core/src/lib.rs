@@ -17,11 +17,11 @@ pub use contract::{
     ApiKeyLocation, AuthConfig, BatchConfig, BatchInputFormat, BodyType, CachePolicy,
     CircuitBreakerPolicy, ConnectionConfig, CookiePolicy, EngineConfig, ExecutionError,
     ExecutionInput, ExecutionMetrics, ExecutionOperation, ExecutionOptions, ExecutionOutput,
-    ExecutionRequest, ExecutionResult, ExecutionStatus, HttpMethod, HttpResponseMetadata,
-    IterationSpec, JsonObject, OAuthClientAuth, OutputMapping, PaginationConfig, ParameterLocation,
-    ParameterMode, ParameterSpec, PollingConfig, ProxyConfig, QuerySerialization, QueryStyle,
-    RequestConfig, ResponseConfig, ResponseFormat, ResponseTransform, RetryPolicy, SCHEMA_VERSION,
-    TlsConfig,
+    ExecutionRequest, ExecutionResult, ExecutionStatus, FileTransferDirection, FileTransferInput,
+    HttpMethod, HttpResponseMetadata, IterationSpec, JsonObject, OAuthClientAuth, OutputMapping,
+    PaginationConfig, ParameterLocation, ParameterMode, ParameterSpec, PollingConfig, ProxyConfig,
+    QuerySerialization, QueryStyle, RequestConfig, ResponseConfig, ResponseFormat,
+    ResponseTransform, RetryPolicy, SCHEMA_VERSION, TlsConfig,
 };
 pub use engine::Engine;
 pub use error::{EngineError, ErrorPayload};

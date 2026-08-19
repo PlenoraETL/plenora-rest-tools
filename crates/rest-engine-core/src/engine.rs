@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
@@ -8,17 +9,19 @@ use futures_util::{StreamExt, stream};
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use reqwest::Url;
 use serde_json::{Map, Number, Value};
-use tokio::time::sleep;
+use sha2::{Digest, Sha256};
+use tokio::{fs, io::AsyncReadExt, time::sleep};
 
 use crate::{
     BatchConfig, BatchInputFormat, BodyType, CachePolicy, ConnectionConfig, EngineConfig,
     EngineError, ExecutionError, ExecutionMetrics, ExecutionOperation, ExecutionOutput,
-    ExecutionRequest, ExecutionResult, ExecutionStatus, HttpMethod, HttpResponseMetadata,
-    JsonObject, OutputMapping, PaginationConfig, ParameterLocation, ParameterMode, PollingConfig,
-    QuerySerialization, QueryStyle, ResponseConfig, ResponseTransform, SCHEMA_VERSION, json_path,
-    response_body,
+    ExecutionRequest, ExecutionResult, ExecutionStatus, FileTransferDirection, FileTransferInput,
+    HttpMethod, HttpResponseMetadata, JsonObject, OutputMapping, PaginationConfig,
+    ParameterLocation, ParameterMode, PollingConfig, QuerySerialization, QueryStyle,
+    ResponseConfig, ResponseTransform, SCHEMA_VERSION, json_path, response_body,
     transport::{
-        PreparedBody, PreparedFile, PreparedRequest, ResponseData, Transport, same_origin,
+        DownloadTarget, PreparedBody, PreparedFile, PreparedFileSource, PreparedRequest,
+        PreparedStream, ResponseData, Transport, same_origin,
     },
 };
 
@@ -70,6 +73,12 @@ impl Engine {
                 }
                 ExecutionOperation::Enrich => {
                     self.enrich(&request, &mut metrics, &mut responses).await
+                }
+                ExecutionOperation::Download => {
+                    self.download(&request, &mut metrics, &mut responses).await
+                }
+                ExecutionOperation::Upload => {
+                    self.upload(&request, &mut metrics, &mut responses).await
                 }
             }
         };
@@ -131,6 +140,164 @@ impl Engine {
             .await?;
         Ok(OperationResult {
             output: ExecutionOutput::Json { value },
+            errors: Vec::new(),
+            succeeded: 1,
+        })
+    }
+
+    async fn download(
+        &self,
+        request: &ExecutionRequest,
+        metrics: &mut ExecutionMetrics,
+        responses: &mut Vec<HttpResponseMetadata>,
+    ) -> Result<OperationResult, EngineError> {
+        if request.connection.polling.is_some() {
+            return Err(EngineError::InvalidInput(
+                "download does not support polling; resolve the final resource URL first"
+                    .to_owned(),
+            ));
+        }
+        let file = required_file_input(request)?;
+        let target_path = self.resolve_download_target(file).await?;
+        let target = DownloadTarget {
+            path: target_path,
+            overwrite: file.overwrite,
+            max_bytes: transfer_limit(&self.config, file)?,
+            expected_sha256: validated_checksum(file.expected_sha256.as_deref())?,
+        };
+        let parameters = resolve_parameters(&request.connection, &request.input.params)?;
+        let prepared = self.prepare_request(&request.connection, &parameters, None)?;
+        let response = self
+            .transport
+            .download(prepared, &target, &request.connection.success_statuses)
+            .await?;
+        metrics.requests = metrics.requests.saturating_add(response.network_requests);
+        metrics.retries = metrics
+            .retries
+            .saturating_add(u64::from(response.attempts.saturating_sub(1)))
+            .saturating_add(response.auth_retries);
+        metrics.auth_requests = metrics.auth_requests.saturating_add(response.auth_requests);
+        metrics.rate_limit_wait_ms = metrics
+            .rate_limit_wait_ms
+            .saturating_add(response.rate_limit_wait_ms);
+        metrics.bytes_downloaded = metrics
+            .bytes_downloaded
+            .saturating_add(response.bytes_written);
+        if request.options.capture_response_metadata {
+            responses.push(HttpResponseMetadata {
+                status: response.status,
+                final_url: response.final_url.to_string(),
+                attempts: response.attempts,
+                headers: selected_response_headers(
+                    &response.headers,
+                    &request.options.response_headers,
+                ),
+            });
+        }
+        Ok(OperationResult {
+            output: ExecutionOutput::File {
+                direction: FileTransferDirection::Download,
+                path: response.path.to_string_lossy().into_owned(),
+                bytes_transferred: response.bytes_written,
+                sha256: response.sha256,
+                response: None,
+            },
+            errors: Vec::new(),
+            succeeded: 1,
+        })
+    }
+
+    async fn upload(
+        &self,
+        request: &ExecutionRequest,
+        metrics: &mut ExecutionMetrics,
+        responses: &mut Vec<HttpResponseMetadata>,
+    ) -> Result<OperationResult, EngineError> {
+        let file = required_file_input(request)?;
+        let source = self.resolve_upload_source(file).await?;
+        let limit = transfer_limit(&self.config, file)?;
+        let metadata = fs::metadata(&source).await.map_err(file_io)?;
+        if !metadata.is_file() {
+            return Err(EngineError::FileIo(format!(
+                "upload source '{}' is not a regular file",
+                source.display()
+            )));
+        }
+        let length = metadata.len();
+        if length > limit {
+            return Err(EngineError::FileTooLarge { limit_bytes: limit });
+        }
+        let sha256 = hash_file(&source, limit).await?;
+        if let Some(expected) = validated_checksum(file.expected_sha256.as_deref())? {
+            if !sha256.eq_ignore_ascii_case(&expected) {
+                return Err(EngineError::ChecksumMismatch {
+                    expected,
+                    actual: sha256,
+                });
+            }
+        }
+
+        let parameters = resolve_parameters(&request.connection, &request.input.params)?;
+        let mut prepared = self.prepare_request(&request.connection, &parameters, None)?;
+        let content_type = file.content_type.clone();
+        match &mut prepared.body {
+            body @ PreparedBody::Raw(_) => {
+                *body = PreparedBody::Stream(PreparedStream {
+                    path: source.clone(),
+                    length,
+                    content_type,
+                });
+            }
+            PreparedBody::Multipart { files, .. } => {
+                validate_multipart_name(&file.field_name, "field_name")?;
+                let filename = file
+                    .filename
+                    .clone()
+                    .or_else(|| {
+                        source
+                            .file_name()
+                            .map(|value| value.to_string_lossy().into_owned())
+                    })
+                    .ok_or_else(|| {
+                        EngineError::InvalidInput(
+                            "upload file requires an explicit filename".to_owned(),
+                        )
+                    })?;
+                validate_multipart_name(&filename, "filename")?;
+                files.push(PreparedFile {
+                    field_name: file.field_name.clone(),
+                    filename,
+                    content_type,
+                    source: PreparedFileSource::Path {
+                        path: source.clone(),
+                        length,
+                    },
+                });
+            }
+            _ => {
+                return Err(EngineError::InvalidInput(
+                    "upload requires request.body_type 'raw' or 'multipart'".to_owned(),
+                ));
+            }
+        }
+        let (value, _, _, _) = self
+            .request_prepared_json(
+                &request.connection,
+                prepared,
+                metrics,
+                responses,
+                &request.options,
+            )
+            .await?;
+        metrics.bytes_uploaded = metrics.bytes_uploaded.saturating_add(length);
+        Ok(OperationResult {
+            output: ExecutionOutput::File {
+                direction: FileTransferDirection::Upload,
+                path: source.to_string_lossy().into_owned(),
+                bytes_transferred: length,
+                sha256,
+                response: Some(value),
+            },
             errors: Vec::new(),
             succeeded: 1,
         })
@@ -653,6 +820,18 @@ impl Engine {
         options: &crate::ExecutionOptions,
     ) -> Result<(Value, Url, u32, BTreeMap<String, String>), EngineError> {
         let request = self.prepare_request(connection, parameters, url_override)?;
+        self.request_prepared_json(connection, request, metrics, responses, options)
+            .await
+    }
+
+    async fn request_prepared_json(
+        &self,
+        connection: &ConnectionConfig,
+        request: PreparedRequest,
+        metrics: &mut ExecutionMetrics,
+        responses: &mut Vec<HttpResponseMetadata>,
+        options: &crate::ExecutionOptions,
+    ) -> Result<(Value, Url, u32, BTreeMap<String, String>), EngineError> {
         let (initial_value, initial_response) = self
             .execute_prepared_json(connection, request, metrics, false)
             .await?;
@@ -901,6 +1080,100 @@ impl Engine {
         ))
     }
 
+    async fn resolve_upload_source(
+        &self,
+        file: &FileTransferInput,
+    ) -> Result<PathBuf, EngineError> {
+        self.ensure_file_transfers_allowed()?;
+        let root = self.canonical_file_root().await?;
+        let base = match &root {
+            Some(root) => root.clone(),
+            None => canonical_current_directory().await?,
+        };
+        let requested = required_path(&file.path)?;
+        let candidate = if requested.is_absolute() {
+            requested
+        } else {
+            base.join(requested)
+        };
+        let source = fs::canonicalize(candidate).await.map_err(file_io)?;
+        ensure_within_root(&source, root.as_deref())?;
+        Ok(source)
+    }
+
+    async fn resolve_download_target(
+        &self,
+        file: &FileTransferInput,
+    ) -> Result<PathBuf, EngineError> {
+        self.ensure_file_transfers_allowed()?;
+        let root = self.canonical_file_root().await?;
+        let base = match &root {
+            Some(root) => root.clone(),
+            None => canonical_current_directory().await?,
+        };
+        let requested = required_path(&file.path)?;
+        let candidate = if requested.is_absolute() {
+            requested
+        } else {
+            base.join(requested)
+        };
+        let filename = candidate.file_name().ok_or_else(|| {
+            EngineError::InvalidInput("download path must include a filename".to_owned())
+        })?;
+        let parent = candidate.parent().ok_or_else(|| {
+            EngineError::InvalidInput("download path has no parent directory".to_owned())
+        })?;
+        let parent = fs::canonicalize(parent).await.map_err(file_io)?;
+        ensure_within_root(&parent, root.as_deref())?;
+        let target = parent.join(filename);
+        if fs::try_exists(&target).await.map_err(file_io)? {
+            let metadata = fs::symlink_metadata(&target).await.map_err(file_io)?;
+            if metadata.is_dir() {
+                return Err(EngineError::FileIo(format!(
+                    "download destination '{}' is a directory",
+                    target.display()
+                )));
+            }
+            if !file.overwrite {
+                return Err(EngineError::FileIo(format!(
+                    "download destination '{}' already exists",
+                    target.display()
+                )));
+            }
+        }
+        Ok(target)
+    }
+
+    fn ensure_file_transfers_allowed(&self) -> Result<(), EngineError> {
+        if self.config.allow_file_transfers {
+            Ok(())
+        } else {
+            Err(EngineError::PolicyViolation(
+                "file transfers are not enabled for this engine".to_owned(),
+            ))
+        }
+    }
+
+    async fn canonical_file_root(&self) -> Result<Option<PathBuf>, EngineError> {
+        let Some(root) = self.config.file_root.as_deref() else {
+            return Ok(None);
+        };
+        let root = required_path(root)?;
+        let root = if root.is_absolute() {
+            root
+        } else {
+            canonical_current_directory().await?.join(root)
+        };
+        let root = fs::canonicalize(root).await.map_err(file_io)?;
+        if !fs::metadata(&root).await.map_err(file_io)?.is_dir() {
+            return Err(EngineError::FileIo(format!(
+                "configured file_root '{}' is not a directory",
+                root.display()
+            )));
+        }
+        Ok(Some(root))
+    }
+
     fn prepare_request(
         &self,
         connection: &ConnectionConfig,
@@ -1004,7 +1277,10 @@ impl Engine {
                 }
                 ensure_request_size(serializer.finish().len(), self.config.max_request_bytes)?;
             }
-            PreparedBody::None | PreparedBody::Raw(_) | PreparedBody::Multipart { .. } => {}
+            PreparedBody::None
+            | PreparedBody::Raw(_)
+            | PreparedBody::Multipart { .. }
+            | PreparedBody::Stream(_) => {}
         }
 
         Ok(PreparedRequest {
@@ -1036,6 +1312,106 @@ impl Default for Engine {
     fn default() -> Self {
         Self::new(EngineConfig::default())
     }
+}
+
+fn required_file_input(request: &ExecutionRequest) -> Result<&FileTransferInput, EngineError> {
+    request
+        .input
+        .file
+        .as_ref()
+        .ok_or_else(|| EngineError::InvalidInput("operation requires input.file".to_owned()))
+}
+
+fn required_path(value: &str) -> Result<PathBuf, EngineError> {
+    if value.trim().is_empty() {
+        Err(EngineError::InvalidInput(
+            "file path cannot be empty".to_owned(),
+        ))
+    } else {
+        Ok(PathBuf::from(value))
+    }
+}
+
+fn transfer_limit(config: &EngineConfig, file: &FileTransferInput) -> Result<u64, EngineError> {
+    if config.max_file_transfer_bytes == 0 {
+        return Err(EngineError::PolicyViolation(
+            "max_file_transfer_bytes must be greater than zero".to_owned(),
+        ));
+    }
+    match file.max_bytes {
+        Some(0) => Err(EngineError::InvalidInput(
+            "input.file.max_bytes must be greater than zero".to_owned(),
+        )),
+        Some(limit) => Ok(limit.min(config.max_file_transfer_bytes)),
+        None => Ok(config.max_file_transfer_bytes),
+    }
+}
+
+fn validated_checksum(value: Option<&str>) -> Result<Option<String>, EngineError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(EngineError::InvalidInput(
+            "expected_sha256 must contain exactly 64 hexadecimal characters".to_owned(),
+        ));
+    }
+    Ok(Some(value.to_ascii_lowercase()))
+}
+
+fn ensure_within_root(path: &Path, root: Option<&Path>) -> Result<(), EngineError> {
+    if root.is_none_or(|root| path.starts_with(root)) {
+        Ok(())
+    } else {
+        Err(EngineError::PolicyViolation(format!(
+            "file path '{}' is outside the configured file_root",
+            path.display()
+        )))
+    }
+}
+
+async fn canonical_current_directory() -> Result<PathBuf, EngineError> {
+    let current = std::env::current_dir().map_err(file_io)?;
+    fs::canonicalize(current).await.map_err(file_io)
+}
+
+async fn hash_file(path: &Path, limit: u64) -> Result<String, EngineError> {
+    let mut file = fs::File::open(path).await.map_err(file_io)?;
+    let mut digest = Sha256::new();
+    let mut total = 0_u64;
+    let mut buffer = vec![0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer).await.map_err(file_io)?;
+        if read == 0 {
+            break;
+        }
+        let read = u64::try_from(read)
+            .map_err(|_| EngineError::Runtime("file read length overflowed u64".to_owned()))?;
+        if total.saturating_add(read) > limit {
+            return Err(EngineError::FileTooLarge { limit_bytes: limit });
+        }
+        digest.update(
+            &buffer[..usize::try_from(read).map_err(|_| {
+                EngineError::Runtime("file read length overflowed usize".to_owned())
+            })?],
+        );
+        total = total.saturating_add(read);
+    }
+    Ok(format!("{:x}", digest.finalize()))
+}
+
+fn validate_multipart_name(value: &str, name: &str) -> Result<(), EngineError> {
+    if value.trim().is_empty() || value.contains(['\r', '\n', '\0']) {
+        Err(EngineError::InvalidInput(format!(
+            "upload {name} is empty or contains unsupported characters"
+        )))
+    } else {
+        Ok(())
+    }
+}
+
+fn file_io(error: std::io::Error) -> EngineError {
+    EngineError::FileIo(error.to_string())
 }
 
 enum PollState {
@@ -1859,7 +2235,7 @@ fn multipart_body(
                 field_name: name.clone(),
                 filename,
                 content_type,
-                data,
+                source: PreparedFileSource::Bytes(data),
             });
         } else {
             let text = value_as_text(value);

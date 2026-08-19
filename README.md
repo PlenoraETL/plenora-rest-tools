@@ -19,10 +19,10 @@ requests o da altri client HTTP Python.
 
 Sono disponibili:
 
-- operazioni test, generate ed enrich;
+- operazioni test, generate, enrich, download e upload;
 - metodi GET, HEAD, POST, PUT, PATCH, DELETE e OPTIONS, più metodi custom
   autorizzati da una allowlist dell'Engine;
-- body JSON, form URL-encoded, multipart in-memory e raw;
+- body JSON, form URL-encoded, multipart e raw, inclusi file in streaming;
 - parametri indirizzabili separatamente a path, query, header, cookie e body,
   anche nella stessa request;
 - serializzazione query form, space-delimited, pipe-delimited e deepObject;
@@ -47,6 +47,8 @@ Sono disponibili:
   inclusi indici negativi e filtri;
 - TLS personalizzato, CA PEM, identità client PEM e proxy esplicito;
 - limiti hard di richiesta e risposta (32 MiB di default);
+- trasferimenti file opt-in, confinabili a una directory, con limite separato,
+  SHA-256 e download staged senza output parziali;
 - TLS verificato, redirect disabilitati di default e solo same-origin;
 - protezione SSRF con validazione DNS e connessione fissata all'IP validato.
 
@@ -139,6 +141,7 @@ engine = Engine(
         "requests_per_second": 20,
         "max_request_bytes": 33_554_432,
         "max_response_bytes": 33_554_432,
+        "max_file_transfer_bytes": 1_073_741_824,
         "automatic_decompression": True,
         "allow_cookie_store": True,
         "max_cache_entries": 1_024,
@@ -211,6 +214,80 @@ Con format impostato a binary, output.value contiene data_base64 e size; il
 limite max_response_bytes continua a essere applicato ai byte ricevuti e
 decompressi prima della codifica base64.
 
+## Streaming di file
+
+I path locali sono una capability separata e sono negati per default. Per
+abilitarli, l'host deve dichiarare sia il permesso sia, preferibilmente, la
+directory accessibile alla black box:
+
+~~~python
+from pathlib import Path
+
+transfer_root = Path("/var/lib/plenora/transfers")
+engine = Engine(
+    {
+        "allow_file_transfers": True,
+        "file_root": str(transfer_root),
+        "max_file_transfer_bytes": 2_147_483_648,
+    }
+)
+~~~
+
+Un download viene scritto in un file temporaneo nella directory di
+destinazione. Il file finale compare soltanto dopo successo HTTP, verifica del
+limite e verifica SHA-256 opzionale:
+
+~~~python
+result = engine.download(
+    {
+        "url": "https://api.example.com/exports/latest",
+        "method": "GET",
+    },
+    transfer_root / "latest.parquet",
+    overwrite=True,
+    expected_sha256="0123456789abcdef" * 4,
+)
+~~~
+
+L'upload raw riapre il file a ogni retry e non lo materializza in Python o in
+Rust:
+
+~~~python
+result = engine.upload(
+    {
+        "url": "https://api.example.com/imports/latest",
+        "method": "PUT",
+    },
+    transfer_root / "latest.parquet",
+    content_type="application/octet-stream",
+)
+~~~
+
+Per multipart basta indicare il nome del campo. Gli altri parametri restano
+campi multipart ordinari:
+
+~~~python
+result = engine.upload(
+    {
+        "url": "https://api.example.com/imports",
+        "method": "POST",
+    },
+    transfer_root / "people.csv",
+    params={"description": "nightly import"},
+    field_name="attachment",
+    filename="people.csv",
+    content_type="text/csv",
+)
+~~~
+
+L'output di entrambe le operazioni ha type file e contiene direction, path
+assoluto risolto, bytes_transferred e sha256. L'upload include inoltre la
+risposta REST parsata in output.response. Le metriche espongono
+bytes_downloaded e bytes_uploaded. max_request_bytes e max_response_bytes
+continuano a proteggere i payload materializzati; i file usano invece
+max_file_transfer_bytes e l'eventuale limite piu restrittivo della singola
+operazione.
+
 ## OAuth2, multipart e polling
 
 Il token OAuth2 viene ottenuto, aggiornato e conservato soltanto nel core:
@@ -226,8 +303,8 @@ connection["auth"] = {
 }
 ~~~
 
-Per multipart i campi ordinari restano valori JSON. Un file è un oggetto con
-contenuto base64; non vengono esposti path locali al motore:
+Per piccoli multipart in-memory i campi ordinari restano valori JSON e un file
+può ancora essere passato come contenuto base64:
 
 ~~~python
 connection["method"] = "POST"
@@ -391,7 +468,7 @@ ancora inclusi:
 
 - stili OpenAPI label/matrix per path, allowReserved e serializzazione
   avanzata dei campi form URL-encoded;
-- streaming pubblico di upload/download;
+- resume automatico tramite Range e upload multipart resumable;
 - YAML, decodifica protobuf e parser personalizzati;
 - autenticazioni firmate come Digest, NTLM, Kerberos o AWS SigV4;
 - SSE, WebSocket, webhook callback e protocolli non request/response;
@@ -412,8 +489,14 @@ python/rest_engine         facciata e tipi dell'SDK
 Verifiche:
 
 ~~~text
-cargo fmt --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace
-python -m py_compile python/rest_engine/__init__.py python/rest_engine/_engine.py
+.\scripts\verify.ps1
+~~~
+
+Il comando costruisce Dockerfile.verify ed esegue rustfmt, Clippy, tutti i
+test Rust, la wheel release e gli smoke test Python sulla wheel installata in
+un virtualenv pulito. Non richiede GitHub Actions o crediti per runner hosted.
+Su sistemi non Windows si può eseguire direttamente:
+
+~~~text
+docker build --file Dockerfile.verify --tag plenora-rest-tools-verify .
 ~~~
