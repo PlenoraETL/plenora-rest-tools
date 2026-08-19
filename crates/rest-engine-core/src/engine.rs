@@ -35,6 +35,12 @@ struct OperationResult {
     succeeded: usize,
 }
 
+struct PollCompletion {
+    value: Value,
+    response: ResponseData,
+    job_id: Option<Value>,
+}
+
 impl Engine {
     pub fn new(config: EngineConfig) -> Self {
         Self {
@@ -142,12 +148,6 @@ impl Engine {
         metrics: &mut ExecutionMetrics,
         responses: &mut Vec<HttpResponseMetadata>,
     ) -> Result<OperationResult, EngineError> {
-        if request.connection.polling.is_some() {
-            return Err(EngineError::InvalidInput(
-                "download does not support polling; resolve the final resource URL first"
-                    .to_owned(),
-            ));
-        }
         let file = required_file_input(request)?;
         let target_path = self.resolve_download_target(file).await?;
         let target = DownloadTarget {
@@ -157,7 +157,32 @@ impl Engine {
             expected_sha256: validated_checksum(file.expected_sha256.as_deref())?,
         };
         let parameters = resolve_parameters(&request.connection, &request.input.params)?;
-        let prepared = self.prepare_request(&request.connection, &parameters, None)?;
+        let initial = self.prepare_request(&request.connection, &parameters, None)?;
+        let (prepared, is_poll_result) = match &request.connection.polling {
+            Some(polling) => {
+                let (initial_value, initial_response) = self
+                    .execute_prepared_json(&request.connection, initial, metrics, false)
+                    .await?;
+                let completion = self
+                    .await_poll_completion(
+                        &request.connection,
+                        polling,
+                        initial_value,
+                        initial_response,
+                        metrics,
+                    )
+                    .await?;
+                let prepared = self.prepare_poll_result_request(
+                    &request.connection,
+                    polling,
+                    &completion.value,
+                    &completion.response,
+                    completion.job_id.as_ref(),
+                )?;
+                (prepared, true)
+            }
+            None => (initial, false),
+        };
         let response = self
             .transport
             .download(prepared, &target, &request.connection.success_statuses)
@@ -174,6 +199,13 @@ impl Engine {
         metrics.bytes_downloaded = metrics
             .bytes_downloaded
             .saturating_add(response.bytes_written);
+        if is_poll_result {
+            metrics.poll_requests = metrics.poll_requests.saturating_add(
+                response
+                    .network_requests
+                    .saturating_sub(response.auth_requests),
+            );
+        }
         if request.options.capture_response_metadata {
             responses.push(HttpResponseMetadata {
                 status: response.status,
@@ -806,19 +838,42 @@ impl Engine {
         initial_response: ResponseData,
         metrics: &mut ExecutionMetrics,
     ) -> Result<(Value, Url, u32, BTreeMap<String, String>, u16), EngineError> {
+        let completion = self
+            .await_poll_completion(
+                connection,
+                polling,
+                initial_value,
+                initial_response,
+                metrics,
+            )
+            .await?;
+        self.complete_poll(
+            connection,
+            polling,
+            completion.value,
+            completion.response,
+            completion.job_id.as_ref(),
+            metrics,
+        )
+        .await
+    }
+
+    async fn await_poll_completion(
+        &self,
+        connection: &ConnectionConfig,
+        polling: &PollingConfig,
+        initial_value: Value,
+        initial_response: ResponseData,
+        metrics: &mut ExecutionMetrics,
+    ) -> Result<PollCompletion, EngineError> {
         let job_id = polling_job_id(&initial_value, &initial_response, polling);
         match poll_state(&initial_value, polling)? {
             Some(PollState::Success) => {
-                return self
-                    .complete_poll(
-                        connection,
-                        polling,
-                        initial_value,
-                        initial_response,
-                        job_id.as_ref(),
-                        metrics,
-                    )
-                    .await;
+                return Ok(PollCompletion {
+                    value: initial_value,
+                    response: initial_response,
+                    job_id,
+                });
             }
             Some(PollState::Failure(status)) => {
                 return Err(EngineError::InvalidResponse(format!(
@@ -881,16 +936,11 @@ impl Engine {
                 .await?;
             match poll_state(&value, polling)? {
                 Some(PollState::Success) => {
-                    return self
-                        .complete_poll(
-                            connection,
-                            polling,
-                            value,
-                            response,
-                            job_id.as_ref(),
-                            metrics,
-                        )
-                        .await;
+                    return Ok(PollCompletion {
+                        value,
+                        response,
+                        job_id,
+                    });
                 }
                 Some(PollState::Failure(status)) => {
                     return Err(EngineError::InvalidResponse(format!(
@@ -932,13 +982,40 @@ impl Engine {
                 status_response.status,
             ));
         }
-        let target = polling_result_url(&status_value, &status_response, polling, job_id)?;
+        let request = self.prepare_poll_result_request(
+            connection,
+            polling,
+            &status_value,
+            &status_response,
+            job_id,
+        )?;
+        let (value, response) = self
+            .execute_prepared_json(connection, request, metrics, true)
+            .await?;
+        Ok((
+            poll_result(value, polling)?,
+            response.final_url,
+            response.attempts,
+            response.headers,
+            response.status,
+        ))
+    }
+
+    fn prepare_poll_result_request(
+        &self,
+        connection: &ConnectionConfig,
+        polling: &PollingConfig,
+        status_value: &Value,
+        status_response: &ResponseData,
+        job_id: Option<&Value>,
+    ) -> Result<PreparedRequest, EngineError> {
+        let target = polling_result_url(status_value, status_response, polling, job_id)?;
         if !polling.allow_cross_origin && !same_origin(&status_response.final_url, &target) {
             return Err(EngineError::UnsafeAddress(
                 "cross-origin polling result URL is blocked".to_owned(),
             ));
         }
-        let request = PreparedRequest {
+        Ok(PreparedRequest {
             url: target,
             method: polling.result_method.clone(),
             headers: connection.headers.clone(),
@@ -956,17 +1033,7 @@ impl Engine {
             requests_per_second: connection.requests_per_second,
             tls: connection.tls.clone(),
             proxy: connection.proxy.clone(),
-        };
-        let (value, response) = self
-            .execute_prepared_json(connection, request, metrics, true)
-            .await?;
-        Ok((
-            poll_result(value, polling)?,
-            response.final_url,
-            response.attempts,
-            response.headers,
-            response.status,
-        ))
+        })
     }
 
     async fn resolve_upload_source(

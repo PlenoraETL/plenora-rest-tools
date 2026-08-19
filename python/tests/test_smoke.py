@@ -12,9 +12,12 @@ class JsonHandler(BaseHTTPRequestHandler):
     uploaded = b""
 
     def do_GET(self) -> None:
-        if self.path == "/artifact":
+        if self.path == "/artifact" or self.path.startswith("/artifacts/"):
             body = b"streamed-download" * 4096
             content_type = "application/octet-stream"
+        elif self.path.startswith("/jobs/"):
+            body = b'{"status":"completed"}'
+            content_type = "application/json"
         else:
             body = b'{"profile":{"name":"Ada"}}'
             content_type = "application/json"
@@ -23,6 +26,12 @@ class JsonHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def do_POST(self) -> None:
+        self.send_response(202)
+        self.send_header("X-Job-Id", "export/1")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
     def do_PUT(self) -> None:
         length = int(self.headers["Content-Length"])
@@ -102,6 +111,27 @@ class PythonSdkSmokeTest(unittest.TestCase):
                     },
                     destination,
                 )
+                async_destination = root / "async-download.bin"
+                async_downloaded = engine.download(
+                    {
+                        "url": (
+                            f"http://127.0.0.1:{server.server_port}/exports"
+                        ),
+                        "method": "POST",
+                        "polling": {
+                            "url_template": "{base}/jobs/{job_id}",
+                            "id_header": "X-Job-Id",
+                            "location_header": None,
+                            "status_path": "status",
+                            "result_url_template": (
+                                "{base}/artifacts/{job_id}"
+                            ),
+                            "interval_ms": 0,
+                            "max_attempts": 2,
+                        },
+                    },
+                    async_destination,
+                )
                 uploaded = engine.upload(
                     {
                         "url": f"http://127.0.0.1:{server.server_port}/upload",
@@ -115,6 +145,13 @@ class PythonSdkSmokeTest(unittest.TestCase):
                 self.assertEqual(
                     downloaded["output"]["sha256"],
                     hashlib.sha256(destination.read_bytes()).hexdigest(),
+                )
+                self.assertEqual(async_downloaded["status"], "success")
+                self.assertEqual(async_downloaded["metrics"]["requests"], 3)
+                self.assertEqual(async_downloaded["metrics"]["poll_requests"], 2)
+                self.assertEqual(
+                    async_downloaded["output"]["sha256"],
+                    hashlib.sha256(async_destination.read_bytes()).hexdigest(),
                 )
                 self.assertEqual(uploaded["status"], "success")
                 self.assertEqual(uploaded["output"]["response"]["uploaded"], True)
