@@ -670,6 +670,122 @@ async fn download_streams_beyond_the_in_memory_limit_and_replaces_on_success() {
 }
 
 #[tokio::test]
+async fn polling_can_finish_with_a_streamed_download() {
+    let directory = transfer_directory("polled-download");
+    let destination = directory.join("async.bin");
+    let body = vec![b'r'; 128 * 1024];
+    let expected_sha256 = sha256(&body);
+    let (base_url, server, observed) = owned_recorded_server(vec![
+        (202, Vec::new(), vec![("X-Job-Id", "export/1")]),
+        (200, br#"{"status":"running"}"#.to_vec(), vec![]),
+        (200, br#"{"status":"completed"}"#.to_vec(), vec![]),
+        (
+            200,
+            body.clone(),
+            vec![("Content-Type", "application/octet-stream")],
+        ),
+    ])
+    .await;
+    let result = execute(
+        &transfer_engine(&directory, 1024 * 1024, 1024),
+        json!({
+            "schema_version": 1,
+            "operation": "download",
+            "connection": {
+                "url": format!("{base_url}exports"),
+                "method": "POST",
+                "polling": {
+                    "url_template": "{base}/jobs/{job_id}",
+                    "id_header": "X-Job-Id",
+                    "location_header": null,
+                    "status_path": "status",
+                    "result_url_template": "{base}/artifacts/{job_id}",
+                    "interval_ms": 0,
+                    "max_attempts": 3
+                }
+            },
+            "input": {
+                "file": {
+                    "path": "async.bin",
+                    "expected_sha256": expected_sha256
+                }
+            },
+            "options": {
+                "capture_response_metadata": true,
+                "response_headers": ["content-type"]
+            }
+        }),
+    )
+    .await;
+    server.await.unwrap();
+
+    assert_eq!(result["status"], "success");
+    assert_eq!(result["output"]["type"], "file");
+    assert_eq!(result["output"]["direction"], "download");
+    assert_eq!(result["output"]["bytes_transferred"], body.len());
+    assert_eq!(result["output"]["sha256"], sha256(&body));
+    assert_eq!(result["metrics"]["requests"], 4);
+    assert_eq!(result["metrics"]["poll_requests"], 3);
+    assert_eq!(result["metrics"]["bytes_downloaded"], body.len());
+    assert_eq!(
+        result["responses"][0]["headers"]["content-type"],
+        "application/octet-stream"
+    );
+    assert_eq!(fs::read(&destination).await.unwrap(), body);
+    {
+        let observed = observed.lock().unwrap();
+        assert!(observed[0].starts_with("POST /exports "));
+        assert!(observed[1].starts_with("GET /jobs/export%2F1 "));
+        assert!(observed[2].starts_with("GET /jobs/export%2F1 "));
+        assert!(observed[3].starts_with("GET /artifacts/export%2F1 "));
+    }
+    assert_no_partial_files(&directory).await;
+    fs::remove_dir_all(directory).await.unwrap();
+}
+
+#[tokio::test]
+async fn polling_blocks_cross_origin_download_results_before_creating_output() {
+    let directory = transfer_directory("polled-download-origin");
+    let (base_url, server, _) = recorded_server(vec![
+        (202, "", vec![("Location", "/jobs/1")]),
+        (
+            200,
+            r#"{"status":"completed","result_url":"http://127.0.0.1:9/artifact"}"#,
+            vec![],
+        ),
+    ])
+    .await;
+    let result = execute(
+        &transfer_engine(&directory, 1024, 1024),
+        json!({
+            "schema_version": 1,
+            "operation": "download",
+            "connection": {
+                "url": format!("{base_url}exports"),
+                "method": "POST",
+                "polling": {
+                    "status_path": "status",
+                    "result_url_path": "result_url",
+                    "interval_ms": 0,
+                    "max_attempts": 2
+                }
+            },
+            "input": {"file": {"path": "blocked.bin"}}
+        }),
+    )
+    .await;
+    server.await.unwrap();
+
+    assert_eq!(result["status"], "failed");
+    assert_eq!(result["errors"][0]["code"], "unsafe_address");
+    assert_eq!(result["metrics"]["requests"], 2);
+    assert_eq!(result["metrics"]["poll_requests"], 1);
+    assert!(!fs::try_exists(directory.join("blocked.bin")).await.unwrap());
+    assert_no_partial_files(&directory).await;
+    fs::remove_dir_all(directory).await.unwrap();
+}
+
+#[tokio::test]
 async fn download_limit_and_checksum_failures_leave_no_output() {
     let directory = transfer_directory("download-failures");
     let body = vec![b'z'; 64];
@@ -1191,9 +1307,22 @@ async fn server(responses: Vec<(u16, &'static str)>) -> (String, JoinHandle<()>)
 }
 
 type TestResponse = (u16, &'static str, Vec<(&'static str, &'static str)>);
+type OwnedTestResponse = (u16, Vec<u8>, Vec<(&'static str, &'static str)>);
 
 async fn recorded_server(
     responses: Vec<TestResponse>,
+) -> (String, JoinHandle<()>, Arc<StdMutex<Vec<String>>>) {
+    owned_recorded_server(
+        responses
+            .into_iter()
+            .map(|(status, body, headers)| (status, body.as_bytes().to_vec(), headers))
+            .collect(),
+    )
+    .await
+}
+
+async fn owned_recorded_server(
+    responses: Vec<OwnedTestResponse>,
 ) -> (String, JoinHandle<()>, Arc<StdMutex<Vec<String>>>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -1211,14 +1340,23 @@ async fn recorded_server(
                 _ => "Response",
             };
             let extra_headers: String = headers
-                .into_iter()
+                .iter()
                 .map(|(name, value)| format!("{name}: {value}\r\n"))
                 .collect();
-            let response = format!(
-                "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\n{extra_headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            let default_content_type = if headers
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+            {
+                ""
+            } else {
+                "Content-Type: application/json\r\n"
+            };
+            let head = format!(
+                "HTTP/1.1 {status} {reason}\r\n{default_content_type}{extra_headers}Content-Length: {}\r\nConnection: close\r\n\r\n",
                 body.len()
             );
-            stream.write_all(response.as_bytes()).await.unwrap();
+            stream.write_all(head.as_bytes()).await.unwrap();
+            stream.write_all(&body).await.unwrap();
             stream.shutdown().await.unwrap();
         }
     });

@@ -249,6 +249,37 @@ result = engine.download(
 )
 ~~~
 
+Lo stesso metodo copre gli export asincroni senza adapter specifici del
+servizio. La richiesta iniziale e le risposte di stato restano JSON; quando il
+job termina, il risultato viene trasferito direttamente su file:
+
+~~~python
+result = engine.download(
+    {
+        "url": "https://api.example.com/exports",
+        "method": "POST",
+        "polling": {
+            "url_template": "{base}/jobs/{job_id}",
+            "id_header": "X-Job-Id",
+            "status_path": "status",
+            "result_url_template": "{base}/artifacts/{job_id}",
+            "pending_values": ["queued", "running"],
+            "success_values": ["completed"],
+            "failure_values": ["failed"],
+            "interval_ms": 1_000,
+            "max_attempts": 60,
+        },
+    },
+    transfer_root / "export.parquet",
+)
+~~~
+
+L'URL finale può anche arrivare da result_url_path. Sia l'endpoint di stato
+sia quello del file devono avere la stessa origin della risposta precedente,
+salvo allow_cross_origin esplicito. max_response_bytes protegge le sole
+risposte JSON del job; lo stream finale usa max_file_transfer_bytes, max_bytes
+e l'eventuale verifica expected_sha256.
+
 L'upload raw riapre il file a ogni retry e non lo materializza in Python o in
 Rust:
 
