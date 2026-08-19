@@ -84,6 +84,7 @@ class ExecutionMetrics(TypedDict):
 class FileTransferInput(TypedDict, total=False):
     path: str
     overwrite: bool
+    resume: bool
     max_bytes: Optional[int]
     expected_sha256: Optional[str]
     content_type: Optional[str]

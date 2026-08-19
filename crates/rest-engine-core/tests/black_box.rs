@@ -668,6 +668,359 @@ async fn download_streams_beyond_the_in_memory_limit_and_replaces_on_success() {
 }
 
 #[tokio::test]
+async fn resumable_download_uses_range_and_if_range_after_an_interruption() {
+    let directory = transfer_directory("resume");
+    let destination = directory.join("resumed.bin");
+    let body = vec![b'r'; 128 * 1024];
+    let split = 32 * 1024;
+    let content_range = format!("bytes {split}-{}/{}", body.len() - 1, body.len());
+    let (url, server, observed) = interrupted_binary_server(
+        body.len(),
+        body[..split].to_vec(),
+        vec![("ETag".to_owned(), "\"v1\"".to_owned())],
+        206,
+        body[split..].to_vec(),
+        vec![
+            ("ETag".to_owned(), "\"v1\"".to_owned()),
+            ("Content-Range".to_owned(), content_range),
+        ],
+    )
+    .await;
+    let result = execute(
+        &transfer_engine(&directory, 1024 * 1024, 1024),
+        json!({
+            "schema_version": 1,
+            "operation": "download",
+            "connection": {
+                "url": url,
+                "method": "GET",
+                "retry": {"max_attempts": 2, "backoff_base_ms": 0}
+            },
+            "input": {
+                "file": {
+                    "path": "resumed.bin",
+                    "resume": true,
+                    "expected_sha256": sha256(&body)
+                }
+            },
+            "options": {
+                "capture_response_metadata": true,
+                "response_headers": ["etag", "content-range"]
+            }
+        }),
+    )
+    .await;
+    server.await.unwrap();
+
+    assert_eq!(result["status"], "success");
+    assert_eq!(result["output"]["bytes_transferred"], body.len());
+    assert_eq!(result["metrics"]["bytes_downloaded"], body.len());
+    assert_eq!(result["metrics"]["requests"], 2);
+    assert_eq!(result["metrics"]["retries"], 1);
+    assert_eq!(result["responses"][0]["status"], 206);
+    assert_eq!(fs::read(&destination).await.unwrap(), body);
+    {
+        let observed = observed.lock().unwrap();
+        let first = observed[0].to_ascii_lowercase();
+        let second = observed[1].to_ascii_lowercase();
+        assert!(first.contains("accept-encoding: identity"));
+        assert!(second.contains(&format!("range: bytes={split}-")));
+        assert!(second.contains("if-range: \"v1\""));
+        assert!(second.contains("accept-encoding: identity"));
+    }
+    assert_no_partial_files(&directory).await;
+    fs::remove_dir_all(directory).await.unwrap();
+}
+
+#[tokio::test]
+async fn resumable_download_restarts_when_the_server_returns_a_full_response() {
+    let directory = transfer_directory("resume-restart");
+    let split = 8 * 1024;
+    let old_body = vec![b'o'; 64 * 1024];
+    let new_body = vec![b'n'; 48 * 1024];
+    let (url, server, observed) = interrupted_binary_server(
+        old_body.len(),
+        old_body[..split].to_vec(),
+        vec![("ETag".to_owned(), "\"old\"".to_owned())],
+        200,
+        new_body.clone(),
+        vec![("ETag".to_owned(), "\"new\"".to_owned())],
+    )
+    .await;
+    let result = execute(
+        &transfer_engine(&directory, 1024 * 1024, 1024),
+        json!({
+            "schema_version": 1,
+            "operation": "download",
+            "connection": {
+                "url": url,
+                "method": "GET",
+                "retry": {"max_attempts": 2, "backoff_base_ms": 0}
+            },
+            "input": {
+                "file": {
+                    "path": "restarted.bin",
+                    "resume": true,
+                    "expected_sha256": sha256(&new_body)
+                }
+            }
+        }),
+    )
+    .await;
+    server.await.unwrap();
+
+    assert_eq!(result["status"], "success");
+    assert_eq!(result["output"]["bytes_transferred"], new_body.len());
+    assert_eq!(
+        result["metrics"]["bytes_downloaded"],
+        split + new_body.len()
+    );
+    assert_eq!(
+        fs::read(directory.join("restarted.bin")).await.unwrap(),
+        new_body
+    );
+    let second = observed.lock().unwrap()[1].to_ascii_lowercase();
+    assert!(second.contains(&format!("range: bytes={split}-")));
+    assert!(second.contains("if-range: \"old\""));
+    assert_no_partial_files(&directory).await;
+    fs::remove_dir_all(directory).await.unwrap();
+}
+
+#[tokio::test]
+async fn resumable_download_restarts_without_a_strong_etag() {
+    let directory = transfer_directory("resume-weak-etag");
+    let split = 4 * 1024;
+    let body = vec![b'w'; 32 * 1024];
+    let (url, server, observed) = interrupted_binary_server(
+        body.len(),
+        body[..split].to_vec(),
+        vec![("ETag".to_owned(), "W/\"v1\"".to_owned())],
+        200,
+        body.clone(),
+        vec![("ETag".to_owned(), "W/\"v1\"".to_owned())],
+    )
+    .await;
+    let result = execute(
+        &transfer_engine(&directory, 1024 * 1024, 1024),
+        json!({
+            "schema_version": 1,
+            "operation": "download",
+            "connection": {
+                "url": url,
+                "method": "GET",
+                "retry": {"max_attempts": 2, "backoff_base_ms": 0}
+            },
+            "input": {"file": {"path": "weak.bin", "resume": true}}
+        }),
+    )
+    .await;
+    server.await.unwrap();
+
+    assert_eq!(result["status"], "success");
+    assert_eq!(result["metrics"]["bytes_downloaded"], split + body.len());
+    assert_eq!(fs::read(directory.join("weak.bin")).await.unwrap(), body);
+    let second = observed.lock().unwrap()[1].to_ascii_lowercase();
+    assert!(!second.contains("\r\nrange:"));
+    assert!(!second.contains("\r\nif-range:"));
+    assert_no_partial_files(&directory).await;
+    fs::remove_dir_all(directory).await.unwrap();
+}
+
+#[tokio::test]
+async fn resumable_download_rejects_inconsistent_partial_responses() {
+    let directory = transfer_directory("resume-invalid-range");
+    let body = vec![b'x'; 32 * 1024];
+    let split = 4 * 1024;
+    let wrong_start = split + 1;
+    let content_range = format!("bytes {wrong_start}-{}/{}", body.len() - 1, body.len());
+    let (url, server, _) = interrupted_binary_server(
+        body.len(),
+        body[..split].to_vec(),
+        vec![("ETag".to_owned(), "\"v1\"".to_owned())],
+        206,
+        body[wrong_start..].to_vec(),
+        vec![
+            ("ETag".to_owned(), "\"v1\"".to_owned()),
+            ("Content-Range".to_owned(), content_range),
+        ],
+    )
+    .await;
+    let result = execute(
+        &transfer_engine(&directory, 1024 * 1024, 1024),
+        json!({
+            "schema_version": 1,
+            "operation": "download",
+            "connection": {
+                "url": url,
+                "method": "GET",
+                "retry": {"max_attempts": 2, "backoff_base_ms": 0}
+            },
+            "input": {"file": {"path": "invalid.bin", "resume": true}}
+        }),
+    )
+    .await;
+    server.await.unwrap();
+
+    assert_eq!(result["status"], "failed");
+    assert_eq!(result["errors"][0]["code"], "invalid_response");
+    assert!(!fs::try_exists(directory.join("invalid.bin")).await.unwrap());
+    assert_no_partial_files(&directory).await;
+    fs::remove_dir_all(directory).await.unwrap();
+}
+
+#[tokio::test]
+async fn resumable_download_rejects_a_changed_etag_on_partial_content() {
+    let directory = transfer_directory("resume-changed-etag");
+    let body = vec![b'e'; 32 * 1024];
+    let split = 4 * 1024;
+    let content_range = format!("bytes {split}-{}/{}", body.len() - 1, body.len());
+    let (url, server, _) = interrupted_binary_server(
+        body.len(),
+        body[..split].to_vec(),
+        vec![("ETag".to_owned(), "\"v1\"".to_owned())],
+        206,
+        body[split..].to_vec(),
+        vec![
+            ("ETag".to_owned(), "\"v2\"".to_owned()),
+            ("Content-Range".to_owned(), content_range),
+        ],
+    )
+    .await;
+    let result = execute(
+        &transfer_engine(&directory, 1024 * 1024, 1024),
+        json!({
+            "schema_version": 1,
+            "operation": "download",
+            "connection": {
+                "url": url,
+                "method": "GET",
+                "retry": {"max_attempts": 2, "backoff_base_ms": 0}
+            },
+            "input": {"file": {"path": "changed.bin", "resume": true}}
+        }),
+    )
+    .await;
+    server.await.unwrap();
+
+    assert_eq!(result["status"], "failed");
+    assert_eq!(result["errors"][0]["code"], "invalid_response");
+    assert!(!fs::try_exists(directory.join("changed.bin")).await.unwrap());
+    assert_no_partial_files(&directory).await;
+    fs::remove_dir_all(directory).await.unwrap();
+}
+
+#[tokio::test]
+async fn resumable_download_rejects_a_changed_total_length() {
+    let directory = transfer_directory("resume-changed-total");
+    let body = vec![b't'; 32 * 1024];
+    let split = 4 * 1024;
+    let changed_total = body.len() + 1;
+    let content_range = format!("bytes {split}-{}/{}", changed_total - 1, changed_total);
+    let mut remaining = body[split..].to_vec();
+    remaining.push(b't');
+    let (url, server, _) = interrupted_binary_server(
+        body.len(),
+        body[..split].to_vec(),
+        vec![("ETag".to_owned(), "\"v1\"".to_owned())],
+        206,
+        remaining,
+        vec![
+            ("ETag".to_owned(), "\"v1\"".to_owned()),
+            ("Content-Range".to_owned(), content_range),
+        ],
+    )
+    .await;
+    let result = execute(
+        &transfer_engine(&directory, 1024 * 1024, 1024),
+        json!({
+            "schema_version": 1,
+            "operation": "download",
+            "connection": {
+                "url": url,
+                "method": "GET",
+                "retry": {"max_attempts": 2, "backoff_base_ms": 0}
+            },
+            "input": {"file": {"path": "changed-total.bin", "resume": true}}
+        }),
+    )
+    .await;
+    server.await.unwrap();
+
+    assert_eq!(result["status"], "failed");
+    assert_eq!(result["errors"][0]["code"], "invalid_response");
+    assert!(
+        !fs::try_exists(directory.join("changed-total.bin"))
+            .await
+            .unwrap()
+    );
+    assert_no_partial_files(&directory).await;
+    fs::remove_dir_all(directory).await.unwrap();
+}
+
+#[tokio::test]
+async fn partial_responses_are_not_promoted_without_a_complete_representation() {
+    let directory = transfer_directory("partial-response");
+    let (url, server) = binary_server(
+        206,
+        b"tail".to_vec(),
+        vec![("Content-Range", "bytes 5-8/9"), ("ETag", "\"v1\"")],
+    )
+    .await;
+    let result = execute(
+        &transfer_engine(&directory, 1024, 1024),
+        json!({
+            "schema_version": 1,
+            "operation": "download",
+            "connection": {"url": url, "method": "GET"},
+            "input": {"file": {"path": "partial.bin"}}
+        }),
+    )
+    .await;
+    server.await.unwrap();
+
+    assert_eq!(result["status"], "failed");
+    assert_eq!(result["errors"][0]["code"], "invalid_response");
+    assert!(!fs::try_exists(directory.join("partial.bin")).await.unwrap());
+    assert_no_partial_files(&directory).await;
+    fs::remove_dir_all(directory).await.unwrap();
+}
+
+#[tokio::test]
+async fn managed_resume_rejects_non_get_and_user_managed_range_headers() {
+    let directory = transfer_directory("resume-contract");
+    let engine = transfer_engine(&directory, 1024, 1024);
+    let non_get = execute(
+        &engine,
+        json!({
+            "schema_version": 1,
+            "operation": "download",
+            "connection": {"url": "http://127.0.0.1:9/file", "method": "POST"},
+            "input": {"file": {"path": "post.bin", "resume": true}}
+        }),
+    )
+    .await;
+    let manual_range = execute(
+        &engine,
+        json!({
+            "schema_version": 1,
+            "operation": "download",
+            "connection": {
+                "url": "http://127.0.0.1:9/file",
+                "method": "GET",
+                "headers": {"Range": "bytes=10-"}
+            },
+            "input": {"file": {"path": "range.bin", "resume": true}}
+        }),
+    )
+    .await;
+
+    assert_eq!(non_get["errors"][0]["code"], "invalid_input");
+    assert_eq!(manual_range["errors"][0]["code"], "invalid_input");
+    assert_no_partial_files(&directory).await;
+    fs::remove_dir_all(directory).await.unwrap();
+}
+
+#[tokio::test]
 async fn polling_can_finish_with_a_streamed_download() {
     let directory = transfer_directory("polled-download");
     let destination = directory.join("async.bin");
@@ -705,6 +1058,7 @@ async fn polling_can_finish_with_a_streamed_download() {
             "input": {
                 "file": {
                     "path": "async.bin",
+                    "resume": true,
                     "expected_sha256": expected_sha256
                 }
             },
@@ -1222,6 +1576,56 @@ async fn binary_server(
         stream.shutdown().await.unwrap();
     });
     (format!("http://{address}/"), task)
+}
+
+async fn interrupted_binary_server(
+    first_declared_length: usize,
+    first_body: Vec<u8>,
+    first_headers: Vec<(String, String)>,
+    second_status: u16,
+    second_body: Vec<u8>,
+    second_headers: Vec<(String, String)>,
+) -> (String, JoinHandle<()>, Arc<StdMutex<Vec<String>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let observed = Arc::new(StdMutex::new(Vec::new()));
+    let task_observed = observed.clone();
+    let task = tokio::spawn(async move {
+        let (mut first, _) = listener.accept().await.unwrap();
+        let request = read_request(&mut first).await;
+        task_observed.lock().unwrap().push(request);
+        let extra_headers: String = first_headers
+            .iter()
+            .map(|(name, value)| format!("{name}: {value}\r\n"))
+            .collect();
+        let head = format!(
+            "HTTP/1.1 200 OK\r\n{extra_headers}Content-Length: {first_declared_length}\r\nConnection: close\r\n\r\n"
+        );
+        first.write_all(head.as_bytes()).await.unwrap();
+        first.write_all(&first_body).await.unwrap();
+        first.shutdown().await.unwrap();
+
+        let (mut second, _) = listener.accept().await.unwrap();
+        let request = read_request(&mut second).await;
+        task_observed.lock().unwrap().push(request);
+        let reason = if second_status == 206 {
+            "Partial Content"
+        } else {
+            "OK"
+        };
+        let extra_headers: String = second_headers
+            .iter()
+            .map(|(name, value)| format!("{name}: {value}\r\n"))
+            .collect();
+        let head = format!(
+            "HTTP/1.1 {second_status} {reason}\r\n{extra_headers}Content-Length: {}\r\nConnection: close\r\n\r\n",
+            second_body.len()
+        );
+        second.write_all(head.as_bytes()).await.unwrap();
+        let _ = second.write_all(&second_body).await;
+        let _ = second.shutdown().await;
+    });
+    (format!("http://{address}/"), task, observed)
 }
 
 async fn read_request(stream: &mut TcpStream) -> String {

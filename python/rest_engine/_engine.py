@@ -87,14 +87,16 @@ class Engine:
         *,
         params: Optional[Mapping[str, Any]] = None,
         overwrite: bool = False,
+        resume: bool = False,
         max_bytes: Optional[int] = None,
         expected_sha256: Optional[str] = None,
     ) -> ExecutionResult:
-        """Stream an HTTP response into a staged local file."""
+        """Stream an HTTP response into a staged file, optionally resuming retries."""
         request = _request("download", connection, params=params)
         request["input"]["file"] = _file_input(
             destination,
             overwrite=overwrite,
+            resume=resume,
             max_bytes=max_bytes,
             expected_sha256=expected_sha256,
         )
@@ -126,6 +128,7 @@ class Engine:
         file_input = _file_input(
             source,
             overwrite=False,
+            resume=False,
             max_bytes=max_bytes,
             expected_sha256=expected_sha256,
         )
@@ -163,12 +166,14 @@ def _file_input(
     path: Union[str, os.PathLike[str]],
     *,
     overwrite: bool,
+    resume: bool,
     max_bytes: Optional[int],
     expected_sha256: Optional[str],
 ) -> dict[str, Any]:
     value: dict[str, Any] = {
         "path": os.fspath(path),
         "overwrite": overwrite,
+        "resume": resume,
     }
     if max_bytes is not None:
         value["max_bytes"] = max_bytes
