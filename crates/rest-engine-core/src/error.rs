@@ -21,6 +21,8 @@ pub enum EngineError {
     InvalidHeader(String),
     #[error("request timed out")]
     Timeout,
+    #[error("circuit breaker is open for origin {origin}")]
+    CircuitOpen { origin: String },
     #[error("HTTP transport failed: {0}")]
     Transport(String),
     #[error("response exceeds the {limit_bytes} byte limit")]
@@ -90,6 +92,7 @@ impl EngineError {
             Self::DnsResolution(_) => "dns_resolution_failed",
             Self::InvalidHeader(_) => "invalid_header",
             Self::Timeout => "timeout",
+            Self::CircuitOpen { .. } => "circuit_open",
             Self::Transport(_) => "transport_error",
             Self::ResponseTooLarge { .. } => "response_too_large",
             Self::RequestTooLarge { .. } => "request_too_large",
@@ -106,6 +109,7 @@ impl EngineError {
     fn retriable(&self) -> bool {
         match self {
             Self::Timeout
+            | Self::CircuitOpen { .. }
             | Self::Transport(_)
             | Self::DnsResolution(_)
             | Self::PollingTimeout { .. } => true,
