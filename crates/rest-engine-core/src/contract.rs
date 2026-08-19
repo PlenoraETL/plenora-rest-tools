@@ -26,6 +26,10 @@ pub struct EngineConfig {
     pub file_root: Option<String>,
     pub automatic_decompression: bool,
     pub allowed_custom_methods: Vec<String>,
+    pub allow_cookie_store: bool,
+    pub max_cache_entries: usize,
+    pub max_cache_bytes: usize,
+    pub max_circuit_origins: usize,
     pub user_agent: String,
 }
 
@@ -49,6 +53,10 @@ impl Default for EngineConfig {
             file_root: None,
             automatic_decompression: true,
             allowed_custom_methods: Vec::new(),
+            allow_cookie_store: false,
+            max_cache_entries: 1_024,
+            max_cache_bytes: 64 * 1024 * 1024,
+            max_circuit_origins: 256,
             user_agent: format!("rest-engine/{}", env!("CARGO_PKG_VERSION")),
         }
     }
@@ -87,6 +95,9 @@ pub struct ConnectionConfig {
     pub request: RequestConfig,
     pub response: ResponseConfig,
     pub retry: RetryPolicy,
+    pub cookies: CookiePolicy,
+    pub cache: CachePolicy,
+    pub circuit_breaker: CircuitBreakerPolicy,
     pub pagination: Option<PaginationConfig>,
     pub polling: Option<PollingConfig>,
     pub batch: Option<BatchConfig>,
@@ -108,6 +119,9 @@ impl Default for ConnectionConfig {
             request: RequestConfig::default(),
             response: ResponseConfig::default(),
             retry: RetryPolicy::default(),
+            cookies: CookiePolicy::default(),
+            cache: CachePolicy::default(),
+            circuit_breaker: CircuitBreakerPolicy::default(),
             pagination: None,
             polling: None,
             batch: None,
@@ -451,6 +465,52 @@ impl Default for RetryPolicy {
     }
 }
 
+#[derive(Clone, Debug, Deserialize, Hash, Serialize)]
+#[serde(default)]
+pub struct CookiePolicy {
+    pub enabled: bool,
+    pub jar_id: String,
+}
+
+impl Default for CookiePolicy {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            jar_id: "default".to_owned(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct CachePolicy {
+    pub enabled: bool,
+    pub fresh_for_ms: u64,
+    pub allow_authenticated: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default)]
+pub struct CircuitBreakerPolicy {
+    pub enabled: bool,
+    pub group: String,
+    pub failure_threshold: u32,
+    pub recovery_timeout_ms: u64,
+    pub failure_statuses: Vec<u16>,
+}
+
+impl Default for CircuitBreakerPolicy {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            group: "default".to_owned(),
+            failure_threshold: 5,
+            recovery_timeout_ms: 30_000,
+            failure_statuses: vec![429, 500, 502, 503, 504],
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct PollingConfig {
@@ -619,6 +679,7 @@ pub struct ExecutionOptions {
     pub continue_on_error: bool,
     pub capture_response_metadata: bool,
     pub response_headers: Vec<String>,
+    pub enrichment_concurrency: usize,
 }
 
 impl Default for ExecutionOptions {
@@ -627,6 +688,7 @@ impl Default for ExecutionOptions {
             continue_on_error: true,
             capture_response_metadata: false,
             response_headers: Vec::new(),
+            enrichment_concurrency: 1,
         }
     }
 }
@@ -690,6 +752,8 @@ pub struct ExecutionMetrics {
     pub retries: u64,
     pub auth_requests: u64,
     pub poll_requests: u64,
+    pub cache_hits: u64,
+    pub cache_revalidations: u64,
     pub rate_limit_wait_ms: u64,
     pub input_records: usize,
     pub output_records: usize,
