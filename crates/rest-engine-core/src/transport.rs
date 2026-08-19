@@ -12,7 +12,8 @@ use futures_util::StreamExt;
 use reqwest::{
     Body, Certificate, Client, Identity, Method, Proxy, Url,
     header::{
-        CONTENT_LENGTH, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, LOCATION, RETRY_AFTER,
+        CACHE_CONTROL, CONTENT_LENGTH, CONTENT_TYPE, ETAG, HeaderMap, HeaderName, HeaderValue,
+        IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED, LOCATION, RETRY_AFTER, VARY,
     },
     multipart::{Form, Part},
     redirect::Policy,
@@ -30,8 +31,8 @@ use tokio_util::io::ReaderStream;
 use url::Host;
 
 use crate::{
-    ApiKeyLocation, AuthConfig, EngineConfig, EngineError, HttpMethod, OAuthClientAuth,
-    ProxyConfig, RetryPolicy, TlsConfig,
+    ApiKeyLocation, AuthConfig, CachePolicy, CircuitBreakerPolicy, CookiePolicy, EngineConfig,
+    EngineError, HttpMethod, OAuthClientAuth, ProxyConfig, RetryPolicy, TlsConfig,
 };
 
 static DOWNLOAD_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -81,11 +82,15 @@ pub(crate) struct PreparedRequest {
     pub allow_redirects: bool,
     pub max_redirects: usize,
     pub retry: RetryPolicy,
+    pub cookies: CookiePolicy,
+    pub cache: CachePolicy,
+    pub circuit_breaker: CircuitBreakerPolicy,
     pub requests_per_second: Option<f64>,
     pub tls: TlsConfig,
     pub proxy: Option<ProxyConfig>,
 }
 
+#[derive(Clone)]
 pub(crate) struct ResponseData {
     pub status: u16,
     pub body: Vec<u8>,
@@ -95,6 +100,8 @@ pub(crate) struct ResponseData {
     pub auth_requests: u64,
     pub auth_retries: u64,
     pub rate_limit_wait_ms: u64,
+    pub cache_hits: u64,
+    pub cache_revalidations: u64,
     pub headers: BTreeMap<String, String>,
     retry_after_ms: Option<u64>,
 }
@@ -134,6 +141,8 @@ pub(crate) struct Transport {
     clients: Arc<Mutex<HashMap<ClientKey, Client>>>,
     tokens: Arc<Mutex<HashMap<TokenKey, CachedToken>>>,
     token_refresh: Arc<Mutex<()>>,
+    cache: Arc<Mutex<CacheStore>>,
+    circuits: Arc<Mutex<HashMap<CircuitKey, CircuitState>>>,
     concurrency: Arc<Semaphore>,
     rate_state: Arc<Mutex<RateState>>,
 }
@@ -144,6 +153,7 @@ struct ClientKey {
     port: u16,
     address: IpAddr,
     policy_fingerprint: u64,
+    cookie_jar_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
@@ -156,6 +166,45 @@ struct TokenKey {
 struct CachedToken {
     token: String,
     expires_at: Instant,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+struct CacheKey {
+    method: String,
+    url: String,
+    request_fingerprint: u64,
+}
+
+#[derive(Clone)]
+struct CachedResponse {
+    status: u16,
+    body: Vec<u8>,
+    final_url: Url,
+    headers: BTreeMap<String, String>,
+    validated_at: Instant,
+    last_access: Instant,
+    must_revalidate: bool,
+    server_fresh_for_ms: Option<u64>,
+    size_bytes: usize,
+}
+
+#[derive(Default)]
+struct CacheStore {
+    entries: HashMap<CacheKey, CachedResponse>,
+    size_bytes: usize,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+struct CircuitKey {
+    origin: String,
+    group: String,
+}
+
+#[derive(Default)]
+struct CircuitState {
+    consecutive_failures: u32,
+    opened_at: Option<Instant>,
+    half_open_in_flight: bool,
 }
 
 struct RateState {
@@ -177,6 +226,8 @@ impl Transport {
             clients: Arc::new(Mutex::new(HashMap::new())),
             tokens: Arc::new(Mutex::new(HashMap::new())),
             token_refresh: Arc::new(Mutex::new(())),
+            cache: Arc::new(Mutex::new(CacheStore::default())),
+            circuits: Arc::new(Mutex::new(HashMap::new())),
             rate_state: Arc::new(Mutex::new(RateState {
                 next_allowed: Instant::now(),
             })),
@@ -187,7 +238,7 @@ impl Transport {
         self.validate_request(&request)?;
         let auth_stats = self.resolve_auth(&mut request).await?;
 
-        let mut response = self.execute_authenticated(&request).await?;
+        let mut response = self.execute_cached(&request).await?;
         response.auth_requests = auth_stats.network_requests;
         response.auth_retries = auth_stats.retries;
         response.network_requests = response
@@ -208,7 +259,7 @@ impl Transport {
         self.validate_request(&request)?;
         let auth_stats = self.resolve_auth(&mut request).await?;
         let mut response = self
-            .download_authenticated(&request, target, success_statuses)
+            .download_with_circuit(&request, target, success_statuses)
             .await?;
         response.auth_requests = auth_stats.network_requests;
         response.auth_retries = auth_stats.retries;
@@ -234,6 +285,18 @@ impl Transport {
                 request.method.as_str()
             )));
         }
+        if request.cookies.enabled {
+            if !self.config.allow_cookie_store {
+                return Err(EngineError::PolicyViolation(
+                    "cookie storage is not enabled for this engine".to_owned(),
+                ));
+            }
+            if request.cookies.jar_id.trim().is_empty() {
+                return Err(EngineError::InvalidInput(
+                    "cookie jar_id cannot be empty".to_owned(),
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -253,6 +316,211 @@ impl Transport {
         } else {
             Ok(RequestStats::default())
         }
+    }
+
+    async fn execute_cached(&self, request: &PreparedRequest) -> Result<ResponseData, EngineError> {
+        if !request.cache.enabled {
+            return self.execute_with_circuit(request).await;
+        }
+        if !matches!(request.method, HttpMethod::Get | HttpMethod::Head) {
+            return Err(EngineError::InvalidInput(
+                "HTTP cache is supported only for GET and HEAD".to_owned(),
+            ));
+        }
+        if self.config.max_cache_entries == 0 || self.config.max_cache_bytes == 0 {
+            return Err(EngineError::PolicyViolation(
+                "HTTP cache capacity is disabled by this engine".to_owned(),
+            ));
+        }
+        let authenticated = !matches!(request.auth, AuthConfig::None)
+            || request
+                .headers
+                .keys()
+                .any(|name| name.eq_ignore_ascii_case("authorization"))
+            || request.cookies.enabled;
+        if authenticated && !request.cache.allow_authenticated {
+            return Err(EngineError::PolicyViolation(
+                "authenticated HTTP caching requires allow_authenticated".to_owned(),
+            ));
+        }
+
+        let key = cache_key(request)?;
+        let cached = {
+            let mut store = self.cache.lock().await;
+            match store.entries.get_mut(&key) {
+                Some(cached) => {
+                    cached.last_access = Instant::now();
+                    Some(cached.clone())
+                }
+                None => None,
+            }
+        };
+        if let Some(cached) = &cached {
+            let fresh_for_ms = cached
+                .server_fresh_for_ms
+                .map_or(request.cache.fresh_for_ms, |server| {
+                    request.cache.fresh_for_ms.min(server)
+                });
+            let fresh = !cached.must_revalidate
+                && fresh_for_ms > 0
+                && cached.validated_at.elapsed() <= Duration::from_millis(fresh_for_ms);
+            if fresh {
+                return Ok(cached_response(cached, 1, 0));
+            }
+        }
+
+        let mut conditional = request.clone();
+        if let Some(cached) = &cached {
+            add_conditional_headers(&mut conditional.headers, &cached.headers);
+        }
+        let response = self.execute_with_circuit(&conditional).await?;
+        if response.status == 304 {
+            let Some(mut cached) = cached else {
+                return Ok(response);
+            };
+            merge_headers(&mut cached.headers, &response.headers);
+            cached.validated_at = Instant::now();
+            cached.last_access = cached.validated_at;
+            cached.must_revalidate = response_requires_revalidation(&cached.headers);
+            cached.server_fresh_for_ms = cache_max_age_ms(&cached.headers);
+            cached.size_bytes = cached_response_size(&cached.body, &cached.headers);
+            self.store_cache_entry(key, cached.clone()).await;
+            let mut resolved = cached_response(&cached, 1, 1);
+            resolved.attempts = response.attempts;
+            resolved.network_requests = response.network_requests;
+            resolved.rate_limit_wait_ms = response.rate_limit_wait_ms;
+            return Ok(resolved);
+        }
+
+        if (200..300).contains(&response.status)
+            && !response_forbids_store(&response.headers)
+            && response.body.len() <= self.config.max_cache_bytes
+        {
+            let now = Instant::now();
+            let cached = CachedResponse {
+                status: response.status,
+                body: response.body.clone(),
+                final_url: response.final_url.clone(),
+                headers: response.headers.clone(),
+                validated_at: now,
+                last_access: now,
+                must_revalidate: response_requires_revalidation(&response.headers),
+                server_fresh_for_ms: cache_max_age_ms(&response.headers),
+                size_bytes: cached_response_size(&response.body, &response.headers),
+            };
+            self.store_cache_entry(key, cached).await;
+        }
+        Ok(response)
+    }
+
+    async fn execute_with_circuit(
+        &self,
+        request: &PreparedRequest,
+    ) -> Result<ResponseData, EngineError> {
+        let key = self.admit_circuit(request).await?;
+        let result = self.execute_authenticated(request).await;
+        if let Some(key) = key {
+            let failed = match &result {
+                Ok(response) => request
+                    .circuit_breaker
+                    .failure_statuses
+                    .contains(&response.status),
+                Err(error) => is_retryable_transport_error(error),
+            };
+            self.record_circuit(&key, &request.circuit_breaker, failed)
+                .await;
+        }
+        result
+    }
+
+    async fn store_cache_entry(&self, key: CacheKey, entry: CachedResponse) {
+        if entry.size_bytes > self.config.max_cache_bytes {
+            return;
+        }
+        let mut store = self.cache.lock().await;
+        if let Some(previous) = store.entries.remove(&key) {
+            store.size_bytes = store.size_bytes.saturating_sub(previous.size_bytes);
+        }
+        while store.entries.len() >= self.config.max_cache_entries
+            || store.size_bytes.saturating_add(entry.size_bytes) > self.config.max_cache_bytes
+        {
+            let Some(oldest) = store
+                .entries
+                .iter()
+                .min_by_key(|(_, value)| value.last_access)
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            if let Some(removed) = store.entries.remove(&oldest) {
+                store.size_bytes = store.size_bytes.saturating_sub(removed.size_bytes);
+            }
+        }
+        if store.entries.len() < self.config.max_cache_entries
+            && store.size_bytes.saturating_add(entry.size_bytes) <= self.config.max_cache_bytes
+        {
+            store.size_bytes = store.size_bytes.saturating_add(entry.size_bytes);
+            store.entries.insert(key, entry);
+        }
+    }
+
+    async fn admit_circuit(
+        &self,
+        request: &PreparedRequest,
+    ) -> Result<Option<CircuitKey>, EngineError> {
+        let policy = &request.circuit_breaker;
+        if !policy.enabled {
+            return Ok(None);
+        }
+        if policy.failure_threshold == 0 {
+            return Err(EngineError::InvalidInput(
+                "circuit breaker failure_threshold must be greater than zero".to_owned(),
+            ));
+        }
+        if policy.group.trim().is_empty() {
+            return Err(EngineError::InvalidInput(
+                "circuit breaker group cannot be empty".to_owned(),
+            ));
+        }
+        if self.config.max_circuit_origins == 0 {
+            return Err(EngineError::PolicyViolation(
+                "circuit breaker state is disabled by this engine".to_owned(),
+            ));
+        }
+        let key = CircuitKey {
+            origin: request.url.origin().ascii_serialization(),
+            group: policy.group.clone(),
+        };
+        let mut circuits = self.circuits.lock().await;
+        if !circuits.contains_key(&key) && circuits.len() >= self.config.max_circuit_origins {
+            if let Some(oldest) = circuits.keys().next().cloned() {
+                circuits.remove(&oldest);
+            }
+        }
+        let state = circuits.entry(key.clone()).or_default();
+        if let Some(opened_at) = state.opened_at {
+            let recovery = Duration::from_millis(policy.recovery_timeout_ms);
+            if opened_at.elapsed() < recovery || state.half_open_in_flight {
+                return Err(EngineError::CircuitOpen { origin: key.origin });
+            }
+            state.half_open_in_flight = true;
+        }
+        Ok(Some(key))
+    }
+
+    async fn record_circuit(&self, key: &CircuitKey, policy: &CircuitBreakerPolicy, failed: bool) {
+        let mut circuits = self.circuits.lock().await;
+        let state = circuits.entry(key.clone()).or_default();
+        if failed {
+            state.consecutive_failures = state.consecutive_failures.saturating_add(1);
+            if state.half_open_in_flight || state.consecutive_failures >= policy.failure_threshold {
+                state.opened_at = Some(Instant::now());
+            }
+        } else {
+            state.consecutive_failures = 0;
+            state.opened_at = None;
+        }
+        state.half_open_in_flight = false;
     }
 
     async fn execute_authenticated(
@@ -299,6 +567,33 @@ impl Transport {
         Err(EngineError::Runtime(
             "retry loop terminated unexpectedly".to_owned(),
         ))
+    }
+
+    async fn download_with_circuit(
+        &self,
+        request: &PreparedRequest,
+        target: &DownloadTarget,
+        success_statuses: &[u16],
+    ) -> Result<DownloadData, EngineError> {
+        let key = self.admit_circuit(request).await?;
+        let result = self
+            .download_authenticated(request, target, success_statuses)
+            .await;
+        if let Some(key) = key {
+            let failed = match &result {
+                Ok(response) => request
+                    .circuit_breaker
+                    .failure_statuses
+                    .contains(&response.status),
+                Err(EngineError::HttpStatus { status, .. }) => {
+                    request.circuit_breaker.failure_statuses.contains(status)
+                }
+                Err(error) => is_retryable_transport_error(error),
+            };
+            self.record_circuit(&key, &request.circuit_breaker, failed)
+                .await;
+        }
+        result
     }
 
     async fn download_authenticated(
@@ -409,6 +704,9 @@ impl Transport {
                 retry_non_idempotent: true,
                 ..RetryPolicy::default()
             },
+            cookies: CookiePolicy::default(),
+            cache: CachePolicy::default(),
+            circuit_breaker: CircuitBreakerPolicy::default(),
             requests_per_second: original.requests_per_second,
             tls: original.tls.clone(),
             proxy: original.proxy.clone(),
@@ -499,7 +797,7 @@ impl Transport {
 
         for redirects in 0..=request.max_redirects {
             let client = self
-                .client_for(&url, &request.tls, request.proxy.as_ref())
+                .client_for(&url, &request.tls, request.proxy.as_ref(), &request.cookies)
                 .await?;
             let headers = request_headers(request)?;
             let mut request_url = url.clone();
@@ -629,6 +927,8 @@ impl Transport {
             auth_requests: 0,
             auth_retries: 0,
             rate_limit_wait_ms,
+            cache_hits: 0,
+            cache_revalidations: 0,
             headers,
             retry_after_ms,
         })
@@ -768,6 +1068,7 @@ impl Transport {
         url: &Url,
         tls: &TlsConfig,
         proxy: Option<&ProxyConfig>,
+        cookies: &CookiePolicy,
     ) -> Result<Client, EngineError> {
         if !tls.verify && !self.config.allow_insecure_tls {
             return Err(EngineError::PolicyViolation(
@@ -794,6 +1095,7 @@ impl Transport {
             port,
             address,
             policy_fingerprint: fingerprint(&(tls, proxy)),
+            cookie_jar_id: cookies.enabled.then(|| cookies.jar_id.clone()),
         };
         if let Some(client) = self.clients.lock().await.get(&key).cloned() {
             return Ok(client);
@@ -806,6 +1108,9 @@ impl Transport {
             .redirect(Policy::none())
             .no_proxy()
             .user_agent(&self.config.user_agent);
+        if cookies.enabled {
+            builder = builder.cookie_store(true);
+        }
         if !self.config.automatic_decompression {
             builder = builder.no_brotli().no_deflate().no_gzip().no_zstd();
         }
@@ -1256,6 +1561,153 @@ fn fingerprint(value: &(impl Hash + ?Sized)) -> u64 {
     let mut hasher = DefaultHasher::new();
     value.hash(&mut hasher);
     hasher.finish()
+}
+
+fn cache_key(request: &PreparedRequest) -> Result<CacheKey, EngineError> {
+    let mut hasher = DefaultHasher::new();
+    request.headers.hash(&mut hasher);
+    request.auth.hash(&mut hasher);
+    request.cookies.hash(&mut hasher);
+    match &request.body {
+        PreparedBody::None => 0_u8.hash(&mut hasher),
+        PreparedBody::Json(value) => {
+            1_u8.hash(&mut hasher);
+            serde_json::to_vec(value)
+                .map_err(|error| EngineError::InvalidInput(error.to_string()))?
+                .hash(&mut hasher);
+        }
+        PreparedBody::Form(values) => {
+            2_u8.hash(&mut hasher);
+            values.hash(&mut hasher);
+        }
+        PreparedBody::Multipart { fields, files } => {
+            3_u8.hash(&mut hasher);
+            fields.hash(&mut hasher);
+            for file in files {
+                file.field_name.hash(&mut hasher);
+                file.filename.hash(&mut hasher);
+                file.content_type.hash(&mut hasher);
+                match &file.source {
+                    PreparedFileSource::Bytes(data) => data.hash(&mut hasher),
+                    PreparedFileSource::Path { .. } => {
+                        return Err(EngineError::InvalidInput(
+                            "HTTP cache cannot fingerprint streaming multipart files".to_owned(),
+                        ));
+                    }
+                }
+            }
+        }
+        PreparedBody::Raw(value) => {
+            4_u8.hash(&mut hasher);
+            value.hash(&mut hasher);
+        }
+        PreparedBody::Stream(_) => {
+            return Err(EngineError::InvalidInput(
+                "HTTP cache cannot fingerprint streaming request bodies".to_owned(),
+            ));
+        }
+    }
+    Ok(CacheKey {
+        method: request.method.as_str().to_owned(),
+        url: request.url.as_str().to_owned(),
+        request_fingerprint: hasher.finish(),
+    })
+}
+
+fn cached_response(
+    cached: &CachedResponse,
+    cache_hits: u64,
+    cache_revalidations: u64,
+) -> ResponseData {
+    ResponseData {
+        status: cached.status,
+        body: cached.body.clone(),
+        final_url: cached.final_url.clone(),
+        attempts: 0,
+        network_requests: 0,
+        auth_requests: 0,
+        auth_retries: 0,
+        rate_limit_wait_ms: 0,
+        cache_hits,
+        cache_revalidations,
+        headers: cached.headers.clone(),
+        retry_after_ms: None,
+    }
+}
+
+fn add_conditional_headers(
+    request_headers: &mut BTreeMap<String, String>,
+    cached_headers: &BTreeMap<String, String>,
+) {
+    if !contains_header(request_headers, IF_NONE_MATCH.as_str()) {
+        if let Some(etag) = cached_headers.get(ETAG.as_str()) {
+            request_headers.insert(IF_NONE_MATCH.as_str().to_owned(), etag.clone());
+        }
+    }
+    if !contains_header(request_headers, IF_MODIFIED_SINCE.as_str()) {
+        if let Some(last_modified) = cached_headers.get(LAST_MODIFIED.as_str()) {
+            request_headers.insert(IF_MODIFIED_SINCE.as_str().to_owned(), last_modified.clone());
+        }
+    }
+}
+
+fn contains_header(headers: &BTreeMap<String, String>, name: &str) -> bool {
+    headers
+        .keys()
+        .any(|existing| existing.eq_ignore_ascii_case(name))
+}
+
+fn merge_headers(cached: &mut BTreeMap<String, String>, revalidated: &BTreeMap<String, String>) {
+    for (name, value) in revalidated {
+        if !name.eq_ignore_ascii_case(CONTENT_LENGTH.as_str()) {
+            cached.insert(name.clone(), value.clone());
+        }
+    }
+}
+
+fn response_forbids_store(headers: &BTreeMap<String, String>) -> bool {
+    header_has_directive(headers, CACHE_CONTROL.as_str(), "no-store")
+        || headers
+            .get(VARY.as_str())
+            .is_some_and(|value| value.split(',').any(|value| value.trim() == "*"))
+}
+
+fn response_requires_revalidation(headers: &BTreeMap<String, String>) -> bool {
+    header_has_directive(headers, CACHE_CONTROL.as_str(), "no-cache")
+}
+
+fn cache_max_age_ms(headers: &BTreeMap<String, String>) -> Option<u64> {
+    headers
+        .get(CACHE_CONTROL.as_str())?
+        .split(',')
+        .find_map(|directive| {
+            let (name, value) = directive.trim().split_once('=')?;
+            name.trim()
+                .eq_ignore_ascii_case("max-age")
+                .then(|| value.trim().trim_matches('"').parse::<u64>().ok())
+                .flatten()
+        })
+        .and_then(|seconds| seconds.checked_mul(1_000))
+}
+
+fn header_has_directive(headers: &BTreeMap<String, String>, header: &str, directive: &str) -> bool {
+    headers.get(header).is_some_and(|value| {
+        value
+            .split(',')
+            .filter_map(|value| {
+                value
+                    .trim()
+                    .split_once('=')
+                    .map_or_else(|| Some(value.trim()), |(name, _)| Some(name.trim()))
+            })
+            .any(|value| value.eq_ignore_ascii_case(directive))
+    })
+}
+
+fn cached_response_size(body: &[u8], headers: &BTreeMap<String, String>) -> usize {
+    headers.iter().fold(body.len(), |size, (name, value)| {
+        size.saturating_add(name.len()).saturating_add(value.len())
+    })
 }
 
 fn method(method: &HttpMethod) -> Result<Method, EngineError> {

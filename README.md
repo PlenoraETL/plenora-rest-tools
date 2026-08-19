@@ -34,7 +34,11 @@ Sono disponibili:
 - polling asincrono tramite body, template o header, con recupero separato
   del risultato, backoff e timeout totale;
 - limiti di frequenza globali e per connessione, più limite di concorrenza;
+- enrichment concorrente opt-in con ordinamento deterministico dei risultati;
 - modalità batch con chunk e ricomposizione dei risultati;
+- cookie jar persistenti, opt-in e isolati per identificatore;
+- cache HTTP bounded con ETag/Last-Modified e revalidation 304;
+- circuit breaker bounded per origin e gruppo, con stato half-open;
 - risposte JSON, CSV, XML, NDJSON, testo UTF-8 e binario base64;
 - body vuoti, inclusi 204 e 205, rappresentati come null;
 - decompressione automatica e disattivabile di gzip, Brotli, deflate e Zstandard;
@@ -139,6 +143,10 @@ engine = Engine(
         "max_response_bytes": 33_554_432,
         "max_file_transfer_bytes": 1_073_741_824,
         "automatic_decompression": True,
+        "allow_cookie_store": True,
+        "max_cache_entries": 1_024,
+        "max_cache_bytes": 67_108_864,
+        "max_circuit_origins": 256,
     }
 )
 ~~~
@@ -396,7 +404,8 @@ Il risultato contiene sempre:
 - schema_version;
 - status: success, partial o failed;
 - output: none, json o records;
-- metrics: richieste, retry, OAuth, polling, attesa rate limit, record ed elapsed time;
+- metrics: richieste, retry, OAuth, polling, cache hit/revalidation, attesa
+  rate limit, record ed elapsed time;
 - responses: metadata HTTP richiesti esplicitamente;
 - errors: codici stabili, indice del record e stato HTTP quando presenti.
 
@@ -428,6 +437,56 @@ connection["pagination"] = {
 }
 ~~~
 
+## Sessioni, cache e resilienza
+
+Le sessioni sono disabilitate per default sia nell'Engine sia nella
+connessione. jar_id separa i cookie di tenant o integrazioni differenti:
+
+~~~python
+engine = Engine({"allow_cookie_store": True})
+connection["cookies"] = {
+    "enabled": True,
+    "jar_id": "tenant-42",
+}
+~~~
+
+La cache è disponibile soltanto per GET e HEAD. Con fresh_for_ms uguale a
+zero il motore revalida sempre tramite ETag o Last-Modified; Cache-Control
+no-store, no-cache, max-age e Vary: * vengono rispettati. Per richieste
+autenticate serve un consenso aggiuntivo:
+
+~~~python
+connection["cache"] = {
+    "enabled": True,
+    "fresh_for_ms": 30_000,
+    "allow_authenticated": False,
+}
+~~~
+
+Il circuit breaker conta gli esiti finali dopo i retry ed evita nuove
+connessioni finché non entra in half-open:
+
+~~~python
+connection["circuit_breaker"] = {
+    "enabled": True,
+    "group": "catalog",
+    "failure_threshold": 5,
+    "recovery_timeout_ms": 30_000,
+    "failure_statuses": [429, 500, 502, 503, 504],
+}
+~~~
+
+L'enrichment concorrente mantiene l'ordine degli input ed è comunque
+vincolato dai limiti globali di concorrenza e frequenza dell'Engine:
+
+~~~python
+result = engine.enrich(
+    connection,
+    records,
+    concurrency=8,
+)
+~~~
+
 Errori di contratto che impediscono di creare un risultato (per esempio JSON
 malformato) sollevano RestEngineError. Gli errori operativi REST sono invece
 nel risultato, così l'applicazione host può gestirli senza conoscere eccezioni
@@ -442,13 +501,12 @@ ancora inclusi:
   avanzata dei campi form URL-encoded;
 - resume automatico tramite Range e upload multipart resumable;
 - YAML, decodifica protobuf e parser personalizzati;
-- cookie jar e autenticazioni firmate come Digest, NTLM o AWS SigV4;
+- autenticazioni firmate come Digest, NTLM, Kerberos o AWS SigV4;
 - SSE, WebSocket, webhook callback e protocolli non request/response;
-- cache condizionale ETag/Last-Modified e circuit breaker;
 - coordinamento distribuito di rate limit e token cache;
 - importazione automatica OpenAPI;
 - variabili dinamiche basate su data e ora nei parametri;
-- scheduler parallelo, deduplicazione e cache delle richieste di enrichment;
+- deduplicazione in-flight e scheduler distribuito dell'enrichment;
 - espansione automatica di wildcard annidate e inferenza dello schema.
 
 ## Workspace
@@ -462,8 +520,14 @@ python/rest_engine         facciata e tipi dell'SDK
 Verifiche:
 
 ~~~text
-cargo fmt --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace
-python -m py_compile python/rest_engine/__init__.py python/rest_engine/_engine.py
+.\scripts\verify.ps1
+~~~
+
+Il comando costruisce Dockerfile.verify ed esegue rustfmt, Clippy, tutti i
+test Rust, la wheel release e gli smoke test Python sulla wheel installata in
+un virtualenv pulito. Non richiede GitHub Actions o crediti per runner hosted.
+Su sistemi non Windows si può eseguire direttamente:
+
+~~~text
+docker build --file Dockerfile.verify --tag plenora-rest-tools-verify .
 ~~~

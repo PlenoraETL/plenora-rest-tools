@@ -9,7 +9,9 @@ use tokio::{
     fs,
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
+    sync::Barrier,
     task::JoinHandle,
+    time::timeout,
 };
 
 #[tokio::test]
@@ -1040,6 +1042,11 @@ async fn dangerous_transport_options_are_denied_by_default() {
             "method": "GET",
             "proxy": {"url": "http://proxy.example.com:8080"}
         }),
+        json!({
+            "url": "https://example.com",
+            "method": "GET",
+            "cookies": {"enabled": true, "jar_id": "default"}
+        }),
     ] {
         let result = execute(
             &Engine::default(),
@@ -1081,6 +1088,163 @@ async fn global_rate_limit_is_visible_in_metrics() {
     assert_eq!(result["status"], "success");
     assert_eq!(result["metrics"]["requests"], 3);
     assert!(result["metrics"]["rate_limit_wait_ms"].as_u64().unwrap() >= 250);
+}
+
+#[tokio::test]
+async fn cookie_jars_are_persistent_and_explicitly_authorized() {
+    let (url, server, observed) = recorded_server(vec![
+        (
+            200,
+            r#"{"authenticated":true}"#,
+            vec![("Set-Cookie", "session=abc123; Path=/; HttpOnly")],
+        ),
+        (200, r#"{"authenticated":true}"#, vec![]),
+    ])
+    .await;
+    let engine = Engine::new(EngineConfig {
+        allow_private_networks: true,
+        allow_cookie_store: true,
+        ..EngineConfig::default()
+    });
+    let request = json!({
+        "schema_version": 1,
+        "operation": "test",
+        "connection": {
+            "url": url,
+            "method": "GET",
+            "cookies": {"enabled": true, "jar_id": "tenant-a"}
+        }
+    });
+
+    assert_eq!(execute(&engine, request.clone()).await["status"], "success");
+    assert_eq!(execute(&engine, request).await["status"], "success");
+    server.await.unwrap();
+
+    let observed = observed.lock().unwrap();
+    assert!(!observed[0].to_ascii_lowercase().contains("cookie:"));
+    assert!(
+        observed[1]
+            .to_ascii_lowercase()
+            .contains("cookie: session=abc123")
+    );
+}
+
+#[tokio::test]
+async fn conditional_cache_revalidates_and_can_serve_fresh_entries() {
+    let (url, server, observed) = recorded_server(vec![
+        (200, r#"{"version":1}"#, vec![("ETag", "\"version-1\"")]),
+        (304, "", vec![("ETag", "\"version-1\"")]),
+    ])
+    .await;
+    let engine = local_engine();
+    let request = json!({
+        "schema_version": 1,
+        "operation": "test",
+        "connection": {
+            "url": url,
+            "method": "GET",
+            "cache": {"enabled": true}
+        }
+    });
+
+    let first = execute(&engine, request.clone()).await;
+    let second = execute(&engine, request.clone()).await;
+    server.await.unwrap();
+    assert_eq!(first["output"]["value"], json!({"version": 1}));
+    assert_eq!(second["output"]["value"], json!({"version": 1}));
+    assert_eq!(second["metrics"]["requests"], 1);
+    assert_eq!(second["metrics"]["cache_hits"], 1);
+    assert_eq!(second["metrics"]["cache_revalidations"], 1);
+    assert!(
+        observed.lock().unwrap()[1]
+            .to_ascii_lowercase()
+            .contains("if-none-match: \"version-1\"")
+    );
+
+    let mut fresh = request;
+    fresh["connection"]["cache"]["fresh_for_ms"] = json!(60_000);
+    let cached = execute(&engine, fresh).await;
+    assert_eq!(cached["status"], "success");
+    assert_eq!(cached["metrics"]["requests"], 0);
+    assert_eq!(cached["metrics"]["cache_hits"], 1);
+}
+
+#[tokio::test]
+async fn circuit_breaker_opens_after_the_configured_failures() {
+    let (url, server, observed) = recorded_server(vec![
+        (503, r#"{"error":"down"}"#, vec![]),
+        (503, r#"{"error":"down"}"#, vec![]),
+    ])
+    .await;
+    let engine = local_engine();
+    let request = json!({
+        "schema_version": 1,
+        "operation": "test",
+        "connection": {
+            "url": url,
+            "method": "GET",
+            "circuit_breaker": {
+                "enabled": true,
+                "failure_threshold": 2,
+                "recovery_timeout_ms": 60_000
+            }
+        }
+    });
+
+    assert_eq!(
+        execute(&engine, request.clone()).await["errors"][0]["code"],
+        "http_status"
+    );
+    assert_eq!(
+        execute(&engine, request.clone()).await["errors"][0]["code"],
+        "http_status"
+    );
+    let rejected = execute(&engine, request).await;
+    server.await.unwrap();
+
+    assert_eq!(rejected["errors"][0]["code"], "circuit_open");
+    assert_eq!(observed.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn concurrent_enrichment_preserves_input_order() {
+    let (base_url, server) = barrier_server(3).await;
+    let request = json!({
+        "schema_version": 1,
+        "operation": "enrich",
+        "connection": {
+            "url": format!("{base_url}users/{{id}}"),
+            "method": "GET",
+            "parameters": [{
+                "name": "id",
+                "mode": "mapped",
+                "source": "id",
+                "required": true,
+                "location": "path"
+            }]
+        },
+        "input": {"records": [{"id": 1}, {"id": 2}, {"id": 3}]},
+        "options": {
+            "continue_on_error": true,
+            "enrichment_concurrency": 3
+        }
+    });
+
+    let result = timeout(Duration::from_secs(5), execute(&local_engine(), request))
+        .await
+        .expect("enrichment did not issue requests concurrently");
+    server.await.unwrap();
+
+    assert_eq!(result["status"], "success");
+    assert_eq!(
+        result["output"]["records"],
+        json!([
+            {"id": 1, "remote": 1},
+            {"id": 2, "remote": 2},
+            {"id": 3, "remote": 3}
+        ])
+    );
+    assert_eq!(result["metrics"]["requests"], 3);
 }
 
 fn local_engine() -> Engine {
@@ -1224,6 +1388,41 @@ async fn binary_server(
     (format!("http://{address}/"), task)
 }
 
+async fn barrier_server(requests: usize) -> (String, JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let barrier = Arc::new(Barrier::new(requests));
+    let task = tokio::spawn(async move {
+        let mut handlers = Vec::new();
+        for _ in 0..requests {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let barrier = barrier.clone();
+            handlers.push(tokio::spawn(async move {
+                let request = read_request(&mut stream).await;
+                let id = request
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .and_then(|path| path.trim_end_matches('?').rsplit('/').next())
+                    .and_then(|id| id.parse::<u64>().ok())
+                    .unwrap();
+                barrier.wait().await;
+                let body = format!(r#"{{"remote":{id}}}"#);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+                stream.shutdown().await.unwrap();
+            }));
+        }
+        for handler in handlers {
+            handler.await.unwrap();
+        }
+    });
+    (format!("http://{address}/"), task)
+}
+
 async fn read_request(stream: &mut TcpStream) -> String {
     let mut request = Vec::new();
     loop {
@@ -1270,4 +1469,7 @@ async fn read_request(stream: &mut TcpStream) -> String {
     }
     String::from_utf8_lossy(&request).into_owned()
 }
-use std::sync::{Arc, Mutex as StdMutex};
+use std::{
+    sync::{Arc, Mutex as StdMutex},
+    time::Duration,
+};
