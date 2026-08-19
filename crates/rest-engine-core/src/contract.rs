@@ -13,6 +13,7 @@ pub struct EngineConfig {
     pub request_timeout_ms: u64,
     pub max_request_bytes: usize,
     pub max_response_bytes: usize,
+    pub max_file_transfer_bytes: u64,
     pub max_pooled_origins: usize,
     pub pool_max_idle_per_host: usize,
     pub pool_idle_timeout_ms: u64,
@@ -21,6 +22,8 @@ pub struct EngineConfig {
     pub allow_private_networks: bool,
     pub allow_insecure_tls: bool,
     pub allow_proxies: bool,
+    pub allow_file_transfers: bool,
+    pub file_root: Option<String>,
     pub automatic_decompression: bool,
     pub allowed_custom_methods: Vec<String>,
     pub user_agent: String,
@@ -33,6 +36,7 @@ impl Default for EngineConfig {
             request_timeout_ms: 30_000,
             max_request_bytes: 32 * 1024 * 1024,
             max_response_bytes: 32 * 1024 * 1024,
+            max_file_transfer_bytes: 1024 * 1024 * 1024,
             max_pooled_origins: 128,
             pool_max_idle_per_host: 50,
             pool_idle_timeout_ms: 90_000,
@@ -41,6 +45,8 @@ impl Default for EngineConfig {
             allow_private_networks: false,
             allow_insecure_tls: false,
             allow_proxies: false,
+            allow_file_transfers: false,
+            file_root: None,
             automatic_decompression: true,
             allowed_custom_methods: Vec::new(),
             user_agent: format!("rest-engine/{}", env!("CARGO_PKG_VERSION")),
@@ -65,6 +71,8 @@ pub enum ExecutionOperation {
     Test,
     Generate,
     Enrich,
+    Download,
+    Upload,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -576,6 +584,33 @@ pub enum PaginationConfig {
 pub struct ExecutionInput {
     pub params: JsonObject,
     pub records: Vec<JsonObject>,
+    pub file: Option<FileTransferInput>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default)]
+pub struct FileTransferInput {
+    pub path: String,
+    pub overwrite: bool,
+    pub max_bytes: Option<u64>,
+    pub expected_sha256: Option<String>,
+    pub content_type: Option<String>,
+    pub filename: Option<String>,
+    pub field_name: String,
+}
+
+impl Default for FileTransferInput {
+    fn default() -> Self {
+        Self {
+            path: String::new(),
+            overwrite: false,
+            max_bytes: None,
+            expected_sha256: None,
+            content_type: None,
+            filename: None,
+            field_name: "file".to_owned(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -626,8 +661,27 @@ pub enum ExecutionStatus {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ExecutionOutput {
     None,
-    Json { value: Value },
-    Records { records: Vec<JsonObject> },
+    Json {
+        value: Value,
+    },
+    Records {
+        records: Vec<JsonObject>,
+    },
+    File {
+        direction: FileTransferDirection,
+        path: String,
+        bytes_transferred: u64,
+        sha256: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        response: Option<Value>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FileTransferDirection {
+    Download,
+    Upload,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -639,6 +693,8 @@ pub struct ExecutionMetrics {
     pub rate_limit_wait_ms: u64,
     pub input_records: usize,
     pub output_records: usize,
+    pub bytes_downloaded: u64,
+    pub bytes_uploaded: u64,
     pub elapsed_ms: u64,
 }
 

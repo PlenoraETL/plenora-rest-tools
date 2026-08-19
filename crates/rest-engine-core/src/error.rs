@@ -27,6 +27,12 @@ pub enum EngineError {
     ResponseTooLarge { limit_bytes: usize },
     #[error("request body exceeds the {limit_bytes} byte limit")]
     RequestTooLarge { limit_bytes: usize },
+    #[error("file transfer exceeds the {limit_bytes} byte limit")]
+    FileTooLarge { limit_bytes: u64 },
+    #[error("file operation failed: {0}")]
+    FileIo(String),
+    #[error("SHA-256 checksum mismatch: expected {expected}, received {actual}")]
+    ChecksumMismatch { expected: String, actual: String },
     #[error("HTTP request failed with status {status}")]
     HttpStatus {
         status: u16,
@@ -93,6 +99,9 @@ impl EngineError {
             Self::Transport(_) => "transport_error",
             Self::ResponseTooLarge { .. } => "response_too_large",
             Self::RequestTooLarge { .. } => "request_too_large",
+            Self::FileTooLarge { .. } => "file_too_large",
+            Self::FileIo(_) => "file_io",
+            Self::ChecksumMismatch { .. } => "checksum_mismatch",
             Self::HttpStatus { .. } => "http_status",
             Self::InvalidResponse(_) => "invalid_response",
             Self::Application(_) => "application_error",

@@ -9,6 +9,7 @@ class EngineConfig(TypedDict, total=False):
     request_timeout_ms: int
     max_request_bytes: int
     max_response_bytes: int
+    max_file_transfer_bytes: int
     max_pooled_origins: int
     pool_max_idle_per_host: int
     pool_idle_timeout_ms: int
@@ -17,6 +18,8 @@ class EngineConfig(TypedDict, total=False):
     allow_private_networks: bool
     allow_insecure_tls: bool
     allow_proxies: bool
+    allow_file_transfers: bool
+    file_root: Optional[str]
     automatic_decompression: bool
     allowed_custom_methods: List[str]
     user_agent: str
@@ -73,7 +76,28 @@ class ExecutionMetrics(TypedDict):
     rate_limit_wait_ms: int
     input_records: int
     output_records: int
+    bytes_downloaded: int
+    bytes_uploaded: int
     elapsed_ms: int
+
+
+class FileTransferInput(TypedDict, total=False):
+    path: str
+    overwrite: bool
+    max_bytes: Optional[int]
+    expected_sha256: Optional[str]
+    content_type: Optional[str]
+    filename: Optional[str]
+    field_name: str
+
+
+class FileOutput(TypedDict, total=False):
+    type: Literal["file"]
+    direction: Literal["download", "upload"]
+    path: str
+    bytes_transferred: int
+    sha256: str
+    response: Any
 
 
 class ExecutionOptions(TypedDict, total=False):

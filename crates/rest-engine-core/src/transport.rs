@@ -2,13 +2,15 @@ use std::{
     collections::{BTreeMap, HashMap},
     hash::{DefaultHasher, Hash, Hasher},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    path::{Path, PathBuf},
     sync::Arc,
+    sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use futures_util::StreamExt;
 use reqwest::{
-    Certificate, Client, Identity, Method, Proxy, Url,
+    Body, Certificate, Client, Identity, Method, Proxy, Url,
     header::{
         CONTENT_LENGTH, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, LOCATION, RETRY_AFTER,
     },
@@ -16,11 +18,15 @@ use reqwest::{
     redirect::Policy,
 };
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use tokio::{
+    fs::{self, OpenOptions},
+    io::AsyncWriteExt,
     net::lookup_host,
     sync::{Mutex, OwnedSemaphorePermit, Semaphore},
     time::sleep,
 };
+use tokio_util::io::ReaderStream;
 use url::Host;
 
 use crate::{
@@ -28,12 +34,27 @@ use crate::{
     ProxyConfig, RetryPolicy, TlsConfig,
 };
 
+static DOWNLOAD_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
 #[derive(Clone)]
 pub(crate) struct PreparedFile {
     pub field_name: String,
     pub filename: String,
     pub content_type: Option<String>,
-    pub data: Vec<u8>,
+    pub source: PreparedFileSource,
+}
+
+#[derive(Clone)]
+pub(crate) enum PreparedFileSource {
+    Bytes(Vec<u8>),
+    Path { path: PathBuf, length: u64 },
+}
+
+#[derive(Clone)]
+pub(crate) struct PreparedStream {
+    pub path: PathBuf,
+    pub length: u64,
+    pub content_type: Option<String>,
 }
 
 #[derive(Clone)]
@@ -46,6 +67,7 @@ pub(crate) enum PreparedBody {
         files: Vec<PreparedFile>,
     },
     Raw(String),
+    Stream(PreparedStream),
 }
 
 #[derive(Clone)]
@@ -75,6 +97,35 @@ pub(crate) struct ResponseData {
     pub rate_limit_wait_ms: u64,
     pub headers: BTreeMap<String, String>,
     retry_after_ms: Option<u64>,
+}
+
+pub(crate) struct DownloadTarget {
+    pub path: PathBuf,
+    pub overwrite: bool,
+    pub max_bytes: u64,
+    pub expected_sha256: Option<String>,
+}
+
+pub(crate) struct DownloadData {
+    pub status: u16,
+    pub final_url: Url,
+    pub attempts: u32,
+    pub network_requests: u64,
+    pub auth_requests: u64,
+    pub auth_retries: u64,
+    pub rate_limit_wait_ms: u64,
+    pub headers: BTreeMap<String, String>,
+    pub path: PathBuf,
+    pub bytes_written: u64,
+    pub sha256: String,
+}
+
+struct PendingResponse {
+    response: reqwest::Response,
+    final_url: Url,
+    network_requests: u64,
+    rate_limit_wait_ms: u64,
+    permit: OwnedSemaphorePermit,
 }
 
 #[derive(Clone)]
@@ -133,6 +184,44 @@ impl Transport {
     }
 
     pub async fn execute(&self, mut request: PreparedRequest) -> Result<ResponseData, EngineError> {
+        self.validate_request(&request)?;
+        let auth_stats = self.resolve_auth(&mut request).await?;
+
+        let mut response = self.execute_authenticated(&request).await?;
+        response.auth_requests = auth_stats.network_requests;
+        response.auth_retries = auth_stats.retries;
+        response.network_requests = response
+            .network_requests
+            .saturating_add(auth_stats.network_requests);
+        response.rate_limit_wait_ms = response
+            .rate_limit_wait_ms
+            .saturating_add(auth_stats.rate_limit_wait_ms);
+        Ok(response)
+    }
+
+    pub async fn download(
+        &self,
+        mut request: PreparedRequest,
+        target: &DownloadTarget,
+        success_statuses: &[u16],
+    ) -> Result<DownloadData, EngineError> {
+        self.validate_request(&request)?;
+        let auth_stats = self.resolve_auth(&mut request).await?;
+        let mut response = self
+            .download_authenticated(&request, target, success_statuses)
+            .await?;
+        response.auth_requests = auth_stats.network_requests;
+        response.auth_retries = auth_stats.retries;
+        response.network_requests = response
+            .network_requests
+            .saturating_add(auth_stats.network_requests);
+        response.rate_limit_wait_ms = response
+            .rate_limit_wait_ms
+            .saturating_add(auth_stats.rate_limit_wait_ms);
+        Ok(response)
+    }
+
+    fn validate_request(&self, request: &PreparedRequest) -> Result<(), EngineError> {
         if request.method.is_custom()
             && !self
                 .config
@@ -145,29 +234,25 @@ impl Transport {
                 request.method.as_str()
             )));
         }
-        let auth_stats = if matches!(
+        Ok(())
+    }
+
+    async fn resolve_auth(
+        &self,
+        request: &mut PreparedRequest,
+    ) -> Result<RequestStats, EngineError> {
+        if matches!(
             &request.auth,
             AuthConfig::OAuth2ClientCredentials { .. }
                 | AuthConfig::OAuth2Password { .. }
                 | AuthConfig::ArcgisToken { .. }
         ) {
-            let (token, stats) = self.oauth_token(&request).await?;
+            let (token, stats) = self.oauth_token(request).await?;
             request.auth = AuthConfig::Bearer { token };
-            stats
+            Ok(stats)
         } else {
-            RequestStats::default()
-        };
-
-        let mut response = self.execute_authenticated(&request).await?;
-        response.auth_requests = auth_stats.network_requests;
-        response.auth_retries = auth_stats.retries;
-        response.network_requests = response
-            .network_requests
-            .saturating_add(auth_stats.network_requests);
-        response.rate_limit_wait_ms = response
-            .rate_limit_wait_ms
-            .saturating_add(auth_stats.rate_limit_wait_ms);
-        Ok(response)
+            Ok(RequestStats::default())
+        }
     }
 
     async fn execute_authenticated(
@@ -213,6 +298,65 @@ impl Transport {
 
         Err(EngineError::Runtime(
             "retry loop terminated unexpectedly".to_owned(),
+        ))
+    }
+
+    async fn download_authenticated(
+        &self,
+        request: &PreparedRequest,
+        target: &DownloadTarget,
+        success_statuses: &[u16],
+    ) -> Result<DownloadData, EngineError> {
+        let max_attempts = request.retry.max_attempts.max(1);
+        let can_retry = request.method.is_idempotent() || request.retry.retry_non_idempotent;
+        let mut network_requests = 0_u64;
+        let mut rate_limit_wait_ms = 0_u64;
+
+        for attempt in 1..=max_attempts {
+            let pending = match self.send_once_response(request).await {
+                Ok(pending) => pending,
+                Err(error)
+                    if can_retry
+                        && attempt < max_attempts
+                        && is_retryable_transport_error(&error) =>
+                {
+                    sleep(retry_delay(&request.retry, attempt, None)).await;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            network_requests = network_requests.saturating_add(pending.network_requests);
+            rate_limit_wait_ms = rate_limit_wait_ms.saturating_add(pending.rate_limit_wait_ms);
+            let status = pending.response.status().as_u16();
+            let retry_after_ms = response_retry_after(&pending.response);
+            if can_retry
+                && request.retry.retry_on_status.contains(&status)
+                && attempt < max_attempts
+            {
+                sleep(retry_delay(&request.retry, attempt, retry_after_ms)).await;
+                continue;
+            }
+
+            match self.write_download(pending, target, success_statuses).await {
+                Ok(mut response) => {
+                    response.attempts = attempt;
+                    response.network_requests = network_requests;
+                    response.rate_limit_wait_ms = rate_limit_wait_ms;
+                    return Ok(response);
+                }
+                Err(error)
+                    if can_retry
+                        && attempt < max_attempts
+                        && is_retryable_transport_error(&error) =>
+                {
+                    sleep(retry_delay(&request.retry, attempt, None)).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+
+        Err(EngineError::Runtime(
+            "download retry loop terminated unexpectedly".to_owned(),
         ))
     }
 
@@ -340,6 +484,14 @@ impl Transport {
     }
 
     async fn send_once(&self, request: &PreparedRequest) -> Result<ResponseData, EngineError> {
+        let pending = self.send_once_response(request).await?;
+        self.read_response(pending).await
+    }
+
+    async fn send_once_response(
+        &self,
+        request: &PreparedRequest,
+    ) -> Result<PendingResponse, EngineError> {
         let origin = request.url.clone();
         let mut url = request.url.clone();
         let mut network_requests = 0_u64;
@@ -376,12 +528,13 @@ impl Transport {
                 PreparedBody::Json(value) => builder.json(value),
                 PreparedBody::Form(values) => builder.form(values),
                 PreparedBody::Multipart { fields, files } => {
-                    builder.multipart(multipart_form(fields, files)?)
+                    builder.multipart(multipart_form(fields, files).await?)
                 }
                 PreparedBody::Raw(value) => builder.body(value.clone()),
+                PreparedBody::Stream(stream) => stream_body(builder, stream).await?,
             };
 
-            let (_permit, waited_ms) = self.admit_request(request.requests_per_second).await?;
+            let (permit, waited_ms) = self.admit_request(request.requests_per_second).await?;
             network_requests = network_requests.saturating_add(1);
             rate_limit_wait_ms = rate_limit_wait_ms.saturating_add(waited_ms);
             let response = builder.send().await.map_err(map_reqwest_error)?;
@@ -418,9 +571,13 @@ impl Transport {
                 continue;
             }
 
-            return self
-                .read_response(response, url, network_requests, rate_limit_wait_ms)
-                .await;
+            return Ok(PendingResponse {
+                response,
+                final_url: url,
+                network_requests,
+                rate_limit_wait_ms,
+                permit,
+            });
         }
 
         Err(EngineError::Runtime(
@@ -428,13 +585,14 @@ impl Transport {
         ))
     }
 
-    async fn read_response(
-        &self,
-        response: reqwest::Response,
-        final_url: Url,
-        network_requests: u64,
-        rate_limit_wait_ms: u64,
-    ) -> Result<ResponseData, EngineError> {
+    async fn read_response(&self, pending: PendingResponse) -> Result<ResponseData, EngineError> {
+        let PendingResponse {
+            response,
+            final_url,
+            network_requests,
+            rate_limit_wait_ms,
+            permit: _permit,
+        } = pending;
         if response
             .headers()
             .get(CONTENT_LENGTH)
@@ -448,24 +606,8 @@ impl Transport {
         }
 
         let status = response.status().as_u16();
-        let retry_after_ms = response
-            .headers()
-            .get(RETRY_AFTER)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| parse_retry_after(value, SystemTime::now()));
-        let mut headers = BTreeMap::<String, String>::new();
-        for (name, value) in response.headers() {
-            let Ok(value) = value.to_str() else {
-                continue;
-            };
-            headers
-                .entry(name.as_str().to_owned())
-                .and_modify(|existing| {
-                    existing.push_str(", ");
-                    existing.push_str(value);
-                })
-                .or_insert_with(|| value.to_owned());
-        }
+        let retry_after_ms = response_retry_after(&response);
+        let headers = response_headers(&response);
         let mut body = Vec::new();
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
@@ -489,6 +631,104 @@ impl Transport {
             rate_limit_wait_ms,
             headers,
             retry_after_ms,
+        })
+    }
+
+    async fn write_download(
+        &self,
+        pending: PendingResponse,
+        target: &DownloadTarget,
+        success_statuses: &[u16],
+    ) -> Result<DownloadData, EngineError> {
+        let PendingResponse {
+            response,
+            final_url,
+            network_requests,
+            rate_limit_wait_ms,
+            permit: _permit,
+        } = pending;
+        let status = response.status().as_u16();
+        let headers = response_headers(&response);
+        if !(200..300).contains(&status) && !success_statuses.contains(&status) {
+            return Err(EngineError::HttpStatus {
+                status,
+                body_preview: response_body_preview(response).await?,
+            });
+        }
+        if response
+            .headers()
+            .get(CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok())
+            .is_some_and(|length| length > target.max_bytes)
+        {
+            return Err(EngineError::FileTooLarge {
+                limit_bytes: target.max_bytes,
+            });
+        }
+        if !target.overwrite && fs::try_exists(&target.path).await.map_err(file_io)? {
+            return Err(EngineError::FileIo(format!(
+                "destination '{}' already exists",
+                target.path.display()
+            )));
+        }
+
+        let (temporary, mut file) = create_download_file(&target.path).await?;
+        let transfer = async {
+            let mut bytes_written = 0_u64;
+            let mut digest = Sha256::new();
+            let mut stream = response.bytes_stream();
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk.map_err(map_reqwest_error)?;
+                let chunk_length = u64::try_from(chunk.len()).map_err(|_| {
+                    EngineError::Runtime("download chunk length overflowed u64".to_owned())
+                })?;
+                if bytes_written.saturating_add(chunk_length) > target.max_bytes {
+                    return Err(EngineError::FileTooLarge {
+                        limit_bytes: target.max_bytes,
+                    });
+                }
+                file.write_all(&chunk).await.map_err(file_io)?;
+                digest.update(&chunk);
+                bytes_written = bytes_written.saturating_add(chunk_length);
+            }
+            file.flush().await.map_err(file_io)?;
+            file.sync_all().await.map_err(file_io)?;
+            drop(file);
+
+            let sha256 = format!("{:x}", digest.finalize());
+            if let Some(expected) = &target.expected_sha256 {
+                if !sha256.eq_ignore_ascii_case(expected) {
+                    return Err(EngineError::ChecksumMismatch {
+                        expected: expected.clone(),
+                        actual: sha256,
+                    });
+                }
+            }
+            persist_download(&temporary, &target.path, target.overwrite).await?;
+            Ok((bytes_written, sha256))
+        }
+        .await;
+
+        let (bytes_written, sha256) = match transfer {
+            Ok(result) => result,
+            Err(error) => {
+                let _ = fs::remove_file(&temporary).await;
+                return Err(error);
+            }
+        };
+        Ok(DownloadData {
+            status,
+            final_url,
+            attempts: 1,
+            network_requests,
+            auth_requests: 0,
+            auth_retries: 0,
+            rate_limit_wait_ms,
+            headers,
+            path: target.path.clone(),
+            bytes_written,
+            sha256,
         })
     }
 
@@ -709,22 +949,33 @@ fn request_headers(request: &PreparedRequest) -> Result<HeaderMap, EngineError> 
         headers.insert(name, value);
     }
 
+    if matches!(request.body, PreparedBody::Multipart { .. }) && headers.contains_key(CONTENT_TYPE)
+    {
+        return Err(EngineError::InvalidHeader(
+            "Content-Type must be generated by the multipart encoder".to_owned(),
+        ));
+    }
+    if matches!(
+        request.body,
+        PreparedBody::Multipart { .. } | PreparedBody::Stream(_)
+    ) && headers.contains_key(CONTENT_LENGTH)
+    {
+        return Err(EngineError::InvalidHeader(
+            "Content-Length must be generated by the streaming encoder".to_owned(),
+        ));
+    }
     if !headers.contains_key(CONTENT_TYPE) {
-        let content_type = match request.body {
+        let content_type = match &request.body {
             PreparedBody::Json(_) => Some("application/json"),
             PreparedBody::Form(_) => Some("application/x-www-form-urlencoded"),
-            PreparedBody::Multipart { .. } => {
-                if headers.contains_key(CONTENT_TYPE) {
-                    return Err(EngineError::InvalidHeader(
-                        "Content-Type must be generated by the multipart encoder".to_owned(),
-                    ));
-                }
-                None
-            }
+            PreparedBody::Multipart { .. } => None,
+            PreparedBody::Stream(stream) => stream.content_type.as_deref(),
             PreparedBody::Raw(_) | PreparedBody::None => None,
         };
         if let Some(content_type) = content_type {
-            headers.insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
+            let content_type = HeaderValue::from_str(content_type)
+                .map_err(|_| EngineError::InvalidHeader("content-type".to_owned()))?;
+            headers.insert(CONTENT_TYPE, content_type);
         }
     }
     Ok(headers)
@@ -741,7 +992,7 @@ fn apply_query_auth(url: &mut Url, auth: &AuthConfig) {
     }
 }
 
-fn multipart_form(
+async fn multipart_form(
     fields: &[(String, String)],
     files: &[PreparedFile],
 ) -> Result<Form, EngineError> {
@@ -750,7 +1001,15 @@ fn multipart_form(
         form = form.text(name.clone(), value.clone());
     }
     for file in files {
-        let mut part = Part::bytes(file.data.clone()).file_name(file.filename.clone());
+        let part = match &file.source {
+            PreparedFileSource::Bytes(data) => Part::bytes(data.clone()),
+            PreparedFileSource::Path { path, length } => {
+                let source = fs::File::open(path).await.map_err(file_io)?;
+                let body = Body::wrap_stream(ReaderStream::new(source));
+                Part::stream_with_length(body, *length)
+            }
+        };
+        let mut part = part.file_name(file.filename.clone());
         if let Some(content_type) = &file.content_type {
             part = part.mime_str(content_type).map_err(|_| {
                 EngineError::InvalidInput(format!(
@@ -762,6 +1021,119 @@ fn multipart_form(
         form = form.part(file.field_name.clone(), part);
     }
     Ok(form)
+}
+
+async fn stream_body(
+    builder: reqwest::RequestBuilder,
+    stream: &PreparedStream,
+) -> Result<reqwest::RequestBuilder, EngineError> {
+    let source = fs::File::open(&stream.path).await.map_err(file_io)?;
+    let body = Body::wrap_stream(ReaderStream::new(source));
+    Ok(builder.header(CONTENT_LENGTH, stream.length).body(body))
+}
+
+fn response_headers(response: &reqwest::Response) -> BTreeMap<String, String> {
+    let mut headers = BTreeMap::<String, String>::new();
+    for (name, value) in response.headers() {
+        let Ok(value) = value.to_str() else {
+            continue;
+        };
+        headers
+            .entry(name.as_str().to_owned())
+            .and_modify(|existing| {
+                existing.push_str(", ");
+                existing.push_str(value);
+            })
+            .or_insert_with(|| value.to_owned());
+    }
+    headers
+}
+
+fn response_retry_after(response: &reqwest::Response) -> Option<u64> {
+    response
+        .headers()
+        .get(RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| parse_retry_after(value, SystemTime::now()))
+}
+
+async fn response_body_preview(response: reqwest::Response) -> Result<Option<String>, EngineError> {
+    const PREVIEW_BYTES: usize = 2_048;
+    let mut body = Vec::new();
+    let mut stream = response.bytes_stream();
+    while body.len() < PREVIEW_BYTES {
+        let Some(chunk) = stream.next().await else {
+            break;
+        };
+        let chunk = chunk.map_err(map_reqwest_error)?;
+        let remaining = PREVIEW_BYTES.saturating_sub(body.len());
+        body.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+    }
+    if body.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(String::from_utf8_lossy(&body).into_owned()))
+    }
+}
+
+fn download_temporary_path(target: &Path) -> PathBuf {
+    let sequence = DOWNLOAD_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let filename = target
+        .file_name()
+        .map(|value| value.to_string_lossy())
+        .unwrap_or_else(|| "download".into());
+    target.with_file_name(format!(
+        ".{filename}.rest-engine-{}-{sequence}.part",
+        std::process::id()
+    ))
+}
+
+async fn create_download_file(target: &Path) -> Result<(PathBuf, fs::File), EngineError> {
+    for _ in 0..16 {
+        let temporary = download_temporary_path(target);
+        match OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temporary)
+            .await
+        {
+            Ok(file) => return Ok((temporary, file)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(file_io(error)),
+        }
+    }
+    Err(EngineError::FileIo(
+        "could not allocate a unique temporary download file".to_owned(),
+    ))
+}
+
+async fn persist_download(
+    temporary: &Path,
+    target: &Path,
+    overwrite: bool,
+) -> Result<(), EngineError> {
+    if !overwrite {
+        fs::hard_link(temporary, target).await.map_err(file_io)?;
+        fs::remove_file(temporary).await.map_err(file_io)?;
+        return Ok(());
+    }
+    match fs::rename(temporary, target).await {
+        Ok(()) => Ok(()),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::PermissionDenied
+            ) && fs::try_exists(target).await.map_err(file_io)? =>
+        {
+            fs::remove_file(target).await.map_err(file_io)?;
+            fs::rename(temporary, target).await.map_err(file_io)
+        }
+        Err(error) => Err(file_io(error)),
+    }
+}
+
+fn file_io(error: std::io::Error) -> EngineError {
+    EngineError::FileIo(error.to_string())
 }
 
 type TokenRequestParts = (String, BTreeMap<String, String>, AuthConfig, bool, u64);
