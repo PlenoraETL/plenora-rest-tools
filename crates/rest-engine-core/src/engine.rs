@@ -130,6 +130,12 @@ impl Engine {
         if let Err(error) = self.admit_idempotency(&request) {
             return failed_result(error);
         }
+        if control
+            .deadline
+            .is_some_and(|deadline| deadline <= Instant::now())
+        {
+            return failed_result(EngineError::Timeout);
+        }
         let active_jobs = Arc::new(Mutex::new(BTreeMap::new()));
         let deadline = control.deadline.map(tokio::time::Instant::from_std);
         let execution = ACTIVE_ASYNC_JOBS.scope(active_jobs.clone(), self.execute_inner(request));

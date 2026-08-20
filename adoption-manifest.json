@@ -11,7 +11,7 @@
       "name": "plenora-rest-core",
       "surface": "rust",
       "version": "0.1.0",
-      "digest": "sha256:33d6274961e5aa9e795b5a932cbf0e6adff637f0ba30e9e654a6655c5188d324",
+      "digest": "sha256:55df3dd06609ff0e5b53a517c68a708e75153fffdec074f46310b764d55529e1",
       "verification": [
         "cargo package --package plenora-rest-core --allow-dirty",
         "cargo test -p plenora-rest-core --test public_surface",
@@ -22,7 +22,7 @@
       "name": "plenora-rest",
       "surface": "python_sdk",
       "version": "0.1.0",
-      "digest": "sha256:58ee0430ed16a8cd774eb3890900fd90843d0cff8081e0856f02a5764e24ced6",
+      "digest": "sha256:ff7ab8a854d339aff47a45d1298dc193c436deb1c0c4c786bd6c91886503d096",
       "api_modes": ["sync"],
       "verification": [
         "maturin build --release",
@@ -33,7 +33,7 @@
       "name": "plenora.rest-tools",
       "surface": "runtime",
       "version": "0.1.0",
-      "digest": "sha256:33d6274961e5aa9e795b5a932cbf0e6adff637f0ba30e9e654a6655c5188d324",
+      "digest": "sha256:55df3dd06609ff0e5b53a517c68a708e75153fffdec074f46310b764d55529e1",
       "verification": [
         "cargo test -p plenora-rest-core --test runtime_binding"
       ]
