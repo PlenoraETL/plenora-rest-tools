@@ -1,6 +1,7 @@
-from ._engine import Engine, RestEngineError
+from ._engine import CancellationToken, Engine, PlenoraError, version
 from ._native import SCHEMA_VERSION, __version__
 from .types import (
+    CapabilityDocument,
     ConnectionConfig,
     EngineConfig,
     ExecutionResult,
@@ -9,13 +10,16 @@ from .types import (
 )
 
 __all__ = [
+    "CancellationToken",
+    "CapabilityDocument",
     "ConnectionConfig",
     "Engine",
     "EngineConfig",
     "ExecutionResult",
     "FileOutput",
     "FileTransferInput",
-    "RestEngineError",
+    "PlenoraError",
     "SCHEMA_VERSION",
     "__version__",
+    "version",
 ]

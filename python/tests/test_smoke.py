@@ -1,4 +1,5 @@
 import hashlib
+import importlib.metadata
 import pathlib
 import socket
 import tempfile
@@ -7,7 +8,7 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import List, Optional, Tuple
 
-from rest_engine import Engine, RestEngineError
+from plenora_rest import CancellationToken, Engine, PlenoraError, version
 
 
 class JsonHandler(BaseHTTPRequestHandler):
@@ -122,14 +123,51 @@ class PythonSdkSmokeTest(unittest.TestCase):
 
     def test_invalid_contract_raises_the_public_error(self) -> None:
         engine = Engine()
-        with self.assertRaises(RestEngineError) as context:
+        with self.assertRaises(PlenoraError) as context:
             engine.test(
                 {
                     "url": "https://api.example.test/resource",
                     "method": "BAD METHOD",
                 }
             )
-        self.assertEqual(context.exception.code, "invalid_input")
+        self.assertEqual(context.exception.code, "INVALID_INPUT")
+        self.assertEqual(context.exception.category, "invalid_configuration")
+        self.assertEqual(context.exception.remote_effect, "none")
+
+    def test_capabilities_version_lifecycle_and_cancellation(self) -> None:
+        engine = Engine()
+        capabilities = engine.capabilities()
+        self.assertEqual(capabilities["schema_version"], 2)
+        self.assertEqual(capabilities["component"], "plenora-rest-tools")
+        self.assertEqual(
+            [operation["id"] for operation in capabilities["operations"]],
+            [
+                "rest.test",
+                "rest.generate",
+                "rest.enrich",
+                "rest.download",
+                "rest.upload",
+            ],
+        )
+        self.assertEqual(version(), importlib.metadata.version("plenora-rest"))
+
+        token = CancellationToken()
+        token.cancel()
+        result = engine.test(
+            {"url": "https://api.example.test/resource", "method": "GET"},
+            cancellation=token,
+        )
+        self.assertEqual(result["errors"][0]["category"], "cancelled")
+        self.assertEqual(result["errors"][0]["remote_effect"], "unknown")
+        self.assertEqual(result["errors"][0]["retry"]["kind"], "quarantine")
+
+        engine.close()
+        engine.close()
+        with self.assertRaises(PlenoraError) as context:
+            engine.test(
+                {"url": "https://api.example.test/resource", "method": "GET"}
+            )
+        self.assertEqual(context.exception.code, "ENGINE_CLOSED")
 
     def test_streaming_download_and_upload_convenience_methods(self) -> None:
         server = ThreadingHTTPServer(("127.0.0.1", 0), JsonHandler)
@@ -209,14 +247,14 @@ class PythonSdkSmokeTest(unittest.TestCase):
 
                 self.assertEqual(downloaded["status"], "success")
                 self.assertEqual(
-                    downloaded["output"]["sha256"],
+                    downloaded["output"]["checksum"]["value"],
                     hashlib.sha256(destination.read_bytes()).hexdigest(),
                 )
                 self.assertEqual(async_downloaded["status"], "success")
                 self.assertEqual(async_downloaded["metrics"]["requests"], 3)
                 self.assertEqual(async_downloaded["metrics"]["poll_requests"], 2)
                 self.assertEqual(
-                    async_downloaded["output"]["sha256"],
+                    async_downloaded["output"]["checksum"]["value"],
                     hashlib.sha256(async_destination.read_bytes()).hexdigest(),
                 )
                 self.assertEqual(resumed["status"], "success")
@@ -232,6 +270,8 @@ class PythonSdkSmokeTest(unittest.TestCase):
                 self.assertEqual(uploaded["status"], "success")
                 self.assertEqual(uploaded["output"]["response"]["uploaded"], True)
                 self.assertEqual(JsonHandler.uploaded, source_bytes)
+                self.assertNotIn("path", downloaded["output"])
+                self.assertNotIn(str(destination), str(downloaded))
         finally:
             server.shutdown()
             server.server_close()

@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.plenora.dev/components/rest/plenora-rest-file-transfer-result-v1.schema.json",
+  "title": "Plenora REST file transfer result v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "status", "output", "metrics", "responses", "errors"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "status": {
+      "$ref": "plenora-rest-execution-result-v1.schema.json#/$defs/status"
+    },
+    "output": {
+      "oneOf": [
+        {
+          "$ref": "plenora-rest-execution-result-v1.schema.json#/$defs/noneOutput"
+        },
+        {"$ref": "#/$defs/fileOutput"}
+      ]
+    },
+    "metrics": {
+      "$ref": "plenora-rest-execution-result-v1.schema.json#/$defs/metrics"
+    },
+    "responses": {
+      "type": "array",
+      "items": {
+        "$ref": "plenora-rest-execution-result-v1.schema.json#/$defs/httpResponse"
+      }
+    },
+    "errors": {
+      "type": "array",
+      "items": {
+        "$ref": "plenora-rest-execution-result-v1.schema.json#/$defs/error"
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "status": {"enum": ["success", "partial"]}
+        },
+        "required": ["status"]
+      },
+      "then": {
+        "properties": {
+          "output": {"$ref": "#/$defs/fileOutput"}
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {"const": "failed"}
+        },
+        "required": ["status"]
+      },
+      "then": {
+        "properties": {
+          "output": {
+            "$ref": "plenora-rest-execution-result-v1.schema.json#/$defs/noneOutput"
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "fileOutput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "direction",
+        "artifact_reference",
+        "bytes_transferred",
+        "checksum"
+      ],
+      "properties": {
+        "type": {"const": "file"},
+        "direction": {"enum": ["download", "upload"]},
+        "artifact_reference": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "bytes_transferred": {"type": "integer", "minimum": 0},
+        "checksum": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["algorithm", "value"],
+          "properties": {
+            "algorithm": {"const": "sha256"},
+            "value": {
+              "type": "string",
+              "pattern": "^[A-Fa-f0-9]{64}$"
+            }
+          }
+        },
+        "media_type": {
+          "type": "string",
+          "maxLength": 1024
+        },
+        "response": {}
+      }
+    }
+  }
+}

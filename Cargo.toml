@@ -10,7 +10,8 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
-authors = ["Rest Engine contributors"]
+authors = ["PlenoraETL contributors"]
+repository = "https://github.com/PlenoraETL/plenora-rest-tools"
 
 [workspace.dependencies]
 base64 = "0.22"
@@ -25,6 +26,8 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
 thiserror = "2.0"
-tokio = { version = "1.0", features = ["fs", "io-util", "net", "rt-multi-thread", "sync", "time"] }
-tokio-util = { version = "0.7", features = ["io"] }
+time = { version = "0.3", features = ["parsing"] }
+tokio = { version = "1.0", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["io", "rt"] }
 url = "2.5"
+uuid = { version = "1.18", features = ["v4"] }

@@ -68,6 +68,7 @@ class ConnectionConfig(TypedDict, total=False):
     method: str
     headers: Dict[str, str]
     auth: JsonObject
+    credential_ref: Optional[str]
     parameters: List[ParameterSpec]
     static_parameters: JsonObject
     request: JsonObject
@@ -85,13 +86,26 @@ class ConnectionConfig(TypedDict, total=False):
     proxy: Optional[JsonObject]
 
 
+class RetryAdvice(TypedDict):
+    kind: Literal[
+        "never",
+        "quarantine",
+        "safe",
+        "requires_idempotency_key",
+        "requires_recovery",
+        "after",
+    ]
+
+
 class ExecutionError(TypedDict, total=False):
+    category: str
+    phase: str
+    remote_effect: str
+    retry: RetryAdvice
     code: str
     message: str
-    retriable: bool
     input_index: int
-    http_status: int
-    body_preview: str
+    details: JsonObject
 
 
 class ExecutionMetrics(TypedDict):
@@ -109,8 +123,14 @@ class ExecutionMetrics(TypedDict):
     elapsed_ms: int
 
 
+class ArtifactReference(TypedDict):
+    reference: str
+
+
 class FileTransferInput(TypedDict, total=False):
     path: str
+    artifact_source: ArtifactReference
+    artifact_sink: ArtifactReference
     overwrite: bool
     resume: bool
     max_bytes: Optional[int]
@@ -120,12 +140,18 @@ class FileTransferInput(TypedDict, total=False):
     field_name: str
 
 
+class IntegrityMetadata(TypedDict):
+    algorithm: Literal["sha256"]
+    value: str
+
+
 class FileOutput(TypedDict, total=False):
     type: Literal["file"]
     direction: Literal["download", "upload"]
-    path: str
+    artifact_reference: str
     bytes_transferred: int
-    sha256: str
+    checksum: IntegrityMetadata
+    media_type: Optional[str]
     response: Any
 
 
@@ -134,6 +160,7 @@ class ExecutionOptions(TypedDict, total=False):
     capture_response_metadata: bool
     response_headers: List[str]
     enrichment_concurrency: int
+    deadline: Optional[str]
 
 
 class HttpResponseMetadata(TypedDict):
@@ -150,3 +177,41 @@ class ExecutionResult(TypedDict):
     metrics: ExecutionMetrics
     responses: List[HttpResponseMetadata]
     errors: List[ExecutionError]
+
+
+class CapabilityInterface(TypedDict):
+    kind: Literal["rust", "python_sdk", "runtime"]
+    contract: str
+    version: int
+    artifact: str
+
+
+class CapabilityPayload(TypedDict):
+    contract: str
+    content_types: List[str]
+
+
+class CapabilityControls(TypedDict):
+    cancellation: bool
+    deadline: bool
+    idempotency_key: bool
+
+
+class OperationCapability(TypedDict):
+    id: str
+    version: int
+    status: Literal["available"]
+    surfaces: List[Literal["rust", "python_sdk", "runtime"]]
+    input: CapabilityPayload
+    output: CapabilityPayload
+    side_effect: Literal["remote"]
+    controls: CapabilityControls
+    attributes: JsonObject
+
+
+class CapabilityDocument(TypedDict):
+    schema_version: Literal[2]
+    component: Literal["plenora-rest-tools"]
+    component_version: str
+    interfaces: List[CapabilityInterface]
+    operations: List[OperationCapability]

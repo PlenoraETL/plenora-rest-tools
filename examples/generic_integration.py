@@ -1,4 +1,4 @@
-from rest_engine import Engine
+from plenora_rest import Engine
 
 
 engine = Engine()

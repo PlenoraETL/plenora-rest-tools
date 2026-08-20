@@ -1,0 +1,111 @@
+{
+  "schema_version": 4,
+  "component": "plenora-rest-tools",
+  "contracts_source": {
+    "repository": "https://github.com/PlenoraETL/plenora-contracts.git",
+    "revision": "e0484e54c96c5441ea09f44a2419bcabbe7f7242"
+  },
+  "profile": "plenora-rest-tools-profile-v1",
+  "artifacts": [
+    {
+      "name": "plenora-rest-core",
+      "surface": "rust",
+      "version": "0.1.0",
+      "digest": "sha256:55a09ca4a0411a35fe3a9c40890d31a724108f56ed51fccb1c54e11ecf7649f7",
+      "verification": [
+        "cargo package --package plenora-rest-core --allow-dirty",
+        "cargo test -p plenora-rest-core --test public_surface",
+        "cargo test -p plenora-rest-core --test black_box"
+      ]
+    },
+    {
+      "name": "plenora-rest",
+      "surface": "python_sdk",
+      "version": "0.1.0",
+      "digest": "sha256:8edc0eec5894a9dd98fe577d446be4e04365e7953e0ccbf0f867caf82f1986f3",
+      "api_modes": ["sync"],
+      "verification": [
+        "maturin build --release",
+        "install wheel in a clean virtualenv and run python/tests/test_smoke.py"
+      ]
+    },
+    {
+      "name": "plenora.rest-tools",
+      "surface": "runtime",
+      "version": "0.1.0",
+      "digest": "sha256:55a09ca4a0411a35fe3a9c40890d31a724108f56ed51fccb1c54e11ecf7649f7",
+      "verification": [
+        "cargo test -p plenora-rest-core --test runtime_binding"
+      ]
+    }
+  ],
+  "contracts": [
+    {
+      "id": "plenora-public-surfaces-v1",
+      "status": "conforming",
+      "verification": [
+        "cargo test -p plenora-rest-core --test public_surface",
+        "installed-wheel black-box unittest suite"
+      ]
+    },
+    {
+      "id": "plenora-capabilities-v2",
+      "status": "conforming",
+      "verification": [
+        "cargo test -p plenora-rest-core capability",
+        "installed-wheel black-box unittest suite"
+      ]
+    },
+    {
+      "id": "plenora-error-v1",
+      "status": "conforming",
+      "verification": [
+        "cargo test -p plenora-rest-core --test black_box",
+        "cargo test -p plenora-rest-core --test runtime_binding"
+      ]
+    },
+    {
+      "id": "plenora-public-security-v1",
+      "status": "conforming",
+      "verification": [
+        "cargo test -p plenora-rest-core --test black_box",
+        "cargo test -p plenora-rest-core --test runtime_binding"
+      ]
+    },
+    {
+      "id": "plenora-python-sdk-v1",
+      "status": "conforming",
+      "verification": [
+        "installed-wheel black-box unittest suite"
+      ]
+    },
+    {
+      "id": "plenora-runtime-binding-v1",
+      "status": "conforming",
+      "verification": [
+        "cargo test -p plenora-rest-core --test runtime_binding"
+      ]
+    },
+    {
+      "id": "plenora-arrow-interchange-v1",
+      "status": "not_applicable"
+    },
+    {
+      "id": "plenora-surface-bindings-v1",
+      "status": "conforming",
+      "verification": [
+        "cargo test -p plenora-rest-core --test public_surface",
+        "cargo test -p plenora-rest-core --test runtime_binding",
+        "installed-wheel black-box unittest suite"
+      ]
+    },
+    {
+      "id": "plenora-composition-v1",
+      "status": "conforming",
+      "verification": [
+        "cargo test -p plenora-rest-core --test runtime_binding"
+      ]
+    }
+  ],
+  "deviations": []
+}

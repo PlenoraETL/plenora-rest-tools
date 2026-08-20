@@ -1,0 +1,245 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.plenora.dev/components/rest/plenora-rest-execution-result-v1.schema.json",
+  "title": "Plenora REST execution result v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "status", "output", "metrics", "responses", "errors"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "status": {"$ref": "#/$defs/status"},
+    "output": {
+      "oneOf": [
+        {"$ref": "#/$defs/noneOutput"},
+        {"$ref": "#/$defs/jsonOutput"},
+        {"$ref": "#/$defs/recordsOutput"}
+      ]
+    },
+    "metrics": {"$ref": "#/$defs/metrics"},
+    "responses": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/httpResponse"}
+    },
+    "errors": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/error"}
+    }
+  },
+  "$defs": {
+    "status": {
+      "enum": ["success", "partial", "failed"]
+    },
+    "noneOutput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": {"const": "none"}
+      }
+    },
+    "jsonOutput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "value"],
+      "properties": {
+        "type": {"const": "json"},
+        "value": {}
+      }
+    },
+    "recordsOutput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "records"],
+      "properties": {
+        "type": {"const": "records"},
+        "records": {
+          "type": "array",
+          "items": {"type": "object"}
+        }
+      }
+    },
+    "httpResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "final_url", "attempts", "headers"],
+      "properties": {
+        "status": {"type": "integer", "minimum": 100, "maximum": 599},
+        "final_url": {"type": "string", "minLength": 1, "maxLength": 8192},
+        "attempts": {"type": "integer", "minimum": 1},
+        "headers": {
+          "type": "object",
+          "additionalProperties": {"type": "string"}
+        }
+      }
+    },
+    "retry": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind"],
+          "properties": {
+            "kind": {
+              "enum": [
+                "never",
+                "quarantine",
+                "safe",
+                "requires_idempotency_key",
+                "requires_recovery"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "delay_ms"],
+          "properties": {
+            "kind": {"const": "after"},
+            "delay_ms": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 86400000
+            }
+          }
+        }
+      ]
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "category",
+        "phase",
+        "remote_effect",
+        "retry",
+        "code",
+        "message",
+        "details"
+      ],
+      "properties": {
+        "category": {
+          "enum": [
+            "invalid_plan",
+            "invalid_configuration",
+            "schema",
+            "data_mapping",
+            "crs",
+            "unsupported",
+            "not_found",
+            "conflict",
+            "concurrent_modification",
+            "authentication",
+            "authorization",
+            "timeout",
+            "cancelled",
+            "resource_limit",
+            "io",
+            "protocol",
+            "transient",
+            "execution",
+            "internal"
+          ]
+        },
+        "phase": {
+          "enum": [
+            "validate",
+            "connect",
+            "probe",
+            "prepare",
+            "read",
+            "write",
+            "finalize",
+            "commit",
+            "rollback",
+            "cleanup"
+          ]
+        },
+        "remote_effect": {
+          "enum": ["none", "rolled_back", "partial", "committed", "unknown"]
+        },
+        "retry": {"$ref": "#/$defs/retry"},
+        "code": {
+          "type": "string",
+          "pattern": "^[A-Z][A-Z0-9_]{1,63}$"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "input_index": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "details": {"type": "object"}
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {"remote_effect": {"const": "unknown"}},
+            "required": ["remote_effect"]
+          },
+          "then": {
+            "properties": {
+              "retry": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["kind"],
+                    "properties": {"kind": {"const": "never"}}
+                  },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["kind"],
+                    "properties": {"kind": {"const": "quarantine"}}
+                  },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["kind"],
+                    "properties": {"kind": {"const": "requires_recovery"}}
+                  }
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requests",
+        "retries",
+        "auth_requests",
+        "poll_requests",
+        "cache_hits",
+        "cache_revalidations",
+        "rate_limit_wait_ms",
+        "input_records",
+        "output_records",
+        "bytes_downloaded",
+        "bytes_uploaded",
+        "elapsed_ms"
+      ],
+      "properties": {
+        "requests": {"type": "integer", "minimum": 0},
+        "retries": {"type": "integer", "minimum": 0},
+        "auth_requests": {"type": "integer", "minimum": 0},
+        "poll_requests": {"type": "integer", "minimum": 0},
+        "cache_hits": {"type": "integer", "minimum": 0},
+        "cache_revalidations": {"type": "integer", "minimum": 0},
+        "rate_limit_wait_ms": {"type": "integer", "minimum": 0},
+        "input_records": {"type": "integer", "minimum": 0},
+        "output_records": {"type": "integer", "minimum": 0},
+        "bytes_downloaded": {"type": "integer", "minimum": 0},
+        "bytes_uploaded": {"type": "integer", "minimum": 0},
+        "elapsed_ms": {"type": "integer", "minimum": 0}
+      }
+    }
+  }
+}

@@ -1,13 +1,15 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, fmt};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 use serde_json::{Map, Value};
+
+use crate::error::{ErrorCategory, ErrorPhase, RemoteEffect, RetryAdvice};
 
 pub const SCHEMA_VERSION: u32 = 1;
 pub type JsonObject = Map<String, Value>;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct EngineConfig {
     pub connect_timeout_ms: u64,
     pub request_timeout_ms: u64,
@@ -63,6 +65,7 @@ impl Default for EngineConfig {
 }
 
 #[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExecutionRequest {
     pub schema_version: u32,
     pub operation: ExecutionOperation,
@@ -84,12 +87,13 @@ pub enum ExecutionOperation {
 }
 
 #[derive(Clone, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct ConnectionConfig {
     pub url: String,
     pub method: HttpMethod,
     pub headers: BTreeMap<String, String>,
     pub auth: AuthConfig,
+    pub credential_ref: Option<String>,
     pub parameters: Vec<ParameterSpec>,
     pub static_parameters: JsonObject,
     pub request: RequestConfig,
@@ -114,6 +118,7 @@ impl Default for ConnectionConfig {
             method: HttpMethod::Get,
             headers: BTreeMap::new(),
             auth: AuthConfig::None,
+            credential_ref: None,
             parameters: Vec::new(),
             static_parameters: JsonObject::new(),
             request: RequestConfig::default(),
@@ -134,7 +139,7 @@ impl Default for ConnectionConfig {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct BatchConfig {
     pub enabled: bool,
     pub max_size: usize,
@@ -168,8 +173,8 @@ pub enum BatchInputFormat {
     Object,
 }
 
-#[derive(Clone, Debug, Deserialize, Hash, Serialize)]
-#[serde(default)]
+#[derive(Clone, Deserialize, Hash, Serialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct TlsConfig {
     pub verify: bool,
     pub ca_bundle_pem: Option<String>,
@@ -186,13 +191,42 @@ impl Default for TlsConfig {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Hash, Serialize)]
+impl fmt::Debug for TlsConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TlsConfig")
+            .field("verify", &self.verify)
+            .field(
+                "ca_bundle_pem",
+                &self.ca_bundle_pem.as_ref().map(|_| "<redacted>"),
+            )
+            .field(
+                "client_identity_pem",
+                &self.client_identity_pem.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
+}
+
+#[derive(Clone, Deserialize, Hash, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProxyConfig {
     pub url: String,
     #[serde(default)]
     pub username: Option<String>,
     #[serde(default)]
     pub password: Option<String>,
+}
+
+impl fmt::Debug for ProxyConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProxyConfig")
+            .field("url", &"<redacted-url>")
+            .field("username", &self.username.as_ref().map(|_| "<redacted>"))
+            .field("password", &self.password.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -209,7 +243,7 @@ pub enum HttpMethod {
 }
 
 #[derive(Clone, Default, Deserialize, Hash, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AuthConfig {
     #[default]
     None,
@@ -286,6 +320,7 @@ pub enum ApiKeyLocation {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ParameterSpec {
     pub name: String,
     #[serde(default)]
@@ -323,7 +358,7 @@ pub enum ParameterLocation {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct QuerySerialization {
     pub style: QueryStyle,
     pub explode: Option<bool>,
@@ -352,7 +387,7 @@ pub enum QueryStyle {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct RequestConfig {
     pub body_type: BodyType,
     pub raw_body: Option<String>,
@@ -386,7 +421,7 @@ pub enum BodyType {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct ResponseConfig {
     pub format: ResponseFormat,
     pub delimiter: String,
@@ -411,6 +446,7 @@ pub enum ResponseFormat {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct IterationSpec {
     #[serde(default)]
     pub path: String,
@@ -419,6 +455,7 @@ pub struct IterationSpec {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ResponseTransform {
     pub column: String,
     pub source: String,
@@ -430,6 +467,7 @@ pub struct ResponseTransform {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct OutputMapping {
     pub path: String,
     pub column: String,
@@ -438,7 +476,7 @@ pub struct OutputMapping {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct RetryPolicy {
     pub max_attempts: u32,
     pub backoff_base_ms: u64,
@@ -466,7 +504,7 @@ impl Default for RetryPolicy {
 }
 
 #[derive(Clone, Debug, Deserialize, Hash, Serialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct CookiePolicy {
     pub enabled: bool,
     pub jar_id: String,
@@ -482,7 +520,7 @@ impl Default for CookiePolicy {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct CachePolicy {
     pub enabled: bool,
     pub fresh_for_ms: u64,
@@ -490,7 +528,7 @@ pub struct CachePolicy {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct CircuitBreakerPolicy {
     pub enabled: bool,
     pub group: String,
@@ -512,7 +550,7 @@ impl Default for CircuitBreakerPolicy {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct PollingConfig {
     pub url_path: Option<String>,
     pub url_template: Option<String>,
@@ -581,7 +619,7 @@ impl Default for PollingConfig {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PaginationConfig {
     Offset {
         #[serde(default = "default_offset_param")]
@@ -640,7 +678,7 @@ pub enum PaginationConfig {
 }
 
 #[derive(Clone, Default, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct ExecutionInput {
     pub params: JsonObject,
     pub records: Vec<JsonObject>,
@@ -648,9 +686,11 @@ pub struct ExecutionInput {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct FileTransferInput {
     pub path: String,
+    pub artifact_source: Option<ArtifactReference>,
+    pub artifact_sink: Option<ArtifactReference>,
     pub overwrite: bool,
     pub resume: bool,
     pub max_bytes: Option<u64>,
@@ -664,6 +704,8 @@ impl Default for FileTransferInput {
     fn default() -> Self {
         Self {
             path: String::new(),
+            artifact_source: None,
+            artifact_sink: None,
             overwrite: false,
             resume: false,
             max_bytes: None,
@@ -676,12 +718,13 @@ impl Default for FileTransferInput {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct ExecutionOptions {
     pub continue_on_error: bool,
     pub capture_response_metadata: bool,
     pub response_headers: Vec<String>,
     pub enrichment_concurrency: usize,
+    pub deadline: Option<String>,
 }
 
 impl Default for ExecutionOptions {
@@ -691,6 +734,7 @@ impl Default for ExecutionOptions {
             capture_response_metadata: false,
             response_headers: Vec::new(),
             enrichment_concurrency: 1,
+            deadline: None,
         }
     }
 }
@@ -733,12 +777,26 @@ pub enum ExecutionOutput {
     },
     File {
         direction: FileTransferDirection,
-        path: String,
+        artifact_reference: String,
         bytes_transferred: u64,
-        sha256: String,
+        checksum: IntegrityMetadata,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        media_type: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         response: Option<Value>,
     },
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactReference {
+    pub reference: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct IntegrityMetadata {
+    pub algorithm: String,
+    pub value: String,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
@@ -766,15 +824,15 @@ pub struct ExecutionMetrics {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct ExecutionError {
+    pub category: ErrorCategory,
+    pub phase: ErrorPhase,
+    pub remote_effect: RemoteEffect,
+    pub retry: RetryAdvice,
     pub code: String,
     pub message: String,
-    pub retriable: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub input_index: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub http_status: Option<u16>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub body_preview: Option<String>,
+    pub details: BTreeMap<String, Value>,
 }
 
 impl HttpMethod {

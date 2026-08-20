@@ -1,0 +1,135 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.plenora.dev/components/rest/plenora-rest-file-transfer-input-v1.schema.json",
+  "title": "Plenora REST file transfer input v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "operation", "connection", "input"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "operation": {"enum": ["download", "upload"]},
+    "connection": {"$ref": "plenora-rest-execution-request-v1.schema.json#/$defs/connection"},
+    "input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["file"],
+      "properties": {
+        "params": {"type": "object"},
+        "records": {"type": "array", "maxItems": 0},
+        "file": {"$ref": "#/$defs/file"}
+      }
+    },
+    "options": {"$ref": "plenora-rest-execution-request-v1.schema.json#/$defs/options"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"operation": {"const": "download"}}},
+      "then": {
+        "properties": {
+          "input": {
+            "properties": {
+              "file": {
+                "oneOf": [
+                  {
+                    "required": ["path"],
+                    "properties": {
+                      "path": {"type": "string", "minLength": 1}
+                    },
+                    "allOf": [
+                      {"not": {"required": ["artifact_source"]}},
+                      {"not": {"required": ["artifact_sink"]}}
+                    ]
+                  },
+                  {
+                    "required": ["artifact_sink"],
+                    "properties": {
+                      "artifact_sink": {"$ref": "#/$defs/artifactReference"}
+                    },
+                    "allOf": [
+                      {"not": {"required": ["path"]}},
+                      {"not": {"required": ["artifact_source"]}}
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"operation": {"const": "upload"}}},
+      "then": {
+        "properties": {
+          "input": {
+            "properties": {
+              "file": {
+                "oneOf": [
+                  {
+                    "required": ["path"],
+                    "properties": {
+                      "path": {"type": "string", "minLength": 1}
+                    },
+                    "allOf": [
+                      {"not": {"required": ["artifact_source"]}},
+                      {"not": {"required": ["artifact_sink"]}}
+                    ]
+                  },
+                  {
+                    "required": ["artifact_source"],
+                    "properties": {
+                      "artifact_source": {"$ref": "#/$defs/artifactReference"}
+                    },
+                    "allOf": [
+                      {"not": {"required": ["path"]}},
+                      {"not": {"required": ["artifact_sink"]}}
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "artifactReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reference"],
+      "properties": {
+        "reference": {"type": "string", "minLength": 1, "maxLength": 2048}
+      }
+    },
+    "file": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "path": {"type": "string", "minLength": 1, "maxLength": 32768},
+        "artifact_source": {
+          "oneOf": [
+            {"$ref": "#/$defs/artifactReference"},
+            {"type": "null"}
+          ]
+        },
+        "artifact_sink": {
+          "oneOf": [
+            {"$ref": "#/$defs/artifactReference"},
+            {"type": "null"}
+          ]
+        },
+        "overwrite": {"type": "boolean"},
+        "resume": {"type": "boolean"},
+        "max_bytes": {"type": ["integer", "null"], "minimum": 1},
+        "expected_sha256": {
+          "type": ["string", "null"],
+          "pattern": "^[A-Fa-f0-9]{64}$"
+        },
+        "content_type": {"type": ["string", "null"], "maxLength": 1024},
+        "filename": {"type": ["string", "null"], "maxLength": 4096},
+        "field_name": {"type": ["string", "null"], "maxLength": 256}
+      }
+    }
+  }
+}

@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.plenora.dev/components/rest/plenora-rest-capability-attributes-v1.schema.json",
+  "title": "Plenora REST capability attributes v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract",
+    "http_methods",
+    "authentication",
+    "response_formats",
+    "resilience",
+    "orchestration",
+    "integrity"
+  ],
+  "properties": {
+    "contract": {
+      "const": "plenora-rest-capability-attributes-v1"
+    },
+    "http_methods": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "GET",
+          "HEAD",
+          "POST",
+          "PUT",
+          "PATCH",
+          "DELETE",
+          "OPTIONS",
+          "custom_allowlist"
+        ]
+      }
+    },
+    "authentication": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "none",
+          "bearer",
+          "api_key",
+          "basic_auth",
+          "oauth2_client_credentials",
+          "oauth2_password",
+          "arcgis_token"
+        ]
+      }
+    },
+    "response_formats": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "enum": ["json", "csv", "xml", "ndjson", "text", "binary"]
+      }
+    },
+    "resilience": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "retry",
+          "retry_after",
+          "rate_limit",
+          "cache",
+          "cookies",
+          "circuit_breaker"
+        ]
+      }
+    },
+    "orchestration": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "enum": ["pagination", "polling", "batch", "ordered_enrichment"]
+      }
+    },
+    "integrity": {"const": "sha256"},
+    "direction": {"enum": ["download", "upload"]},
+    "transfer": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "enum": ["bounded", "streaming", "runtime_artifact_reference"]
+      }
+    }
+  },
+  "dependentRequired": {
+    "direction": ["transfer"],
+    "transfer": ["direction"]
+  }
+}

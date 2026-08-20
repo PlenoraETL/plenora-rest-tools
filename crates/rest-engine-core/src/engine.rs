@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
     path::{Path, PathBuf},
+    sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
 
@@ -13,12 +14,13 @@ use sha2::{Digest, Sha256};
 use tokio::{fs, io::AsyncReadExt, time::sleep};
 
 use crate::{
-    BatchConfig, BatchInputFormat, BodyType, CachePolicy, ConnectionConfig, EngineConfig,
-    EngineError, ExecutionError, ExecutionMetrics, ExecutionOperation, ExecutionOutput,
-    ExecutionRequest, ExecutionResult, ExecutionStatus, FileTransferDirection, FileTransferInput,
-    HttpMethod, HttpResponseMetadata, JsonObject, OutputMapping, PaginationConfig,
-    ParameterLocation, ParameterMode, PollingConfig, QuerySerialization, QueryStyle,
-    ResponseConfig, ResponseTransform, SCHEMA_VERSION, json_path, response_body,
+    BatchConfig, BatchInputFormat, BodyType, CachePolicy, CancellationToken, CapabilityDocument,
+    ConnectionConfig, EngineConfig, EngineError, ExecutionControl, ExecutionError,
+    ExecutionMetrics, ExecutionOperation, ExecutionOutput, ExecutionRequest, ExecutionResult,
+    ExecutionStatus, FileTransferDirection, FileTransferInput, HttpMethod, HttpResponseMetadata,
+    IntegrityMetadata, JsonObject, OutputMapping, PaginationConfig, ParameterLocation,
+    ParameterMode, PollingConfig, QuerySerialization, QueryStyle, ResponseConfig,
+    ResponseTransform, SCHEMA_VERSION, capabilities, json_path, response_body,
     transport::{
         DownloadTarget, PreparedBody, PreparedFile, PreparedFileSource, PreparedRequest,
         PreparedStream, ResponseData, Transport, same_origin,
@@ -28,6 +30,7 @@ use crate::{
 pub struct Engine {
     config: EngineConfig,
     transport: Transport,
+    closed: AtomicBool,
 }
 
 struct OperationResult {
@@ -55,10 +58,62 @@ impl Engine {
         Self {
             transport: Transport::new(config.clone()),
             config,
+            closed: AtomicBool::new(false),
         }
     }
 
     pub async fn execute(&self, request: ExecutionRequest) -> ExecutionResult {
+        let control = match ExecutionControl::default()
+            .with_optional_deadline(request.options.deadline.as_deref())
+        {
+            Ok(control) => control,
+            Err(error) => return failed_result(error),
+        };
+        self.execute_with_control(request, control).await
+    }
+
+    pub async fn execute_with_control(
+        &self,
+        request: ExecutionRequest,
+        control: ExecutionControl,
+    ) -> ExecutionResult {
+        if self.is_closed() {
+            return failed_result(EngineError::EngineClosed);
+        }
+        let deadline = control.deadline.map(tokio::time::Instant::from_std);
+        let execution = self.execute_inner(request);
+        match deadline {
+            Some(deadline) => {
+                tokio::select! {
+                    biased;
+                    _ = control.cancellation.cancelled() => failed_result(EngineError::Cancelled),
+                    _ = tokio::time::sleep_until(deadline) => failed_result(EngineError::Timeout),
+                    result = execution => result,
+                }
+            }
+            None => {
+                tokio::select! {
+                    biased;
+                    _ = control.cancellation.cancelled() => failed_result(EngineError::Cancelled),
+                    result = execution => result,
+                }
+            }
+        }
+    }
+
+    pub fn capabilities(&self) -> CapabilityDocument {
+        capabilities()
+    }
+
+    pub fn close(&self) {
+        self.closed.store(true, Ordering::Release);
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
+    }
+
+    async fn execute_inner(&self, request: ExecutionRequest) -> ExecutionResult {
         let started = Instant::now();
         let mut metrics = ExecutionMetrics {
             input_records: request.input.records.len(),
@@ -66,7 +121,11 @@ impl Engine {
         };
         let mut responses = Vec::new();
 
-        let result = if request.schema_version != SCHEMA_VERSION {
+        let result = if request.connection.credential_ref.is_some() {
+            Err(EngineError::InvalidInput(
+                "credential_ref requires an authorized runtime resolver".to_owned(),
+            ))
+        } else if request.schema_version != SCHEMA_VERSION {
             Err(EngineError::UnsupportedSchema {
                 received: request.schema_version,
                 supported: SCHEMA_VERSION,
@@ -121,9 +180,23 @@ impl Engine {
     }
 
     pub async fn execute_json(&self, request_json: &str) -> Result<String, EngineError> {
+        self.execute_json_with_cancellation(request_json, CancellationToken::new())
+            .await
+    }
+
+    pub async fn execute_json_with_cancellation(
+        &self,
+        request_json: &str,
+        cancellation: CancellationToken,
+    ) -> Result<String, EngineError> {
+        if self.is_closed() {
+            return Err(EngineError::EngineClosed);
+        }
         let request = serde_json::from_str::<ExecutionRequest>(request_json)
             .map_err(|error| EngineError::InvalidInput(error.to_string()))?;
-        let result = self.execute(request).await;
+        let control = ExecutionControl::new(cancellation)
+            .with_optional_deadline(request.options.deadline.as_deref())?;
+        let result = self.execute_with_control(request, control).await;
         serde_json::to_string(&result).map_err(|error| EngineError::Runtime(error.to_string()))
     }
 
@@ -219,7 +292,7 @@ impl Engine {
         if request.options.capture_response_metadata {
             responses.push(HttpResponseMetadata {
                 status: response.status,
-                final_url: response.final_url.to_string(),
+                final_url: public_response_url(&response.final_url),
                 attempts: response.attempts,
                 headers: selected_response_headers(
                     &response.headers,
@@ -230,9 +303,17 @@ impl Engine {
         Ok(OperationResult {
             output: ExecutionOutput::File {
                 direction: FileTransferDirection::Download,
-                path: response.path.to_string_lossy().into_owned(),
+                artifact_reference: file
+                    .artifact_sink
+                    .as_ref()
+                    .map(|artifact| artifact.reference.clone())
+                    .unwrap_or_else(|| format!("sha256:{}", response.sha256)),
                 bytes_transferred: response.bytes_written,
-                sha256: response.sha256,
+                checksum: IntegrityMetadata {
+                    algorithm: "sha256".to_owned(),
+                    value: response.sha256,
+                },
+                media_type: response.headers.get("content-type").cloned(),
                 response: None,
             },
             errors: Vec::new(),
@@ -326,9 +407,17 @@ impl Engine {
         Ok(OperationResult {
             output: ExecutionOutput::File {
                 direction: FileTransferDirection::Upload,
-                path: source.to_string_lossy().into_owned(),
+                artifact_reference: file
+                    .artifact_source
+                    .as_ref()
+                    .map(|artifact| artifact.reference.clone())
+                    .unwrap_or_else(|| format!("sha256:{sha256}")),
                 bytes_transferred: length,
-                sha256,
+                checksum: IntegrityMetadata {
+                    algorithm: "sha256".to_owned(),
+                    value: sha256,
+                },
+                media_type: file.content_type.clone(),
                 response: Some(value),
             },
             errors: Vec::new(),
@@ -890,7 +979,7 @@ impl Engine {
         if options.capture_response_metadata {
             responses.push(HttpResponseMetadata {
                 status: result.4,
-                final_url: result.1.to_string(),
+                final_url: public_response_url(&result.1),
                 attempts: result.2,
                 headers: selected_response_headers(&result.3, &options.response_headers),
             });
@@ -2509,15 +2598,14 @@ fn selected_response_headers(
     headers: &BTreeMap<String, String>,
     selected: &[String],
 ) -> BTreeMap<String, String> {
-    if selected.iter().any(|name| name == "*") {
-        return headers.clone();
-    }
     headers
         .iter()
         .filter(|(name, _)| {
-            selected
-                .iter()
-                .any(|selected| selected.eq_ignore_ascii_case(name))
+            !is_sensitive_response_header(name)
+                && (selected.iter().any(|name| name == "*")
+                    || selected
+                        .iter()
+                        .any(|selected| selected.eq_ignore_ascii_case(name)))
         })
         .map(|(name, value)| (name.clone(), value.clone()))
         .collect()
@@ -2533,20 +2621,37 @@ fn ensure_success(
         return Ok(());
     }
 
-    let preview = if response.body.is_empty() {
-        None
-    } else {
-        Some(
-            String::from_utf8_lossy(&response.body)
-                .chars()
-                .take(2_048)
-                .collect(),
-        )
-    };
     Err(EngineError::HttpStatus {
         status: response.status,
-        body_preview: preview,
     })
+}
+
+fn public_response_url(url: &Url) -> String {
+    url.origin().ascii_serialization()
+}
+
+fn is_sensitive_response_header(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "authorization"
+            | "proxy-authorization"
+            | "proxy-authenticate"
+            | "cookie"
+            | "set-cookie"
+            | "www-authenticate"
+            | "x-api-key"
+    )
+}
+
+fn failed_result(error: EngineError) -> ExecutionResult {
+    ExecutionResult {
+        schema_version: SCHEMA_VERSION,
+        status: ExecutionStatus::Failed,
+        output: ExecutionOutput::None,
+        metrics: ExecutionMetrics::default(),
+        responses: Vec::new(),
+        errors: vec![error.execution_error(None)],
+    }
 }
 
 #[cfg(test)]
@@ -2633,7 +2738,7 @@ mod tests {
     }
 
     #[test]
-    fn response_header_capture_is_allowlisted_or_explicitly_all() {
+    fn response_header_capture_never_exposes_sensitive_values() {
         let headers = BTreeMap::from([
             ("etag".to_owned(), "abc".to_owned()),
             ("set-cookie".to_owned(), "secret=1".to_owned()),
@@ -2644,7 +2749,7 @@ mod tests {
         );
         assert_eq!(
             selected_response_headers(&headers, &["*".to_owned()]),
-            headers
+            BTreeMap::from([("etag".to_owned(), "abc".to_owned())])
         );
     }
 }

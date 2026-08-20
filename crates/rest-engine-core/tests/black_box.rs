@@ -1,4 +1,4 @@
-use rest_engine_core::{Engine, EngineConfig};
+use plenora_rest_core::{Engine, EngineConfig};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
@@ -31,7 +31,7 @@ async fn blocks_loopback_by_default() {
     .unwrap();
 
     assert_eq!(result["status"], "failed");
-    assert_eq!(result["errors"][0]["code"], "unsafe_address");
+    assert_eq!(result["errors"][0]["code"], "UNSAFE_ADDRESS");
 }
 
 #[tokio::test]
@@ -97,7 +97,7 @@ async fn custom_methods_require_an_engine_allowlist() {
     )
     .await;
     assert_eq!(denied["status"], "failed");
-    assert_eq!(denied["errors"][0]["code"], "policy_violation");
+    assert_eq!(denied["errors"][0]["code"], "POLICY_VIOLATION");
 
     let (url, server, observed) = recorded_server(vec![(200, r#"{"purged":true}"#, vec![])]).await;
     let engine = Engine::new(EngineConfig {
@@ -582,7 +582,7 @@ async fn file_transfers_are_denied_by_default() {
     .await;
 
     assert_eq!(result["status"], "failed");
-    assert_eq!(result["errors"][0]["code"], "policy_violation");
+    assert_eq!(result["errors"][0]["code"], "POLICY_VIOLATION");
 }
 
 #[tokio::test]
@@ -599,7 +599,7 @@ async fn file_root_blocks_escape_and_downloads_do_not_clobber_by_default() {
         }),
     )
     .await;
-    assert_eq!(escaped["errors"][0]["code"], "policy_violation");
+    assert_eq!(escaped["errors"][0]["code"], "POLICY_VIOLATION");
 
     let destination = directory.join("existing.bin");
     fs::write(&destination, b"keep-me").await.unwrap();
@@ -613,7 +613,7 @@ async fn file_root_blocks_escape_and_downloads_do_not_clobber_by_default() {
         }),
     )
     .await;
-    assert_eq!(existing["errors"][0]["code"], "file_io");
+    assert_eq!(existing["errors"][0]["code"], "FILE_IO");
     assert_eq!(fs::read(&destination).await.unwrap(), b"keep-me");
     fs::remove_dir_all(directory).await.unwrap();
 }
@@ -658,7 +658,7 @@ async fn download_streams_beyond_the_in_memory_limit_and_replaces_on_success() {
     assert_eq!(result["output"]["type"], "file");
     assert_eq!(result["output"]["direction"], "download");
     assert_eq!(result["output"]["bytes_transferred"], body.len());
-    assert_eq!(result["output"]["sha256"], sha256(&body));
+    assert_eq!(result["output"]["checksum"]["value"], sha256(&body));
     assert_eq!(result["metrics"]["bytes_downloaded"], body.len());
     assert_eq!(
         result["responses"][0]["headers"]["content-type"],
@@ -864,7 +864,7 @@ async fn resumable_download_rejects_inconsistent_partial_responses() {
     server.await.unwrap();
 
     assert_eq!(result["status"], "failed");
-    assert_eq!(result["errors"][0]["code"], "invalid_response");
+    assert_eq!(result["errors"][0]["code"], "INVALID_RESPONSE");
     assert!(!fs::try_exists(directory.join("invalid.bin")).await.unwrap());
     assert_no_partial_files(&directory).await;
     fs::remove_dir_all(directory).await.unwrap();
@@ -905,7 +905,7 @@ async fn resumable_download_rejects_a_changed_etag_on_partial_content() {
     server.await.unwrap();
 
     assert_eq!(result["status"], "failed");
-    assert_eq!(result["errors"][0]["code"], "invalid_response");
+    assert_eq!(result["errors"][0]["code"], "INVALID_RESPONSE");
     assert!(!fs::try_exists(directory.join("changed.bin")).await.unwrap());
     assert_no_partial_files(&directory).await;
     fs::remove_dir_all(directory).await.unwrap();
@@ -949,7 +949,7 @@ async fn resumable_download_rejects_a_changed_total_length() {
     server.await.unwrap();
 
     assert_eq!(result["status"], "failed");
-    assert_eq!(result["errors"][0]["code"], "invalid_response");
+    assert_eq!(result["errors"][0]["code"], "INVALID_RESPONSE");
     assert!(
         !fs::try_exists(directory.join("changed-total.bin"))
             .await
@@ -981,7 +981,7 @@ async fn partial_responses_are_not_promoted_without_a_complete_representation() 
     server.await.unwrap();
 
     assert_eq!(result["status"], "failed");
-    assert_eq!(result["errors"][0]["code"], "invalid_response");
+    assert_eq!(result["errors"][0]["code"], "INVALID_RESPONSE");
     assert!(!fs::try_exists(directory.join("partial.bin")).await.unwrap());
     assert_no_partial_files(&directory).await;
     fs::remove_dir_all(directory).await.unwrap();
@@ -1016,8 +1016,8 @@ async fn managed_resume_rejects_non_get_and_user_managed_range_headers() {
     )
     .await;
 
-    assert_eq!(non_get["errors"][0]["code"], "invalid_input");
-    assert_eq!(manual_range["errors"][0]["code"], "invalid_input");
+    assert_eq!(non_get["errors"][0]["code"], "INVALID_INPUT");
+    assert_eq!(manual_range["errors"][0]["code"], "INVALID_INPUT");
     assert_no_partial_files(&directory).await;
     fs::remove_dir_all(directory).await.unwrap();
 }
@@ -1077,7 +1077,7 @@ async fn polling_can_finish_with_a_streamed_download() {
     assert_eq!(result["output"]["type"], "file");
     assert_eq!(result["output"]["direction"], "download");
     assert_eq!(result["output"]["bytes_transferred"], body.len());
-    assert_eq!(result["output"]["sha256"], sha256(&body));
+    assert_eq!(result["output"]["checksum"]["value"], sha256(&body));
     assert_eq!(result["metrics"]["requests"], 4);
     assert_eq!(result["metrics"]["poll_requests"], 3);
     assert_eq!(result["metrics"]["bytes_downloaded"], body.len());
@@ -1131,7 +1131,7 @@ async fn polling_blocks_cross_origin_download_results_before_creating_output() {
     server.await.unwrap();
 
     assert_eq!(result["status"], "failed");
-    assert_eq!(result["errors"][0]["code"], "unsafe_address");
+    assert_eq!(result["errors"][0]["code"], "UNSAFE_ADDRESS");
     assert_eq!(result["metrics"]["requests"], 2);
     assert_eq!(result["metrics"]["poll_requests"], 1);
     assert!(!fs::try_exists(directory.join("blocked.bin")).await.unwrap());
@@ -1156,7 +1156,7 @@ async fn download_limit_and_checksum_failures_leave_no_output() {
     )
     .await;
     limit_server.await.unwrap();
-    assert_eq!(limited["errors"][0]["code"], "file_too_large");
+    assert_eq!(limited["errors"][0]["code"], "FILE_TOO_LARGE");
     assert!(!fs::try_exists(directory.join("limited.bin")).await.unwrap());
 
     let (checksum_url, checksum_server) = binary_server(200, body, vec![]).await;
@@ -1176,7 +1176,7 @@ async fn download_limit_and_checksum_failures_leave_no_output() {
     )
     .await;
     checksum_server.await.unwrap();
-    assert_eq!(checksum["errors"][0]["code"], "checksum_mismatch");
+    assert_eq!(checksum["errors"][0]["code"], "CHECKSUM_MISMATCH");
     assert!(
         !fs::try_exists(directory.join("checksum.bin"))
             .await
@@ -1218,7 +1218,7 @@ async fn raw_upload_streams_beyond_the_in_memory_request_limit() {
     assert_eq!(result["status"], "success");
     assert_eq!(result["output"]["direction"], "upload");
     assert_eq!(result["output"]["bytes_transferred"], body.len());
-    assert_eq!(result["output"]["sha256"], sha256(&body));
+    assert_eq!(result["output"]["checksum"]["value"], sha256(&body));
     assert_eq!(result["output"]["response"], json!({"uploaded": true}));
     assert_eq!(result["metrics"]["bytes_uploaded"], body.len());
     let request = observed.lock().unwrap()[0].clone();
@@ -1374,12 +1374,10 @@ async fn application_success_rules_have_a_stable_error_code() {
     server.await.unwrap();
 
     assert_eq!(result["status"], "failed");
-    assert_eq!(result["errors"][0]["code"], "application_error");
-    assert!(
-        result["errors"][0]["message"]
-            .as_str()
-            .unwrap()
-            .contains("bad")
+    assert_eq!(result["errors"][0]["code"], "APPLICATION_ERROR");
+    assert_eq!(
+        result["errors"][0]["message"],
+        "Remote application reported failure"
     );
 }
 
@@ -1412,7 +1410,7 @@ async fn dangerous_transport_options_are_denied_by_default() {
         )
         .await;
         assert_eq!(result["status"], "failed");
-        assert_eq!(result["errors"][0]["code"], "policy_violation");
+        assert_eq!(result["errors"][0]["code"], "POLICY_VIOLATION");
     }
 }
 
@@ -1547,16 +1545,16 @@ async fn circuit_breaker_opens_after_the_configured_failures() {
 
     assert_eq!(
         execute(&engine, request.clone()).await["errors"][0]["code"],
-        "http_status"
+        "HTTP_STATUS"
     );
     assert_eq!(
         execute(&engine, request.clone()).await["errors"][0]["code"],
-        "http_status"
+        "HTTP_STATUS"
     );
     let rejected = execute(&engine, request).await;
     server.await.unwrap();
 
-    assert_eq!(rejected["errors"][0]["code"], "circuit_open");
+    assert_eq!(rejected["errors"][0]["code"], "CIRCUIT_OPEN");
     assert_eq!(observed.lock().unwrap().len(), 2);
 }
 

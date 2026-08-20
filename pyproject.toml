@@ -3,10 +3,10 @@ requires = ["maturin>=1.9,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "rust-rest-engine"
+name = "plenora-rest"
 version = "0.1.0"
 description = "Self-contained, service-agnostic REST execution engine for Python"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = "MIT OR Apache-2.0"
 readme = "README.md"
 classifiers = [
@@ -15,7 +15,10 @@ classifiers = [
     "Typing :: Typed",
 ]
 
+[project.urls]
+Source = "https://github.com/PlenoraETL/plenora-rest-tools"
+
 [tool.maturin]
 manifest-path = "crates/rest-engine-python/Cargo.toml"
 python-source = "python"
-module-name = "rest_engine._native"
+module-name = "plenora_rest._native"

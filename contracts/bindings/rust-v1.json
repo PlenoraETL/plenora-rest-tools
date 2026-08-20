@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "component": "plenora-rest-tools",
+  "artifact": {
+    "name": "plenora-rest-core",
+    "version": "0.1.0"
+  },
+  "capability_entrypoint": "plenora_rest_core::capabilities",
+  "lifecycle_entrypoints": [
+    "plenora_rest_core::Engine::close",
+    "plenora_rest_core::Engine::is_closed"
+  ],
+  "operations": [
+    {
+      "operation": "rest.test",
+      "version": 1,
+      "entrypoints": [
+        "plenora_rest_core::Engine::execute",
+        "plenora_rest_core::Engine::execute_with_control"
+      ]
+    },
+    {
+      "operation": "rest.generate",
+      "version": 1,
+      "entrypoints": [
+        "plenora_rest_core::Engine::execute",
+        "plenora_rest_core::Engine::execute_with_control"
+      ]
+    },
+    {
+      "operation": "rest.enrich",
+      "version": 1,
+      "entrypoints": [
+        "plenora_rest_core::Engine::execute",
+        "plenora_rest_core::Engine::execute_with_control"
+      ]
+    },
+    {
+      "operation": "rest.download",
+      "version": 1,
+      "entrypoints": [
+        "plenora_rest_core::Engine::execute",
+        "plenora_rest_core::Engine::execute_with_control"
+      ]
+    },
+    {
+      "operation": "rest.upload",
+      "version": 1,
+      "entrypoints": [
+        "plenora_rest_core::Engine::execute",
+        "plenora_rest_core::Engine::execute_with_control"
+      ]
+    }
+  ],
+  "runtime_transport_entrypoint": "plenora_rest_core::RuntimeBinding::invoke_json"
+}

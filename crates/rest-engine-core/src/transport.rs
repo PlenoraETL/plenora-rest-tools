@@ -124,7 +124,6 @@ pub(crate) struct DownloadData {
     pub auth_retries: u64,
     pub rate_limit_wait_ms: u64,
     pub headers: BTreeMap<String, String>,
-    pub path: PathBuf,
     pub bytes_written: u64,
     pub bytes_received: u64,
     pub sha256: String,
@@ -1037,10 +1036,7 @@ impl Transport {
         let status = response.status().as_u16();
         let headers = response_headers(&response);
         if !(200..300).contains(&status) && !success_statuses.contains(&status) {
-            return Err(EngineError::HttpStatus {
-                status,
-                body_preview: response_body_preview(response).await?,
-            });
+            return Err(EngineError::HttpStatus { status });
         }
         if resumed && !matches!(status, 200 | 206) {
             return Err(EngineError::InvalidResponse(format!(
@@ -1170,7 +1166,6 @@ impl Transport {
             auth_retries: 0,
             rate_limit_wait_ms,
             headers,
-            path: target.path.clone(),
             bytes_written: state.bytes_written,
             bytes_received: state.bytes_received,
             sha256,
@@ -1581,25 +1576,6 @@ fn satisfied_content_range(response: &reqwest::Response) -> Result<ContentRange,
         ));
     }
     Ok(ContentRange { start, end, total })
-}
-
-async fn response_body_preview(response: reqwest::Response) -> Result<Option<String>, EngineError> {
-    const PREVIEW_BYTES: usize = 2_048;
-    let mut body = Vec::new();
-    let mut stream = response.bytes_stream();
-    while body.len() < PREVIEW_BYTES {
-        let Some(chunk) = stream.next().await else {
-            break;
-        };
-        let chunk = chunk.map_err(map_reqwest_error)?;
-        let remaining = PREVIEW_BYTES.saturating_sub(body.len());
-        body.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
-    }
-    if body.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(String::from_utf8_lossy(&body).into_owned()))
-    }
 }
 
 fn download_temporary_path(target: &Path) -> PathBuf {
