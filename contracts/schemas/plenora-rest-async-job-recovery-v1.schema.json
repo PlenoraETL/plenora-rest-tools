@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.plenora.dev/components/rest/plenora-rest-async-job-recovery-v1.schema.json",
+  "title": "Plenora REST asynchronous job recovery v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract", "job_id", "cancel_requested"],
+  "properties": {
+    "contract": {"const": "plenora-rest-async-job-recovery-v1"},
+    "job_id": {"type": "string", "minLength": 1, "maxLength": 512},
+    "cancel_requested": {"type": "boolean"},
+    "cancel_accepted": {"type": "boolean"}
+  }
+}

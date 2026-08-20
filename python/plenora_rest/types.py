@@ -26,6 +26,7 @@ class EngineConfig(TypedDict, total=False):
     max_cache_entries: int
     max_cache_bytes: int
     max_circuit_origins: int
+    max_idempotency_keys: int
     user_agent: str
 
 
@@ -63,6 +64,11 @@ class CircuitBreakerPolicy(TypedDict, total=False):
     failure_statuses: List[int]
 
 
+class IdempotencyConfig(TypedDict, total=False):
+    name: str
+    location: Literal["header", "query", "body"]
+
+
 class ConnectionConfig(TypedDict, total=False):
     url: str
     method: str
@@ -77,6 +83,7 @@ class ConnectionConfig(TypedDict, total=False):
     cookies: CookiePolicy
     cache: CachePolicy
     circuit_breaker: CircuitBreakerPolicy
+    idempotency: IdempotencyConfig
     pagination: Optional[JsonObject]
     polling: Optional[JsonObject]
     batch: Optional[JsonObject]
@@ -161,6 +168,7 @@ class ExecutionOptions(TypedDict, total=False):
     response_headers: List[str]
     enrichment_concurrency: int
     deadline: Optional[str]
+    idempotency_key: Optional[str]
 
 
 class HttpResponseMetadata(TypedDict):
@@ -170,13 +178,27 @@ class HttpResponseMetadata(TypedDict):
     headers: Dict[str, str]
 
 
-class ExecutionResult(TypedDict):
+class _AsyncJobRecoveryRequired(TypedDict):
+    contract: Literal["plenora-rest-async-job-recovery-v1"]
+    job_id: str
+    cancel_requested: bool
+
+
+class AsyncJobRecovery(_AsyncJobRecoveryRequired, total=False):
+    cancel_accepted: bool
+
+
+class _ExecutionResultRequired(TypedDict):
     schema_version: int
     status: Literal["success", "partial", "failed"]
     output: JsonObject
     metrics: ExecutionMetrics
     responses: List[HttpResponseMetadata]
     errors: List[ExecutionError]
+
+
+class ExecutionResult(_ExecutionResultRequired, total=False):
+    recoveries: List[AsyncJobRecovery]
 
 
 class CapabilityInterface(TypedDict):

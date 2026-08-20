@@ -6,10 +6,10 @@ use std::{
 };
 
 use plenora_rest_core::{
-    AuthConfig, CancellationToken, EXECUTION_REQUEST_CONTRACT, EXECUTION_RESULT_CONTRACT, Engine,
-    EngineConfig, EngineError, FILE_TRANSFER_INPUT_CONTRACT, FILE_TRANSFER_RESULT_CONTRACT,
-    RUNTIME_INTERFACE_CONTRACT, RuntimeBinding, RuntimeMessage, RuntimeMessageKind,
-    RuntimeResources,
+    ASYNC_JOB_RECOVERY_CONTRACT, AuthConfig, CancellationToken, EXECUTION_REQUEST_CONTRACT,
+    EXECUTION_RESULT_CONTRACT, Engine, EngineConfig, EngineError, FILE_TRANSFER_INPUT_CONTRACT,
+    FILE_TRANSFER_RESULT_CONTRACT, RUNTIME_INTERFACE_CONTRACT, RuntimeBinding, RuntimeMessage,
+    RuntimeMessageKind, RuntimeResources,
 };
 use serde_json::{Value, json};
 use tokio::{
@@ -166,6 +166,109 @@ async fn runtime_success_preserves_trace_identity_and_contract() {
         MESSAGE_ID
     );
     assert_ne!(response.metadata["plenora.message.id"], MESSAGE_ID);
+}
+
+#[tokio::test]
+async fn runtime_idempotency_metadata_reaches_http_and_conflicts_fail_closed() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = [0_u8; 4096];
+        let read = stream.read(&mut request).await.unwrap();
+        let body = br#"{"ok":true}"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(response.as_bytes()).await.unwrap();
+        stream.write_all(body).await.unwrap();
+        stream.shutdown().await.unwrap();
+        String::from_utf8_lossy(&request[..read]).into_owned()
+    });
+
+    let engine = local_engine();
+    let resources = EmptyResources;
+    let binding = RuntimeBinding::new(&engine, &resources);
+    let mut request = runtime_request(&format!("http://{address}/"));
+    request.metadata.insert(
+        "plenora.execution.idempotency_key".to_owned(),
+        "runtime-job-42".to_owned(),
+    );
+    let first = binding
+        .invoke(request.clone(), CancellationToken::new())
+        .await;
+    let observed = server.await.unwrap();
+
+    assert_eq!(first.kind, RuntimeMessageKind::Success);
+    assert!(
+        observed
+            .to_ascii_lowercase()
+            .contains("idempotency-key: runtime-job-42")
+    );
+
+    request.payload["input"]["params"]["different"] = Value::Bool(true);
+    let conflict = binding.invoke(request, CancellationToken::new()).await;
+    assert_eq!(conflict.kind, RuntimeMessageKind::Error);
+    assert_eq!(conflict.payload["code"], "IDEMPOTENCY_CONFLICT");
+}
+
+#[tokio::test]
+async fn runtime_polling_failure_exposes_a_bounded_recovery_handle() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        for (status, body, location) in [
+            (
+                202,
+                br#"{"id":"runtime-job-7","status":"queued"}"#.as_slice(),
+                Some("/jobs/runtime-job-7"),
+            ),
+            (200, br#"{"status":"running"}"#.as_slice(), None),
+        ] {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 2048];
+            let _ = stream.read(&mut request).await.unwrap();
+            let location = location
+                .map(|value| format!("Location: {value}\r\n"))
+                .unwrap_or_default();
+            let response = format!(
+                "HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\n{location}Content-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+            stream.write_all(body).await.unwrap();
+            stream.shutdown().await.unwrap();
+        }
+    });
+
+    let engine = local_engine();
+    let resources = EmptyResources;
+    let binding = RuntimeBinding::new(&engine, &resources);
+    let mut request = runtime_request(&format!("http://{address}/submit"));
+    request.payload["connection"] = json!({
+        "url": format!("http://{address}/submit"),
+        "method": "POST",
+        "polling": {
+            "status_path": "status",
+            "interval_ms": 0,
+            "max_attempts": 1
+        }
+    });
+
+    let response = binding.invoke(request, CancellationToken::new()).await;
+    server.await.unwrap();
+
+    assert_eq!(response.kind, RuntimeMessageKind::Error);
+    assert_eq!(response.payload["code"], "POLLING_TIMEOUT");
+    assert_eq!(
+        response.payload["details"]["async_jobs"][0]["contract"],
+        ASYNC_JOB_RECOVERY_CONTRACT
+    );
+    assert_eq!(
+        response.payload["details"]["async_jobs"][0]["job_id"],
+        "runtime-job-7"
+    );
 }
 
 #[tokio::test]

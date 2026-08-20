@@ -15,8 +15,11 @@ class JsonHandler(BaseHTTPRequestHandler):
     uploaded = b""
     resumable_body = b"resumable-download" * 4096
     resume_requests: List[Tuple[Optional[str], Optional[str]]] = []
+    idempotency_headers: List[Optional[str]] = []
+    post_requests = 0
 
     def do_GET(self) -> None:
+        type(self).idempotency_headers.append(self.headers.get("Idempotency-Key"))
         if self.path == "/resumable":
             self._resumable_download()
             return
@@ -65,6 +68,7 @@ class JsonHandler(BaseHTTPRequestHandler):
         self.wfile.write(remaining)
 
     def do_POST(self) -> None:
+        type(self).post_requests += 1
         self.send_response(202)
         self.send_header("X-Job-Id", "export/1")
         self.send_header("Content-Length", "0")
@@ -90,13 +94,15 @@ class PythonSdkSmokeTest(unittest.TestCase):
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
+            JsonHandler.idempotency_headers = []
             engine = Engine({"allow_private_networks": True})
             result = engine.test(
                 {
                     "url": f"http://127.0.0.1:{server.server_port}/profile",
                     "method": "GET",
                     "auth": {"type": "none"},
-                }
+                },
+                idempotency_key="python-test-42",
             )
             enriched = engine.enrich(
                 {
@@ -114,6 +120,7 @@ class PythonSdkSmokeTest(unittest.TestCase):
 
         self.assertEqual(result["status"], "success")
         self.assertEqual(result["output"]["value"]["profile"]["name"], "Ada")
+        self.assertEqual(JsonHandler.idempotency_headers[0], "python-test-42")
         self.assertEqual(result["responses"], [])
         self.assertEqual(
             [record["id"] for record in enriched["output"]["records"]],
@@ -149,6 +156,12 @@ class PythonSdkSmokeTest(unittest.TestCase):
                 "rest.upload",
             ],
         )
+        self.assertTrue(
+            all(
+                operation["controls"]["idempotency_key"]
+                for operation in capabilities["operations"]
+            )
+        )
         self.assertEqual(version(), importlib.metadata.version("plenora-rest"))
 
         token = CancellationToken()
@@ -174,6 +187,7 @@ class PythonSdkSmokeTest(unittest.TestCase):
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
+            JsonHandler.post_requests = 0
             with tempfile.TemporaryDirectory() as directory:
                 root = pathlib.Path(directory)
                 source = root / "source.bin"
@@ -220,6 +234,26 @@ class PythonSdkSmokeTest(unittest.TestCase):
                     },
                     async_destination,
                 )
+                resumed_async_destination = root / "resumed-async-download.bin"
+                resumed_async_download = engine.download(
+                    {
+                        "url": (
+                            f"http://127.0.0.1:{server.server_port}/exports"
+                        ),
+                        "method": "POST",
+                        "polling": {
+                            "url_template": "{base}/jobs/{job_id}",
+                            "status_path": "status",
+                            "result_url_template": (
+                                "{base}/artifacts/{job_id}"
+                            ),
+                            "interval_ms": 0,
+                            "max_attempts": 1,
+                            "resume": {"job_id": "existing-2"},
+                        },
+                    },
+                    resumed_async_destination,
+                )
                 JsonHandler.resume_requests = []
                 resumed_destination = root / "resumed-download.bin"
                 resumed = engine.download(
@@ -253,6 +287,12 @@ class PythonSdkSmokeTest(unittest.TestCase):
                 self.assertEqual(async_downloaded["status"], "success")
                 self.assertEqual(async_downloaded["metrics"]["requests"], 3)
                 self.assertEqual(async_downloaded["metrics"]["poll_requests"], 2)
+                self.assertEqual(resumed_async_download["status"], "success")
+                self.assertEqual(resumed_async_download["metrics"]["requests"], 2)
+                self.assertEqual(
+                    resumed_async_download["metrics"]["poll_requests"], 2
+                )
+                self.assertEqual(JsonHandler.post_requests, 1)
                 self.assertEqual(
                     async_downloaded["output"]["checksum"]["value"],
                     hashlib.sha256(async_destination.read_bytes()).hexdigest(),

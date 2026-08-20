@@ -26,14 +26,16 @@ pub use capability::{
     Surface, capabilities,
 };
 pub use contract::{
-    ApiKeyLocation, ArtifactReference, AuthConfig, BatchConfig, BatchInputFormat, BodyType,
-    CachePolicy, CircuitBreakerPolicy, ConnectionConfig, CookiePolicy, EngineConfig,
-    ExecutionError, ExecutionInput, ExecutionMetrics, ExecutionOperation, ExecutionOptions,
-    ExecutionOutput, ExecutionRequest, ExecutionResult, ExecutionStatus, FileTransferDirection,
-    FileTransferInput, HttpMethod, HttpResponseMetadata, IntegrityMetadata, IterationSpec,
-    JsonObject, OAuthClientAuth, OutputMapping, PaginationConfig, ParameterLocation, ParameterMode,
-    ParameterSpec, PollingConfig, ProxyConfig, QuerySerialization, QueryStyle, RequestConfig,
-    ResponseConfig, ResponseFormat, ResponseTransform, RetryPolicy, SCHEMA_VERSION, TlsConfig,
+    ASYNC_JOB_RECOVERY_CONTRACT, ApiKeyLocation, ArtifactReference, AsyncJobRecovery, AuthConfig,
+    BatchConfig, BatchInputFormat, BodyType, CachePolicy, CircuitBreakerPolicy, ConnectionConfig,
+    CookiePolicy, EngineConfig, ExecutionError, ExecutionInput, ExecutionMetrics,
+    ExecutionOperation, ExecutionOptions, ExecutionOutput, ExecutionRequest, ExecutionResult,
+    ExecutionStatus, FileTransferDirection, FileTransferInput, HttpMethod, HttpResponseMetadata,
+    IdempotencyConfig, IdempotencyLocation, IntegrityMetadata, IterationSpec, JsonObject,
+    OAuthClientAuth, OutputMapping, PaginationConfig, ParameterLocation, ParameterMode,
+    ParameterSpec, PollingCancelConfig, PollingConfig, PollingResumeConfig, ProxyConfig,
+    QuerySerialization, QueryStyle, RequestConfig, ResponseConfig, ResponseFormat,
+    ResponseTransform, RetryPolicy, SCHEMA_VERSION, TlsConfig,
 };
 pub use control::{CancellationToken, ExecutionControl};
 pub use engine::Engine;

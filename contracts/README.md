@@ -10,6 +10,7 @@ Contract identifiers:
 - plenora-rest-execution-result-v1;
 - plenora-rest-file-transfer-input-v1;
 - plenora-rest-file-transfer-result-v1;
+- plenora-rest-async-job-recovery-v1;
 - plenora-rest-capability-attributes-v1.
 
 The five stable operations are rest.test, rest.generate, rest.enrich,
@@ -25,3 +26,8 @@ authorized local path as an input convenience, but results never echo it.
 
 Unknown fields are rejected by the Rust DTOs. Public failures preserve
 category, phase, remote_effect and retry from plenora-error-v1.
+
+An asynchronous HTTP job may return a bounded recovery handle containing only
+its public job identifier and best-effort remote cancellation outcome. Resume
+uses that identifier with the original connection and skips job submission.
+Idempotency keys are execution controls and never appear in public results.

@@ -23,6 +23,11 @@
     "errors": {
       "type": "array",
       "items": {"$ref": "#/$defs/error"}
+    },
+    "recoveries": {
+      "type": "array",
+      "maxItems": 128,
+      "items": {"$ref": "plenora-rest-async-job-recovery-v1.schema.json"}
     }
   },
   "$defs": {

@@ -6,6 +6,7 @@ use serde_json::{Map, Value};
 use crate::error::{ErrorCategory, ErrorPhase, RemoteEffect, RetryAdvice};
 
 pub const SCHEMA_VERSION: u32 = 1;
+pub const ASYNC_JOB_RECOVERY_CONTRACT: &str = "plenora-rest-async-job-recovery-v1";
 pub type JsonObject = Map<String, Value>;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -32,6 +33,7 @@ pub struct EngineConfig {
     pub max_cache_entries: usize,
     pub max_cache_bytes: usize,
     pub max_circuit_origins: usize,
+    pub max_idempotency_keys: usize,
     pub user_agent: String,
 }
 
@@ -59,6 +61,7 @@ impl Default for EngineConfig {
             max_cache_entries: 1_024,
             max_cache_bytes: 64 * 1024 * 1024,
             max_circuit_origins: 256,
+            max_idempotency_keys: 4_096,
             user_agent: format!("rest-engine/{}", env!("CARGO_PKG_VERSION")),
         }
     }
@@ -102,6 +105,7 @@ pub struct ConnectionConfig {
     pub cookies: CookiePolicy,
     pub cache: CachePolicy,
     pub circuit_breaker: CircuitBreakerPolicy,
+    pub idempotency: IdempotencyConfig,
     pub pagination: Option<PaginationConfig>,
     pub polling: Option<PollingConfig>,
     pub batch: Option<BatchConfig>,
@@ -127,6 +131,7 @@ impl Default for ConnectionConfig {
             cookies: CookiePolicy::default(),
             cache: CachePolicy::default(),
             circuit_breaker: CircuitBreakerPolicy::default(),
+            idempotency: IdempotencyConfig::default(),
             pagination: None,
             polling: None,
             batch: None,
@@ -503,6 +508,31 @@ impl Default for RetryPolicy {
     }
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct IdempotencyConfig {
+    pub name: String,
+    pub location: IdempotencyLocation,
+}
+
+impl Default for IdempotencyConfig {
+    fn default() -> Self {
+        Self {
+            name: "Idempotency-Key".to_owned(),
+            location: IdempotencyLocation::Header,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum IdempotencyLocation {
+    #[default]
+    Header,
+    Query,
+    Body,
+}
+
 #[derive(Clone, Debug, Deserialize, Hash, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct CookiePolicy {
@@ -572,6 +602,8 @@ pub struct PollingConfig {
     pub max_wait_ms: Option<u64>,
     pub max_attempts: u32,
     pub allow_cross_origin: bool,
+    pub resume: Option<PollingResumeConfig>,
+    pub cancel: Option<PollingCancelConfig>,
 }
 
 impl Default for PollingConfig {
@@ -614,6 +646,38 @@ impl Default for PollingConfig {
             max_wait_ms: None,
             max_attempts: 60,
             allow_cross_origin: false,
+            resume: None,
+            cancel: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PollingResumeConfig {
+    pub job_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PollingCancelConfig {
+    pub url_template: Option<String>,
+    pub method: HttpMethod,
+    pub timeout_ms: u64,
+    pub on_cancellation: bool,
+    pub on_deadline: bool,
+    pub on_poll_timeout: bool,
+}
+
+impl Default for PollingCancelConfig {
+    fn default() -> Self {
+        Self {
+            url_template: None,
+            method: HttpMethod::Delete,
+            timeout_ms: 5_000,
+            on_cancellation: true,
+            on_deadline: true,
+            on_poll_timeout: false,
         }
     }
 }
@@ -725,6 +789,7 @@ pub struct ExecutionOptions {
     pub response_headers: Vec<String>,
     pub enrichment_concurrency: usize,
     pub deadline: Option<String>,
+    pub idempotency_key: Option<String>,
 }
 
 impl Default for ExecutionOptions {
@@ -735,6 +800,7 @@ impl Default for ExecutionOptions {
             response_headers: Vec::new(),
             enrichment_concurrency: 1,
             deadline: None,
+            idempotency_key: None,
         }
     }
 }
@@ -747,6 +813,17 @@ pub struct ExecutionResult {
     pub metrics: ExecutionMetrics,
     pub responses: Vec<HttpResponseMetadata>,
     pub errors: Vec<ExecutionError>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub recoveries: Vec<AsyncJobRecovery>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct AsyncJobRecovery {
+    pub contract: String,
+    pub job_id: String,
+    pub cancel_requested: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cancel_accepted: Option<bool>,
 }
 
 #[derive(Clone, Debug, Serialize)]

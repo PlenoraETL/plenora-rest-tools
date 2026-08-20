@@ -95,7 +95,7 @@ where
                 }
                 let result = self.engine.execute_with_control(execution, control).await;
                 if result.status == ExecutionStatus::Failed {
-                    let error = result
+                    let mut error = result
                         .errors
                         .first()
                         .map(execution_error_payload)
@@ -103,6 +103,13 @@ where
                             EngineError::Runtime("execution failed without an error".to_owned())
                                 .payload()
                         });
+                    if !result.recoveries.is_empty() {
+                        error.details.insert(
+                            "async_jobs".to_owned(),
+                            serde_json::to_value(&result.recoveries)
+                                .unwrap_or_else(|_| Value::Array(Vec::new())),
+                        );
+                    }
                     error_message(&request, error)
                 } else {
                     success_message(&request, output_contract, result)
@@ -135,8 +142,17 @@ where
                 "runtime input contract does not match the operation".to_owned(),
             ));
         }
-        let execution = serde_json::from_value::<ExecutionRequest>(message.payload.clone())
+        let mut execution = serde_json::from_value::<ExecutionRequest>(message.payload.clone())
             .map_err(|error| EngineError::InvalidInput(error.to_string()))?;
+        if execution.options.idempotency_key.is_some() {
+            return Err(EngineError::InvalidInput(
+                "runtime idempotency key must use plenora.execution.idempotency_key metadata"
+                    .to_owned(),
+            ));
+        }
+        if let Some(key) = message.metadata.get("plenora.execution.idempotency_key") {
+            execution.options.idempotency_key = Some(key.clone());
+        }
         if execution.operation != operation {
             return Err(EngineError::InvalidInput(
                 "runtime selector and payload operation differ".to_owned(),

@@ -193,12 +193,20 @@ fn operation(
                 "rate_limit",
                 "cache",
                 "cookies",
-                "circuit_breaker"
+                "circuit_breaker",
+                "idempotency_key"
             ]),
         ),
         (
             "orchestration".to_owned(),
-            json!(["pagination", "polling", "batch", "ordered_enrichment"]),
+            json!([
+                "pagination",
+                "polling",
+                "async_job_recovery",
+                "remote_cancel",
+                "batch",
+                "ordered_enrichment"
+            ]),
         ),
         ("integrity".to_owned(), Value::String("sha256".to_owned())),
     ]);
@@ -226,7 +234,7 @@ fn operation(
         controls: ExecutionControls {
             cancellation: true,
             deadline: true,
-            idempotency_key: false,
+            idempotency_key: true,
         },
         attributes,
     }
@@ -244,7 +252,7 @@ mod tests {
             operation.attributes["contract"] == CAPABILITY_ATTRIBUTES_CONTRACT
                 && operation.controls.cancellation
                 && operation.controls.deadline
-                && !operation.controls.idempotency_key
+                && operation.controls.idempotency_key
         }));
     }
 }

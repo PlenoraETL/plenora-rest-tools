@@ -1,4 +1,6 @@
-use plenora_rest_core::{Engine, EngineConfig};
+use plenora_rest_core::{
+    CancellationToken, Engine, EngineConfig, ExecutionControl, ExecutionRequest,
+};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
@@ -1348,6 +1350,274 @@ async fn polling_can_follow_header_job_id_and_result_url() {
     let observed = observed.lock().unwrap();
     assert!(observed[1].starts_with("GET /jobs/job%2F1 "));
     assert!(observed[2].starts_with("GET /out/job%2F1 "));
+}
+
+#[tokio::test]
+async fn idempotency_key_is_stable_across_retries_and_conflicts_fail_before_network() {
+    let (url, server, observed) = recorded_server(vec![
+        (503, r#"{"error":"busy"}"#, vec![]),
+        (200, r#"{"ok":true}"#, vec![]),
+    ])
+    .await;
+    let engine = local_engine();
+    let request = json!({
+        "schema_version": 1,
+        "operation": "test",
+        "connection": {
+            "url": url,
+            "method": "POST",
+            "request": {"body_type": "json"},
+            "retry": {
+                "max_attempts": 2,
+                "backoff_base_ms": 0,
+                "retry_on_status": [503]
+            }
+        },
+        "input": {"params": {"value": 1}},
+        "options": {"idempotency_key": "job-request-42"}
+    });
+
+    let first = execute(&engine, request.clone()).await;
+    server.await.unwrap();
+    assert_eq!(first["status"], "success");
+    assert_eq!(first["metrics"]["requests"], 2);
+
+    let mut conflicting = request;
+    conflicting["input"]["params"]["value"] = json!(2);
+    let conflict = execute(&engine, conflicting).await;
+    assert_eq!(conflict["status"], "failed");
+    assert_eq!(conflict["errors"][0]["code"], "IDEMPOTENCY_CONFLICT");
+
+    let observed = observed.lock().unwrap();
+    assert_eq!(observed.len(), 2);
+    for request in observed.iter() {
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains("idempotency-key: job-request-42")
+        );
+    }
+}
+
+#[tokio::test]
+async fn idempotency_key_supports_query_and_body_locations() {
+    let (url, server, observed) = recorded_server(vec![
+        (200, r#"{"ok":true}"#, vec![]),
+        (200, r#"{"ok":true}"#, vec![]),
+    ])
+    .await;
+    let engine = local_engine();
+
+    let query_result = execute(
+        &engine,
+        json!({
+            "schema_version": 1,
+            "operation": "test",
+            "connection": {
+                "url": url,
+                "method": "GET",
+                "idempotency": {"name": "request_id", "location": "query"}
+            },
+            "options": {"idempotency_key": "query-42"}
+        }),
+    )
+    .await;
+    let body_result = execute(
+        &engine,
+        json!({
+            "schema_version": 1,
+            "operation": "test",
+            "connection": {
+                "url": url,
+                "method": "POST",
+                "request": {"body_type": "json"},
+                "idempotency": {"name": "request_id", "location": "body"}
+            },
+            "input": {"params": {"value": 1}},
+            "options": {"idempotency_key": "body-42"}
+        }),
+    )
+    .await;
+    server.await.unwrap();
+
+    assert_eq!(query_result["status"], "success");
+    assert_eq!(body_result["status"], "success");
+    let observed = observed.lock().unwrap();
+    assert!(observed[0].starts_with("GET /?request_id=query-42 "));
+    assert!(observed[1].contains(r#""request_id":"body-42""#));
+}
+
+#[tokio::test]
+async fn polling_resume_skips_submission_and_uses_the_existing_job() {
+    let (base_url, server, observed) = recorded_server(vec![(
+        200,
+        r#"{"status":"completed","result":{"answer":42}}"#,
+        vec![],
+    )])
+    .await;
+    let request = json!({
+        "schema_version": 1,
+        "operation": "test",
+        "connection": {
+            "url": format!("{base_url}submit"),
+            "method": "POST",
+            "polling": {
+                "url_template": "{base}/jobs/{job_id}",
+                "status_path": "status",
+                "result_path": "result",
+                "interval_ms": 0,
+                "max_attempts": 1,
+                "resume": {"job_id": "existing-42"}
+            }
+        }
+    });
+
+    let result = execute(&local_engine(), request).await;
+    server.await.unwrap();
+
+    assert_eq!(result["status"], "success");
+    assert_eq!(result["output"]["value"], json!({"answer": 42}));
+    assert_eq!(result["metrics"]["requests"], 1);
+    let observed = observed.lock().unwrap();
+    assert_eq!(observed.len(), 1);
+    assert!(
+        observed[0].starts_with("GET /jobs/existing-42 "),
+        "{observed:?}"
+    );
+}
+
+#[tokio::test]
+async fn polling_timeout_returns_recovery_and_can_cancel_the_remote_job() {
+    let (base_url, server, observed) = recorded_server(vec![
+        (
+            202,
+            r#"{"id":"job-42","status":"queued"}"#,
+            vec![("Location", "/jobs/job-42")],
+        ),
+        (200, r#"{"status":"running"}"#, vec![]),
+        (200, r#"{"cancelled":true}"#, vec![]),
+    ])
+    .await;
+    let request = json!({
+        "schema_version": 1,
+        "operation": "test",
+        "connection": {
+            "url": format!("{base_url}submit"),
+            "method": "POST",
+            "polling": {
+                "status_path": "status",
+                "interval_ms": 0,
+                "max_attempts": 1,
+                "cancel": {"on_poll_timeout": true}
+            }
+        }
+    });
+
+    let result = execute(&local_engine(), request).await;
+    server.await.unwrap();
+
+    assert_eq!(result["status"], "failed");
+    assert_eq!(result["errors"][0]["code"], "POLLING_TIMEOUT");
+    assert_eq!(
+        result["recoveries"][0]["contract"],
+        "plenora-rest-async-job-recovery-v1"
+    );
+    assert_eq!(result["recoveries"][0]["job_id"], "job-42");
+    assert_eq!(result["recoveries"][0]["cancel_requested"], true);
+    assert_eq!(result["recoveries"][0]["cancel_accepted"], true);
+    let observed = observed.lock().unwrap();
+    assert!(observed[0].starts_with("POST /submit "));
+    assert!(observed[1].starts_with("GET /jobs/job-42 "));
+    assert!(observed[2].starts_with("DELETE /jobs/job-42 "));
+}
+
+#[tokio::test]
+async fn invalid_polling_configuration_is_rejected_before_remote_submission() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let result = execute(
+        &local_engine(),
+        json!({
+            "schema_version": 1,
+            "operation": "test",
+            "connection": {
+                "url": format!("http://{address}/submit"),
+                "method": "POST",
+                "polling": {
+                    "status_path": "status",
+                    "max_attempts": 0
+                }
+            }
+        }),
+    )
+    .await;
+
+    assert_eq!(result["status"], "failed");
+    assert_eq!(result["errors"][0]["code"], "INVALID_INPUT");
+    assert_eq!(result["errors"][0]["remote_effect"], "none");
+    assert!(
+        timeout(Duration::from_millis(100), listener.accept())
+            .await
+            .is_err(),
+        "invalid polling configuration reached the remote server"
+    );
+}
+
+#[tokio::test]
+async fn local_cancellation_attempts_remote_cancellation_and_preserves_recovery() {
+    let (base_url, server, observed) = recorded_server(vec![
+        (
+            202,
+            r#"{"id":"job-99","status":"queued"}"#,
+            vec![("Location", "/jobs/job-99")],
+        ),
+        (200, r#"{"cancelled":true}"#, vec![]),
+    ])
+    .await;
+    let request: ExecutionRequest = serde_json::from_value(json!({
+        "schema_version": 1,
+        "operation": "test",
+        "connection": {
+            "url": format!("{base_url}submit"),
+            "method": "POST",
+            "polling": {
+                "status_path": "status",
+                "interval_ms": 5_000,
+                "max_attempts": 2,
+                "cancel": {}
+            }
+        }
+    }))
+    .unwrap();
+    let engine = Arc::new(local_engine());
+    let cancellation = CancellationToken::new();
+    let execution_engine = Arc::clone(&engine);
+    let execution_cancellation = cancellation.clone();
+    let execution = tokio::spawn(async move {
+        execution_engine
+            .execute_with_control(request, ExecutionControl::new(execution_cancellation))
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    cancellation.cancel();
+
+    let result = timeout(Duration::from_secs(2), execution)
+        .await
+        .expect("execution did not observe cancellation")
+        .unwrap();
+    timeout(Duration::from_secs(2), server)
+        .await
+        .expect("remote cancellation request was not sent")
+        .unwrap();
+
+    assert_eq!(result.status, plenora_rest_core::ExecutionStatus::Failed);
+    assert_eq!(result.errors[0].code, "CANCELLED");
+    assert_eq!(result.recoveries[0].job_id, "job-99");
+    assert!(result.recoveries[0].cancel_requested);
+    assert_eq!(result.recoveries[0].cancel_accepted, Some(true));
+    let observed = observed.lock().unwrap();
+    assert!(observed[0].starts_with("POST /submit "));
+    assert!(observed[1].starts_with("DELETE /jobs/job-99 "));
 }
 
 #[tokio::test]

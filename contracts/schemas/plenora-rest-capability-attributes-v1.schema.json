@@ -69,7 +69,8 @@
           "rate_limit",
           "cache",
           "cookies",
-          "circuit_breaker"
+          "circuit_breaker",
+          "idempotency_key"
         ]
       }
     },
@@ -78,7 +79,14 @@
       "minItems": 1,
       "uniqueItems": true,
       "items": {
-        "enum": ["pagination", "polling", "batch", "ordered_enrichment"]
+        "enum": [
+          "pagination",
+          "polling",
+          "async_job_recovery",
+          "remote_cancel",
+          "batch",
+          "ordered_enrichment"
+        ]
       }
     },
     "integrity": {"const": "sha256"},

@@ -52,6 +52,8 @@ pub enum EngineError {
     MissingParameter(String),
     #[error("authentication failed: {0}")]
     Authentication(String),
+    #[error("idempotency key was reused with different input")]
+    IdempotencyConflict,
     #[error("asynchronous operation did not complete after {attempts} polls")]
     PollingTimeout { attempts: u32 },
     #[error("engine runtime failed: {0}")]
@@ -191,6 +193,7 @@ impl EngineError {
             Self::Application(_) => "APPLICATION_ERROR",
             Self::MissingParameter(_) => "MISSING_PARAMETER",
             Self::Authentication(_) => "AUTHENTICATION_FAILED",
+            Self::IdempotencyConflict => "IDEMPOTENCY_CONFLICT",
             Self::PollingTimeout { .. } => "POLLING_TIMEOUT",
             Self::Runtime(_) => "RUNTIME_ERROR",
         }
@@ -220,6 +223,7 @@ impl EngineError {
             Self::Application(_) => "Remote application reported failure",
             Self::MissingParameter(_) => "A required parameter is missing",
             Self::Authentication(_) => "Authentication failed",
+            Self::IdempotencyConflict => "Idempotency key conflicts with prior input",
             Self::PollingTimeout { .. } => "Asynchronous operation did not complete",
             Self::Runtime(_) => "REST engine failed internally",
         }
@@ -227,9 +231,10 @@ impl EngineError {
 
     fn category(&self) -> ErrorCategory {
         match self {
-            Self::InvalidInput(_) | Self::InvalidUrl(_) | Self::InvalidHeader(_) => {
-                ErrorCategory::InvalidConfiguration
-            }
+            Self::InvalidInput(_)
+            | Self::InvalidUrl(_)
+            | Self::InvalidHeader(_)
+            | Self::IdempotencyConflict => ErrorCategory::InvalidConfiguration,
             Self::UnsupportedSchema { .. } => ErrorCategory::Unsupported,
             Self::UnsafeAddress(_) | Self::PolicyViolation(_) => ErrorCategory::Authorization,
             Self::DnsResolution(_) | Self::Transport(_) | Self::CircuitOpen { .. } => {
@@ -257,7 +262,8 @@ impl EngineError {
             | Self::InvalidUrl(_)
             | Self::UnsafeAddress(_)
             | Self::PolicyViolation(_)
-            | Self::EngineClosed => ErrorPhase::Validate,
+            | Self::EngineClosed
+            | Self::IdempotencyConflict => ErrorPhase::Validate,
             Self::DnsResolution(_) | Self::CircuitOpen { .. } | Self::Authentication(_) => {
                 ErrorPhase::Connect
             }

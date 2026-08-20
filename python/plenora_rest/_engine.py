@@ -106,6 +106,7 @@ class Engine:
         params: Optional[Mapping[str, Any]] = None,
         execution_options: Optional[Mapping[str, Any]] = None,
         deadline: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
         cancellation: Optional[CancellationToken] = None,
     ) -> ExecutionResult:
         return self._execute(
@@ -115,6 +116,7 @@ class Engine:
                 params=params,
                 execution_options=execution_options,
                 deadline=deadline,
+                idempotency_key=idempotency_key,
             ),
             cancellation,
         )
@@ -126,6 +128,7 @@ class Engine:
         params: Optional[Mapping[str, Any]] = None,
         execution_options: Optional[Mapping[str, Any]] = None,
         deadline: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
         cancellation: Optional[CancellationToken] = None,
     ) -> ExecutionResult:
         return self._execute(
@@ -135,6 +138,7 @@ class Engine:
                 params=params,
                 execution_options=execution_options,
                 deadline=deadline,
+                idempotency_key=idempotency_key,
             ),
             cancellation,
         )
@@ -149,6 +153,7 @@ class Engine:
         concurrency: int = 1,
         execution_options: Optional[Mapping[str, Any]] = None,
         deadline: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
         cancellation: Optional[CancellationToken] = None,
     ) -> ExecutionResult:
         request = _request(
@@ -157,6 +162,7 @@ class Engine:
             params=params,
             execution_options=execution_options,
             deadline=deadline,
+            idempotency_key=idempotency_key,
         )
         request["input"]["records"] = [dict(record) for record in records]
         request["options"].update(
@@ -179,6 +185,7 @@ class Engine:
         expected_sha256: Optional[str] = None,
         execution_options: Optional[Mapping[str, Any]] = None,
         deadline: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
         cancellation: Optional[CancellationToken] = None,
     ) -> ExecutionResult:
         request = _request(
@@ -187,6 +194,7 @@ class Engine:
             params=params,
             execution_options=execution_options,
             deadline=deadline,
+            idempotency_key=idempotency_key,
         )
         request["input"]["file"] = _file_input(
             destination,
@@ -210,6 +218,7 @@ class Engine:
         expected_sha256: Optional[str] = None,
         execution_options: Optional[Mapping[str, Any]] = None,
         deadline: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
         cancellation: Optional[CancellationToken] = None,
     ) -> ExecutionResult:
         prepared_connection = dict(connection)
@@ -227,6 +236,7 @@ class Engine:
             params=params,
             execution_options=execution_options,
             deadline=deadline,
+            idempotency_key=idempotency_key,
         )
         file_input = _file_input(
             source,
@@ -259,10 +269,13 @@ def _request(
     params: Optional[Mapping[str, Any]],
     execution_options: Optional[Mapping[str, Any]],
     deadline: Optional[str],
+    idempotency_key: Optional[str],
 ) -> dict[str, Any]:
     options = dict(execution_options or {})
     if deadline is not None:
         options["deadline"] = deadline
+    if idempotency_key is not None:
+        options["idempotency_key"] = idempotency_key
     return {
         "schema_version": SCHEMA_VERSION,
         "operation": operation,

@@ -3,7 +3,7 @@
   "component": "plenora-rest-tools",
   "contracts_source": {
     "repository": "https://github.com/PlenoraETL/plenora-contracts.git",
-    "revision": "e0484e54c96c5441ea09f44a2419bcabbe7f7242"
+    "revision": "83ed391212b28100ffa6097a2963f746b6209b37"
   },
   "profile": "plenora-rest-tools-profile-v1",
   "artifacts": [
@@ -11,7 +11,7 @@
       "name": "plenora-rest-core",
       "surface": "rust",
       "version": "0.1.0",
-      "digest": "sha256:55a09ca4a0411a35fe3a9c40890d31a724108f56ed51fccb1c54e11ecf7649f7",
+      "digest": "sha256:33d6274961e5aa9e795b5a932cbf0e6adff637f0ba30e9e654a6655c5188d324",
       "verification": [
         "cargo package --package plenora-rest-core --allow-dirty",
         "cargo test -p plenora-rest-core --test public_surface",
@@ -22,7 +22,7 @@
       "name": "plenora-rest",
       "surface": "python_sdk",
       "version": "0.1.0",
-      "digest": "sha256:8edc0eec5894a9dd98fe577d446be4e04365e7953e0ccbf0f867caf82f1986f3",
+      "digest": "sha256:58ee0430ed16a8cd774eb3890900fd90843d0cff8081e0856f02a5764e24ced6",
       "api_modes": ["sync"],
       "verification": [
         "maturin build --release",
@@ -33,7 +33,7 @@
       "name": "plenora.rest-tools",
       "surface": "runtime",
       "version": "0.1.0",
-      "digest": "sha256:55a09ca4a0411a35fe3a9c40890d31a724108f56ed51fccb1c54e11ecf7649f7",
+      "digest": "sha256:33d6274961e5aa9e795b5a932cbf0e6adff637f0ba30e9e654a6655c5188d324",
       "verification": [
         "cargo test -p plenora-rest-core --test runtime_binding"
       ]

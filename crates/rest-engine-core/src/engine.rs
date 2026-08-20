@@ -1,25 +1,29 @@
 use std::{
-    collections::{BTreeMap, BTreeSet, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use futures_util::{StreamExt, stream};
-use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
+use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use reqwest::Url;
 use serde_json::{Map, Number, Value};
 use sha2::{Digest, Sha256};
 use tokio::{fs, io::AsyncReadExt, time::sleep};
 
 use crate::{
-    BatchConfig, BatchInputFormat, BodyType, CachePolicy, CancellationToken, CapabilityDocument,
-    ConnectionConfig, EngineConfig, EngineError, ExecutionControl, ExecutionError,
-    ExecutionMetrics, ExecutionOperation, ExecutionOutput, ExecutionRequest, ExecutionResult,
-    ExecutionStatus, FileTransferDirection, FileTransferInput, HttpMethod, HttpResponseMetadata,
-    IntegrityMetadata, JsonObject, OutputMapping, PaginationConfig, ParameterLocation,
-    ParameterMode, PollingConfig, QuerySerialization, QueryStyle, ResponseConfig,
+    ASYNC_JOB_RECOVERY_CONTRACT, AsyncJobRecovery, BatchConfig, BatchInputFormat, BodyType,
+    CachePolicy, CancellationToken, CapabilityDocument, ConnectionConfig, EngineConfig,
+    EngineError, ExecutionControl, ExecutionError, ExecutionMetrics, ExecutionOperation,
+    ExecutionOutput, ExecutionRequest, ExecutionResult, ExecutionStatus, FileTransferDirection,
+    FileTransferInput, HttpMethod, HttpResponseMetadata, IdempotencyLocation, IntegrityMetadata,
+    JsonObject, OutputMapping, PaginationConfig, ParameterLocation, ParameterMode,
+    PollingCancelConfig, PollingConfig, QuerySerialization, QueryStyle, ResponseConfig,
     ResponseTransform, SCHEMA_VERSION, capabilities, json_path, response_body,
     transport::{
         DownloadTarget, PreparedBody, PreparedFile, PreparedFileSource, PreparedRequest,
@@ -31,7 +35,45 @@ pub struct Engine {
     config: EngineConfig,
     transport: Transport,
     closed: AtomicBool,
+    idempotency: Mutex<IdempotencyRegistry>,
 }
+
+#[derive(Default)]
+struct IdempotencyRegistry {
+    fingerprints: HashMap<String, String>,
+    insertion_order: VecDeque<String>,
+}
+
+#[derive(Clone)]
+struct ActiveAsyncJob {
+    recovery: Option<AsyncJobRecovery>,
+    cancel: Option<ActiveRemoteCancel>,
+}
+
+#[derive(Clone)]
+struct ActiveRemoteCancel {
+    request: PreparedRequest,
+    on_cancellation: bool,
+    on_deadline: bool,
+    on_poll_timeout: bool,
+}
+
+#[derive(Clone, Copy)]
+enum RemoteCancelTrigger {
+    Cancellation,
+    Deadline,
+    PollTimeout,
+}
+
+tokio::task_local! {
+    static ACTIVE_ASYNC_JOBS: Arc<Mutex<BTreeMap<String, ActiveAsyncJob>>>;
+}
+
+const PATH_SEGMENT_ENCODE_SET: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'.')
+    .remove(b'_')
+    .remove(b'~');
 
 struct OperationResult {
     output: ExecutionOutput,
@@ -43,6 +85,7 @@ struct PollCompletion {
     value: Value,
     response: ResponseData,
     job_id: Option<Value>,
+    active_key: Option<String>,
 }
 
 struct EnrichmentOutcome {
@@ -59,6 +102,7 @@ impl Engine {
             transport: Transport::new(config.clone()),
             config,
             closed: AtomicBool::new(false),
+            idempotency: Mutex::new(IdempotencyRegistry::default()),
         }
     }
 
@@ -80,23 +124,48 @@ impl Engine {
         if self.is_closed() {
             return failed_result(EngineError::EngineClosed);
         }
+        if let Err(error) = validate_execution_configuration(&request) {
+            return failed_result(error);
+        }
+        if let Err(error) = self.admit_idempotency(&request) {
+            return failed_result(error);
+        }
+        let active_jobs = Arc::new(Mutex::new(BTreeMap::new()));
         let deadline = control.deadline.map(tokio::time::Instant::from_std);
-        let execution = self.execute_inner(request);
-        match deadline {
+        let execution = ACTIVE_ASYNC_JOBS.scope(active_jobs.clone(), self.execute_inner(request));
+        enum Controlled<T> {
+            Finished(T),
+            Cancelled,
+            Deadline,
+        }
+        let outcome = match deadline {
             Some(deadline) => {
                 tokio::select! {
                     biased;
-                    _ = control.cancellation.cancelled() => failed_result(EngineError::Cancelled),
-                    _ = tokio::time::sleep_until(deadline) => failed_result(EngineError::Timeout),
-                    result = execution => result,
+                    _ = control.cancellation.cancelled() => Controlled::Cancelled,
+                    _ = tokio::time::sleep_until(deadline) => Controlled::Deadline,
+                    result = execution => Controlled::Finished(result),
                 }
             }
             None => {
                 tokio::select! {
                     biased;
-                    _ = control.cancellation.cancelled() => failed_result(EngineError::Cancelled),
-                    result = execution => result,
+                    _ = control.cancellation.cancelled() => Controlled::Cancelled,
+                    result = execution => Controlled::Finished(result),
                 }
+            }
+        };
+        match outcome {
+            Controlled::Finished(result) => result,
+            Controlled::Cancelled => {
+                self.cancel_active_jobs(&active_jobs, RemoteCancelTrigger::Cancellation)
+                    .await;
+                failed_result_with_recoveries(EngineError::Cancelled, recoveries_from(&active_jobs))
+            }
+            Controlled::Deadline => {
+                self.cancel_active_jobs(&active_jobs, RemoteCancelTrigger::Deadline)
+                    .await;
+                failed_result_with_recoveries(EngineError::Timeout, recoveries_from(&active_jobs))
             }
         }
     }
@@ -111,6 +180,103 @@ impl Engine {
 
     pub fn is_closed(&self) -> bool {
         self.closed.load(Ordering::Acquire)
+    }
+
+    fn admit_idempotency(&self, request: &ExecutionRequest) -> Result<(), EngineError> {
+        let Some(key) = request.options.idempotency_key.as_deref() else {
+            return Ok(());
+        };
+        validate_idempotency_key(key)?;
+        if self.config.max_idempotency_keys == 0 {
+            return Err(EngineError::PolicyViolation(
+                "max_idempotency_keys must be greater than zero when a key is used".to_owned(),
+            ));
+        }
+        let fingerprint = execution_fingerprint(request)?;
+        let mut registry = self
+            .idempotency
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(existing) = registry.fingerprints.get(key) {
+            return if existing == &fingerprint {
+                Ok(())
+            } else {
+                Err(EngineError::IdempotencyConflict)
+            };
+        }
+        while registry.fingerprints.len() >= self.config.max_idempotency_keys {
+            let Some(oldest) = registry.insertion_order.pop_front() else {
+                break;
+            };
+            registry.fingerprints.remove(&oldest);
+        }
+        registry.fingerprints.insert(key.to_owned(), fingerprint);
+        registry.insertion_order.push_back(key.to_owned());
+        Ok(())
+    }
+
+    async fn cancel_active_jobs(
+        &self,
+        jobs: &Arc<Mutex<BTreeMap<String, ActiveAsyncJob>>>,
+        trigger: RemoteCancelTrigger,
+    ) {
+        let requests = {
+            let mut jobs = jobs.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            jobs.iter_mut()
+                .filter_map(|(key, job)| {
+                    let cancel = job.cancel.as_ref()?;
+                    if !cancel_enabled(cancel, trigger) {
+                        return None;
+                    }
+                    if let Some(recovery) = job.recovery.as_mut() {
+                        recovery.cancel_requested = true;
+                    }
+                    Some((key.clone(), cancel.request.clone()))
+                })
+                .collect::<Vec<_>>()
+        };
+        for (key, request) in requests {
+            let accepted = self
+                .transport
+                .execute(request)
+                .await
+                .is_ok_and(|response| (200..300).contains(&response.status));
+            let mut jobs = jobs.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(recovery) = jobs.get_mut(&key).and_then(|job| job.recovery.as_mut()) {
+                recovery.cancel_accepted = Some(accepted);
+            }
+        }
+    }
+
+    async fn cancel_active_job(&self, key: &str, trigger: RemoteCancelTrigger) {
+        let Some(jobs) = active_jobs_handle() else {
+            return;
+        };
+        let request = {
+            let mut locked = jobs.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let Some(job) = locked.get_mut(key) else {
+                return;
+            };
+            let Some(cancel) = job.cancel.as_ref() else {
+                return;
+            };
+            if !cancel_enabled(cancel, trigger) {
+                return;
+            }
+            if let Some(recovery) = job.recovery.as_mut() {
+                recovery.cancel_requested = true;
+            }
+            cancel.request.clone()
+        };
+        let accepted = self
+            .transport
+            .execute(request)
+            .await
+            .is_ok_and(|response| (200..300).contains(&response.status));
+        let mut locked = jobs.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(recovery) = locked.get_mut(key).and_then(|job| job.recovery.as_mut()) {
+            recovery.cancel_accepted = Some(accepted);
+        }
     }
 
     async fn execute_inner(&self, request: ExecutionRequest) -> ExecutionResult {
@@ -166,6 +332,7 @@ impl Engine {
                     metrics,
                     responses,
                     errors: operation.errors,
+                    recoveries: active_recoveries(),
                 }
             }
             Err(error) => ExecutionResult {
@@ -175,6 +342,7 @@ impl Engine {
                 metrics,
                 responses,
                 errors: vec![error.execution_error(None)],
+                recoveries: active_recoveries(),
             },
         }
     }
@@ -240,21 +408,35 @@ impl Engine {
             expected_sha256: validated_checksum(file.expected_sha256.as_deref())?,
         };
         let parameters = resolve_parameters(&request.connection, &request.input.params)?;
-        let initial = self.prepare_request(&request.connection, &parameters, None)?;
-        let (prepared, is_poll_result) = match &request.connection.polling {
+        let initial = self.prepare_request(
+            &request.connection,
+            &parameters,
+            None,
+            request.options.idempotency_key.as_deref(),
+        )?;
+        let (prepared, is_poll_result, active_key) = match &request.connection.polling {
             Some(polling) => {
-                let (initial_value, initial_response) = self
-                    .execute_prepared_json(&request.connection, initial, metrics, false)
-                    .await?;
-                let completion = self
-                    .await_poll_completion(
+                let completion = if polling.resume.is_some() {
+                    self.await_resumed_poll_completion(
+                        &request.connection,
+                        polling,
+                        &initial.url,
+                        metrics,
+                    )
+                    .await?
+                } else {
+                    let (initial_value, initial_response) = self
+                        .execute_prepared_json(&request.connection, initial, metrics, false)
+                        .await?;
+                    self.await_poll_completion(
                         &request.connection,
                         polling,
                         initial_value,
                         initial_response,
                         metrics,
                     )
-                    .await?;
+                    .await?
+                };
                 let prepared = self.prepare_poll_result_request(
                     &request.connection,
                     polling,
@@ -262,14 +444,17 @@ impl Engine {
                     &completion.response,
                     completion.job_id.as_ref(),
                 )?;
-                (prepared, true)
+                (prepared, true, completion.active_key)
             }
-            None => (initial, false),
+            None => (initial, false, None),
         };
         let response = self
             .transport
             .download(prepared, &target, &request.connection.success_statuses)
             .await?;
+        if let Some(key) = active_key {
+            remove_active_job(&key);
+        }
         metrics.requests = metrics.requests.saturating_add(response.network_requests);
         metrics.retries = metrics
             .retries
@@ -352,7 +537,12 @@ impl Engine {
         }
 
         let parameters = resolve_parameters(&request.connection, &request.input.params)?;
-        let mut prepared = self.prepare_request(&request.connection, &parameters, None)?;
+        let mut prepared = self.prepare_request(
+            &request.connection,
+            &parameters,
+            None,
+            request.options.idempotency_key.as_deref(),
+        )?;
         let content_type = file.content_type.clone();
         match &mut prepared.body {
             body @ PreparedBody::Raw(_) => {
@@ -494,6 +684,7 @@ impl Engine {
         let mut succeeded = 0;
 
         for (index, record) in request.input.records.iter().enumerate() {
+            let scoped_options = scoped_execution_options(&request.options, index);
             let mut source = request.input.params.clone();
             source.extend(record.clone());
             let result = match resolve_parameters(&request.connection, &source) {
@@ -504,7 +695,7 @@ impl Engine {
                         None,
                         metrics,
                         responses,
-                        &request.options,
+                        &scoped_options,
                     )
                     .await
                     .map(|(value, _, _, _)| value)
@@ -557,6 +748,7 @@ impl Engine {
             |(index, record)| async move {
                 let mut local_metrics = ExecutionMetrics::default();
                 let mut local_responses = Vec::new();
+                let scoped_options = scoped_execution_options(&request.options, index);
                 let mut source = request.input.params.clone();
                 source.extend(record.clone());
                 let result = match resolve_parameters(&request.connection, &source) {
@@ -567,7 +759,7 @@ impl Engine {
                             None,
                             &mut local_metrics,
                             &mut local_responses,
-                            &request.options,
+                            &scoped_options,
                         )
                         .await
                         .map(|(value, _, _, _)| value)
@@ -656,6 +848,7 @@ impl Engine {
         let mut errors = Vec::new();
         let mut succeeded = 0_usize;
         for (chunk_index, records) in request.input.records.chunks(batch.max_size).enumerate() {
+            let scoped_options = scoped_execution_options(&request.options, chunk_index);
             let base_index = chunk_index.saturating_mul(batch.max_size);
             let mut parameters = Vec::new();
             let mut valid = Vec::new();
@@ -682,7 +875,7 @@ impl Engine {
                     None,
                     metrics,
                     responses,
-                    &request.options,
+                    &scoped_options,
                 )
                 .await
                 .and_then(|(value, _, _, _)| batch_response(&value, batch, &connection.response))
@@ -759,13 +952,22 @@ impl Engine {
             } => {
                 ensure_page_size(*page_size)?;
                 let mut offset = *start;
+                let mut request_index = 0_usize;
                 while output.len() < *max_rows {
                     let limit = (*page_size).min(max_rows.saturating_sub(output.len()));
                     let mut parameters = base_parameters.clone();
                     parameters.insert(offset_param.clone(), usize_value(offset)?);
                     parameters.insert(limit_param.clone(), usize_value(limit)?);
+                    let scoped_options = scoped_execution_options(options, request_index);
                     let (value, _, _, _) = self
-                        .request_json(connection, &parameters, None, metrics, responses, options)
+                        .request_json(
+                            connection,
+                            &parameters,
+                            None,
+                            metrics,
+                            responses,
+                            &scoped_options,
+                        )
                         .await?;
                     let page = response_records(connection, &value)?;
                     let page_len = page.len();
@@ -774,6 +976,7 @@ impl Engine {
                         break;
                     }
                     offset = offset.saturating_add(*page_size);
+                    request_index = request_index.saturating_add(1);
                 }
             }
             PaginationConfig::Page {
@@ -785,13 +988,22 @@ impl Engine {
             } => {
                 ensure_page_size(*page_size)?;
                 let mut page_number = *start_page;
+                let mut request_index = 0_usize;
                 while output.len() < *max_rows {
                     let limit = (*page_size).min(max_rows.saturating_sub(output.len()));
                     let mut parameters = base_parameters.clone();
                     parameters.insert(page_param.clone(), usize_value(page_number)?);
                     parameters.insert(page_size_param.clone(), usize_value(limit)?);
+                    let scoped_options = scoped_execution_options(options, request_index);
                     let (value, _, _, _) = self
-                        .request_json(connection, &parameters, None, metrics, responses, options)
+                        .request_json(
+                            connection,
+                            &parameters,
+                            None,
+                            metrics,
+                            responses,
+                            &scoped_options,
+                        )
                         .await?;
                     let page = response_records(connection, &value)?;
                     let page_len = page.len();
@@ -800,6 +1012,7 @@ impl Engine {
                         break;
                     }
                     page_number = page_number.saturating_add(1);
+                    request_index = request_index.saturating_add(1);
                 }
             }
             PaginationConfig::Cursor {
@@ -810,7 +1023,7 @@ impl Engine {
             } => {
                 let mut cursor: Option<String> = None;
                 let mut seen = HashSet::new();
-                for _ in 0..*max_pages {
+                for page_index in 0..*max_pages {
                     if output.len() >= *max_rows {
                         break;
                     }
@@ -818,8 +1031,16 @@ impl Engine {
                     if let Some(cursor) = &cursor {
                         parameters.insert(cursor_param.clone(), Value::String(cursor.clone()));
                     }
+                    let scoped_options = scoped_execution_options(options, page_index);
                     let (value, _, _, _) = self
-                        .request_json(connection, &parameters, None, metrics, responses, options)
+                        .request_json(
+                            connection,
+                            &parameters,
+                            None,
+                            metrics,
+                            responses,
+                            &scoped_options,
+                        )
                         .await?;
                     append_limited(
                         &mut output,
@@ -851,6 +1072,7 @@ impl Engine {
                     } else {
                         &empty
                     };
+                    let scoped_options = scoped_execution_options(options, page_index);
                     let (value, final_url, _, _) = self
                         .request_json(
                             connection,
@@ -858,7 +1080,7 @@ impl Engine {
                             next_url.as_deref(),
                             metrics,
                             responses,
-                            options,
+                            &scoped_options,
                         )
                         .await?;
                     append_limited(
@@ -901,6 +1123,7 @@ impl Engine {
                     } else {
                         &empty
                     };
+                    let scoped_options = scoped_execution_options(options, page_index);
                     let (value, final_url, _, headers) = self
                         .request_json(
                             connection,
@@ -908,7 +1131,7 @@ impl Engine {
                             next_url.as_deref(),
                             metrics,
                             responses,
-                            options,
+                            &scoped_options,
                         )
                         .await?;
                     append_limited(
@@ -941,7 +1164,12 @@ impl Engine {
         responses: &mut Vec<HttpResponseMetadata>,
         options: &crate::ExecutionOptions,
     ) -> Result<(Value, Url, u32, BTreeMap<String, String>), EngineError> {
-        let request = self.prepare_request(connection, parameters, url_override)?;
+        let request = self.prepare_request(
+            connection,
+            parameters,
+            url_override,
+            options.idempotency_key.as_deref(),
+        )?;
         self.request_prepared_json(connection, request, metrics, responses, options)
             .await
     }
@@ -954,26 +1182,35 @@ impl Engine {
         responses: &mut Vec<HttpResponseMetadata>,
         options: &crate::ExecutionOptions,
     ) -> Result<(Value, Url, u32, BTreeMap<String, String>), EngineError> {
-        let (initial_value, initial_response) = self
-            .execute_prepared_json(connection, request, metrics, false)
-            .await?;
-        let result = if let Some(polling) = &connection.polling {
-            self.poll(
-                connection,
-                polling,
-                initial_value,
-                initial_response,
-                metrics,
-            )
-            .await
-        } else {
-            Ok((
-                initial_value,
-                initial_response.final_url,
-                initial_response.attempts,
-                initial_response.headers,
-                initial_response.status,
-            ))
+        let result = match &connection.polling {
+            Some(polling) if polling.resume.is_some() => {
+                self.resume_poll(connection, polling, &request.url, metrics)
+                    .await
+            }
+            polling => {
+                let (initial_value, initial_response) = self
+                    .execute_prepared_json(connection, request, metrics, false)
+                    .await?;
+                match polling {
+                    Some(polling) => {
+                        self.poll(
+                            connection,
+                            polling,
+                            initial_value,
+                            initial_response,
+                            metrics,
+                        )
+                        .await
+                    }
+                    None => Ok((
+                        initial_value,
+                        initial_response.final_url,
+                        initial_response.attempts,
+                        initial_response.headers,
+                        initial_response.status,
+                    )),
+                }
+            }
         }?;
         evaluate_application_success(&result.0, connection)?;
         if options.capture_response_metadata {
@@ -1042,15 +1279,52 @@ impl Engine {
                 metrics,
             )
             .await?;
-        self.complete_poll(
-            connection,
-            polling,
-            completion.value,
-            completion.response,
-            completion.job_id.as_ref(),
-            metrics,
-        )
-        .await
+        let active_key = completion.active_key.clone();
+        let result = self
+            .complete_poll(
+                connection,
+                polling,
+                completion.value,
+                completion.response,
+                completion.job_id.as_ref(),
+                metrics,
+            )
+            .await;
+        if result.is_ok()
+            && let Some(key) = active_key
+        {
+            remove_active_job(&key);
+        }
+        result
+    }
+
+    async fn resume_poll(
+        &self,
+        connection: &ConnectionConfig,
+        polling: &PollingConfig,
+        base_url: &Url,
+        metrics: &mut ExecutionMetrics,
+    ) -> Result<(Value, Url, u32, BTreeMap<String, String>, u16), EngineError> {
+        let completion = self
+            .await_resumed_poll_completion(connection, polling, base_url, metrics)
+            .await?;
+        let active_key = completion.active_key.clone();
+        let result = self
+            .complete_poll(
+                connection,
+                polling,
+                completion.value,
+                completion.response,
+                completion.job_id.as_ref(),
+                metrics,
+            )
+            .await;
+        if result.is_ok()
+            && let Some(key) = active_key
+        {
+            remove_active_job(&key);
+        }
+        result
     }
 
     async fn await_poll_completion(
@@ -1068,6 +1342,7 @@ impl Engine {
                     value: initial_value,
                     response: initial_response,
                     job_id,
+                    active_key: None,
                 });
             }
             Some(PollState::Failure(status)) => {
@@ -1077,12 +1352,6 @@ impl Engine {
             }
             Some(PollState::Pending) | None => {}
         }
-        if polling.max_attempts == 0 {
-            return Err(EngineError::InvalidInput(
-                "polling max_attempts must be greater than zero".to_owned(),
-            ));
-        }
-
         let poll_url = poll_url(&initial_value, &initial_response, polling)?;
         if !polling.allow_cross_origin && !same_origin(&initial_response.final_url, &poll_url) {
             return Err(EngineError::UnsafeAddress(
@@ -1090,6 +1359,66 @@ impl Engine {
             ));
         }
 
+        let active_key =
+            self.register_polled_job(connection, polling, &poll_url, job_id.as_ref())?;
+        self.await_poll_url(connection, polling, poll_url, job_id, active_key, metrics)
+            .await
+    }
+
+    async fn await_resumed_poll_completion(
+        &self,
+        connection: &ConnectionConfig,
+        polling: &PollingConfig,
+        base_url: &Url,
+        metrics: &mut ExecutionMetrics,
+    ) -> Result<PollCompletion, EngineError> {
+        let resume = polling.resume.as_ref().ok_or_else(|| {
+            EngineError::InvalidInput("polling resume configuration is missing".to_owned())
+        })?;
+        validate_job_id(&resume.job_id)?;
+        let job_id = Value::String(resume.job_id.clone());
+        let template = polling.url_template.as_deref().ok_or_else(|| {
+            EngineError::InvalidInput(
+                "polling resume requires url_template and cannot infer a prior Location URL"
+                    .to_owned(),
+            )
+        })?;
+        let target = render_poll_template_from_base(template, base_url, Some(&job_id))?;
+        let poll_url = base_url
+            .join(&target)
+            .map_err(|error| EngineError::InvalidUrl(format!("polling resume URL: {error}")))?;
+        if !polling.allow_cross_origin && !same_origin(base_url, &poll_url) {
+            return Err(EngineError::UnsafeAddress(
+                "cross-origin polling is blocked".to_owned(),
+            ));
+        }
+        let active_key = self.register_polled_job(connection, polling, &poll_url, Some(&job_id))?;
+        self.await_poll_url(
+            connection,
+            polling,
+            poll_url,
+            Some(job_id),
+            active_key,
+            metrics,
+        )
+        .await
+    }
+
+    async fn await_poll_url(
+        &self,
+        connection: &ConnectionConfig,
+        polling: &PollingConfig,
+        poll_url: Url,
+        job_id: Option<Value>,
+        active_key: String,
+        metrics: &mut ExecutionMetrics,
+    ) -> Result<PollCompletion, EngineError> {
+        if polling.max_attempts == 0 {
+            remove_active_job(&active_key);
+            return Err(EngineError::InvalidInput(
+                "polling max_attempts must be greater than zero".to_owned(),
+            ));
+        }
         let poll_started = Instant::now();
         let mut interval_ms = polling.interval_ms;
         for _ in 0..polling.max_attempts {
@@ -1107,28 +1436,16 @@ impl Engine {
                 });
                 sleep(Duration::from_millis(delay)).await;
             }
-            let request = PreparedRequest {
-                url: poll_url.clone(),
-                method: polling.method.clone(),
-                headers: connection.headers.clone(),
-                auth: connection.auth.clone(),
-                body: PreparedBody::None,
-                timeout: Duration::from_millis(
-                    connection
-                        .request
-                        .timeout_ms
-                        .unwrap_or(self.config.request_timeout_ms),
-                ),
-                allow_redirects: connection.request.allow_redirects,
-                max_redirects: connection.request.max_redirects,
-                retry: connection.retry.clone(),
-                cookies: connection.cookies.clone(),
-                cache: CachePolicy::default(),
-                circuit_breaker: connection.circuit_breaker.clone(),
-                requests_per_second: connection.requests_per_second,
-                tls: connection.tls.clone(),
-                proxy: connection.proxy.clone(),
-            };
+            let request = self.prepare_followup_request(
+                connection,
+                poll_url.clone(),
+                polling.method.clone(),
+                connection
+                    .request
+                    .timeout_ms
+                    .unwrap_or(self.config.request_timeout_ms),
+                CachePolicy::default(),
+            );
             let (value, response) = self
                 .execute_prepared_json(connection, request, metrics, true)
                 .await?;
@@ -1138,9 +1455,11 @@ impl Engine {
                         value,
                         response,
                         job_id,
+                        active_key: Some(active_key),
                     });
                 }
                 Some(PollState::Failure(status)) => {
+                    remove_active_job(&active_key);
                     return Err(EngineError::InvalidResponse(format!(
                         "asynchronous operation failed with status '{status}'"
                     )));
@@ -1157,9 +1476,106 @@ impl Engine {
                 .min(polling.max_interval_ms as f64)) as u64;
         }
 
+        self.cancel_active_job(&active_key, RemoteCancelTrigger::PollTimeout)
+            .await;
         Err(EngineError::PollingTimeout {
             attempts: polling.max_attempts,
         })
+    }
+
+    fn register_polled_job(
+        &self,
+        connection: &ConnectionConfig,
+        polling: &PollingConfig,
+        poll_url: &Url,
+        job_id: Option<&Value>,
+    ) -> Result<String, EngineError> {
+        let key = poll_url.as_str().to_owned();
+        let recovery = job_id
+            .and_then(public_job_id)
+            .map(|job_id| AsyncJobRecovery {
+                contract: ASYNC_JOB_RECOVERY_CONTRACT.to_owned(),
+                job_id,
+                cancel_requested: false,
+                cancel_accepted: None,
+            });
+        let cancel = polling
+            .cancel
+            .as_ref()
+            .map(|cancel| self.prepare_remote_cancel(connection, polling, cancel, poll_url, job_id))
+            .transpose()?;
+        register_active_job(key.clone(), ActiveAsyncJob { recovery, cancel });
+        Ok(key)
+    }
+
+    fn prepare_remote_cancel(
+        &self,
+        connection: &ConnectionConfig,
+        polling: &PollingConfig,
+        cancel: &PollingCancelConfig,
+        poll_url: &Url,
+        job_id: Option<&Value>,
+    ) -> Result<ActiveRemoteCancel, EngineError> {
+        if cancel.timeout_ms == 0 {
+            return Err(EngineError::InvalidInput(
+                "polling cancel timeout_ms must be greater than zero".to_owned(),
+            ));
+        }
+        let target = match cancel.url_template.as_deref() {
+            Some(template) => {
+                let rendered = render_poll_template_from_base(template, poll_url, job_id)?;
+                poll_url.join(&rendered).map_err(|error| {
+                    EngineError::InvalidUrl(format!("polling cancel URL: {error}"))
+                })?
+            }
+            None => poll_url.clone(),
+        };
+        if !polling.allow_cross_origin && !same_origin(poll_url, &target) {
+            return Err(EngineError::UnsafeAddress(
+                "cross-origin polling cancellation is blocked".to_owned(),
+            ));
+        }
+        let mut request = self.prepare_followup_request(
+            connection,
+            target,
+            cancel.method.clone(),
+            cancel.timeout_ms,
+            CachePolicy::default(),
+        );
+        request.retry.max_attempts = 1;
+        Ok(ActiveRemoteCancel {
+            request,
+            on_cancellation: cancel.on_cancellation,
+            on_deadline: cancel.on_deadline,
+            on_poll_timeout: cancel.on_poll_timeout,
+        })
+    }
+
+    fn prepare_followup_request(
+        &self,
+        connection: &ConnectionConfig,
+        url: Url,
+        method: HttpMethod,
+        timeout_ms: u64,
+        cache: CachePolicy,
+    ) -> PreparedRequest {
+        PreparedRequest {
+            url,
+            method,
+            headers: connection.headers.clone(),
+            auth: connection.auth.clone(),
+            body: PreparedBody::None,
+            timeout: Duration::from_millis(timeout_ms),
+            allow_redirects: connection.request.allow_redirects,
+            max_redirects: connection.request.max_redirects,
+            retry: connection.retry.clone(),
+            cookies: connection.cookies.clone(),
+            cache,
+            circuit_breaker: connection.circuit_breaker.clone(),
+            requests_per_second: connection.requests_per_second,
+            tls: connection.tls.clone(),
+            proxy: connection.proxy.clone(),
+        }
     }
 
     async fn complete_poll(
@@ -1336,6 +1752,7 @@ impl Engine {
         connection: &ConnectionConfig,
         parameters: &JsonObject,
         url_override: Option<&str>,
+        idempotency_key: Option<&str>,
     ) -> Result<PreparedRequest, EngineError> {
         let template = url_override.unwrap_or(&connection.url);
         if template.trim().is_empty() {
@@ -1390,6 +1807,15 @@ impl Engine {
                 }
             }
         }
+        if let Some(key) = idempotency_key {
+            apply_idempotency(
+                connection,
+                key,
+                &mut query_parameters,
+                &mut body_parameters,
+                &mut headers,
+            )?;
+        }
         append_query(&mut url, &query_parameters, &connection.parameters)?;
         append_cookies(&mut headers, &cookies);
 
@@ -1440,6 +1866,10 @@ impl Engine {
             | PreparedBody::Stream(_) => {}
         }
 
+        let mut retry = connection.retry.clone();
+        if idempotency_key.is_some() {
+            retry.retry_non_idempotent = true;
+        }
         Ok(PreparedRequest {
             url,
             method: connection.method.clone(),
@@ -1454,7 +1884,7 @@ impl Engine {
             ),
             allow_redirects: connection.request.allow_redirects,
             max_redirects: connection.request.max_redirects,
-            retry: connection.retry.clone(),
+            retry,
             cookies: connection.cookies.clone(),
             cache: connection.cache.clone(),
             circuit_breaker: connection.circuit_breaker.clone(),
@@ -1787,7 +2217,15 @@ fn render_poll_template(
     response_data: &ResponseData,
     job_id: Option<&Value>,
 ) -> Result<String, EngineError> {
-    let base = response_data.final_url.origin().ascii_serialization();
+    render_poll_template_from_base(template, &response_data.final_url, job_id)
+}
+
+fn render_poll_template_from_base(
+    template: &str,
+    base_url: &Url,
+    job_id: Option<&Value>,
+) -> Result<String, EngineError> {
+    let base = base_url.origin().ascii_serialization();
     let template = template.replace("{base}", &base);
     if !template.contains("{id}") && !template.contains("{job_id}") {
         return Ok(template);
@@ -1800,6 +2238,27 @@ fn render_poll_template(
         ("job_id".to_owned(), job_id.clone()),
     ]);
     Ok(render_template(&template, &parameters, true).0)
+}
+
+fn public_job_id(value: &Value) -> Option<String> {
+    let value = match value {
+        Value::String(value) => value.clone(),
+        Value::Number(value) => value.to_string(),
+        _ => return None,
+    };
+    validate_job_id(&value).ok().map(|_| value)
+}
+
+fn validate_job_id(value: &str) -> Result<(), EngineError> {
+    if value.is_empty()
+        || value.len() > 512
+        || value.chars().any(|character| character.is_control())
+    {
+        return Err(EngineError::InvalidInput(
+            "polling job_id must contain 1 to 512 non-control characters".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn resolve_parameters(
@@ -2128,7 +2587,7 @@ fn render_template(
         if rendered.contains(&placeholder) {
             let text = value_as_text(value);
             let replacement = if url_encode {
-                utf8_percent_encode(&text, NON_ALPHANUMERIC).to_string()
+                utf8_percent_encode(&text, PATH_SEGMENT_ENCODE_SET).to_string()
             } else {
                 text
             };
@@ -2626,6 +3085,66 @@ fn ensure_success(
     })
 }
 
+fn apply_idempotency(
+    connection: &ConnectionConfig,
+    key: &str,
+    query: &mut JsonObject,
+    body: &mut JsonObject,
+    headers: &mut BTreeMap<String, String>,
+) -> Result<(), EngineError> {
+    validate_idempotency_key(key)?;
+    let name = connection.idempotency.name.trim();
+    if name.is_empty() || name.len() > 256 || name.chars().any(char::is_control) {
+        return Err(EngineError::InvalidInput(
+            "idempotency field name must contain 1 to 256 non-control characters".to_owned(),
+        ));
+    }
+    match connection.idempotency.location {
+        IdempotencyLocation::Header => {
+            if let Some(existing) = headers
+                .iter()
+                .find(|(existing, _)| existing.eq_ignore_ascii_case(name))
+                .map(|(_, value)| value)
+                && existing != key
+            {
+                return Err(EngineError::InvalidInput(
+                    "idempotency header conflicts with a configured header".to_owned(),
+                ));
+            }
+            insert_header(headers, name, key.to_owned());
+        }
+        IdempotencyLocation::Query => {
+            insert_idempotency_field(query, name, key, "query")?;
+        }
+        IdempotencyLocation::Body => {
+            if matches!(connection.request.body_type, BodyType::None | BodyType::Raw) {
+                return Err(EngineError::InvalidInput(
+                    "body idempotency requires json, form_urlencoded, or multipart body".to_owned(),
+                ));
+            }
+            insert_idempotency_field(body, name, key, "body")?;
+        }
+    }
+    Ok(())
+}
+
+fn insert_idempotency_field(
+    target: &mut JsonObject,
+    name: &str,
+    key: &str,
+    location: &str,
+) -> Result<(), EngineError> {
+    if let Some(existing) = target.get(name)
+        && existing.as_str() != Some(key)
+    {
+        return Err(EngineError::InvalidInput(format!(
+            "idempotency {location} field conflicts with a configured parameter"
+        )));
+    }
+    target.insert(name.to_owned(), Value::String(key.to_owned()));
+    Ok(())
+}
+
 fn public_response_url(url: &Url) -> String {
     url.origin().ascii_serialization()
 }
@@ -2644,6 +3163,13 @@ fn is_sensitive_response_header(name: &str) -> bool {
 }
 
 fn failed_result(error: EngineError) -> ExecutionResult {
+    failed_result_with_recoveries(error, Vec::new())
+}
+
+fn failed_result_with_recoveries(
+    error: EngineError,
+    recoveries: Vec<AsyncJobRecovery>,
+) -> ExecutionResult {
     ExecutionResult {
         schema_version: SCHEMA_VERSION,
         status: ExecutionStatus::Failed,
@@ -2651,7 +3177,147 @@ fn failed_result(error: EngineError) -> ExecutionResult {
         metrics: ExecutionMetrics::default(),
         responses: Vec::new(),
         errors: vec![error.execution_error(None)],
+        recoveries,
     }
+}
+
+fn validate_idempotency_key(key: &str) -> Result<(), EngineError> {
+    if key.is_empty() || key.len() > 255 || !key.bytes().all(|byte| matches!(byte, 0x21..=0x7e)) {
+        return Err(EngineError::InvalidInput(
+            "idempotency_key must contain 1 to 255 visible ASCII bytes".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_execution_configuration(request: &ExecutionRequest) -> Result<(), EngineError> {
+    let Some(polling) = request.connection.polling.as_ref() else {
+        return Ok(());
+    };
+    if polling.max_attempts == 0 {
+        return Err(EngineError::InvalidInput(
+            "polling max_attempts must be greater than zero".to_owned(),
+        ));
+    }
+    if polling.max_wait_ms == Some(0) {
+        return Err(EngineError::InvalidInput(
+            "polling max_wait_ms must be greater than zero when configured".to_owned(),
+        ));
+    }
+    if !polling.interval_backoff.is_finite() || polling.interval_backoff < 1.0 {
+        return Err(EngineError::InvalidInput(
+            "polling interval_backoff must be finite and at least one".to_owned(),
+        ));
+    }
+    if polling
+        .cancel
+        .as_ref()
+        .is_some_and(|cancel| cancel.timeout_ms == 0)
+    {
+        return Err(EngineError::InvalidInput(
+            "polling cancel timeout_ms must be greater than zero".to_owned(),
+        ));
+    }
+
+    let Some(resume) = polling.resume.as_ref() else {
+        return Ok(());
+    };
+    validate_job_id(&resume.job_id)?;
+    if polling.url_template.is_none() {
+        return Err(EngineError::InvalidInput(
+            "polling resume requires url_template and cannot infer a prior Location URL".to_owned(),
+        ));
+    }
+    if request.connection.pagination.is_some() {
+        return Err(EngineError::InvalidInput(
+            "polling resume cannot be combined with pagination".to_owned(),
+        ));
+    }
+    if request
+        .connection
+        .batch
+        .as_ref()
+        .is_some_and(|batch| batch.enabled)
+    {
+        return Err(EngineError::InvalidInput(
+            "polling resume cannot be combined with batch execution".to_owned(),
+        ));
+    }
+    if request.operation == ExecutionOperation::Enrich && request.input.records.len() != 1 {
+        return Err(EngineError::InvalidInput(
+            "polling resume for enrichment requires exactly one input record".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn execution_fingerprint(request: &ExecutionRequest) -> Result<String, EngineError> {
+    let mut normalized = request.clone();
+    normalized.options.deadline = None;
+    normalized.options.idempotency_key = None;
+    let bytes =
+        serde_json::to_vec(&normalized).map_err(|error| EngineError::Runtime(error.to_string()))?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
+}
+
+fn scoped_execution_options(
+    options: &crate::ExecutionOptions,
+    index: usize,
+) -> crate::ExecutionOptions {
+    let mut scoped = options.clone();
+    scoped.idempotency_key = options.idempotency_key.as_deref().map(|key| {
+        let mut digest = Sha256::new();
+        digest.update(b"plenora-rest-idempotency-child-v1\0");
+        digest.update(key.as_bytes());
+        digest.update(b"\0");
+        digest.update(index.to_string().as_bytes());
+        format!("plenora-{:x}", digest.finalize())
+    });
+    scoped
+}
+
+fn cancel_enabled(cancel: &ActiveRemoteCancel, trigger: RemoteCancelTrigger) -> bool {
+    match trigger {
+        RemoteCancelTrigger::Cancellation => cancel.on_cancellation,
+        RemoteCancelTrigger::Deadline => cancel.on_deadline,
+        RemoteCancelTrigger::PollTimeout => cancel.on_poll_timeout,
+    }
+}
+
+fn active_jobs_handle() -> Option<Arc<Mutex<BTreeMap<String, ActiveAsyncJob>>>> {
+    ACTIVE_ASYNC_JOBS.try_with(Arc::clone).ok()
+}
+
+fn register_active_job(key: String, job: ActiveAsyncJob) {
+    let Some(jobs) = active_jobs_handle() else {
+        return;
+    };
+    jobs.lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(key, job);
+}
+
+fn remove_active_job(key: &str) {
+    let Some(jobs) = active_jobs_handle() else {
+        return;
+    };
+    jobs.lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(key);
+}
+
+fn active_recoveries() -> Vec<AsyncJobRecovery> {
+    active_jobs_handle()
+        .map(|jobs| recoveries_from(&jobs))
+        .unwrap_or_default()
+}
+
+fn recoveries_from(jobs: &Arc<Mutex<BTreeMap<String, ActiveAsyncJob>>>) -> Vec<AsyncJobRecovery> {
+    jobs.lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .values()
+        .filter_map(|job| job.recovery.clone())
+        .collect()
 }
 
 #[cfg(test)]

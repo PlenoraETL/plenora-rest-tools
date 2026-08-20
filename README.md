@@ -27,7 +27,8 @@ La capability plenora.rest-tools espone cinque operazioni v1:
 | rest.download | trasferisce una risposta verso un artifact | plenora-rest-file-transfer-input-v1 | plenora-rest-file-transfer-result-v1 |
 | rest.upload | trasferisce un artifact nella richiesta | plenora-rest-file-transfer-input-v1 | plenora-rest-file-transfer-result-v1 |
 
-Tutte supportano cancellazione e deadline assoluta RFC 3339. Il documento
+Tutte supportano cancellazione, deadline assoluta RFC 3339 e chiavi di
+idempotenza. Il documento
 Capability Discovery v2 � disponibile tramite capabilities.
 
 ## Copertura REST
@@ -45,7 +46,8 @@ Il motore include:
 - retry con backoff e Retry-After, rate limit, pool, cache HTTP, cookie jar e
   circuit breaker;
 - paginazione offset, page, cursor, link nel body e header Link;
-- polling di job asincroni e recupero del risultato;
+- submit, polling, resume, cancellazione remota best-effort e recupero dei job
+  asincroni;
 - batch, enrichment concorrente ordinato e trasformazioni JSON;
 - upload e download streaming con limiti, resume controllato e SHA-256;
 - TLS personalizzato e proxy esplicito.
@@ -54,6 +56,39 @@ Non esiste una libreria che possa promettere ogni comportamento proprietario
 di ogni API REST. Questa copre i meccanismi generali; un protocollo non HTTP o
 un flusso proprietario non descrivibile dal contratto richiede una capability
 separata, non un adapter nel core.
+
+### Job asincroni e servizi basati su coda
+
+La libreria copre un servizio che mette il lavoro in coda quando quel servizio
+espone il ciclo di vita tramite REST: submit iniziale, identificativo o
+`Location`, polling dello stato, recupero del risultato e, se disponibile,
+cancellazione remota. Un'esecuzione interrotta restituisce un recovery handle
+limitato al job id pubblico; lo stesso job puo poi essere ripreso senza inviare
+una seconda submit.
+
+~~~json
+{
+  "url": "https://api.example.com/exports",
+  "method": "POST",
+  "polling": {
+    "url_template": "{base}/jobs/{job_id}",
+    "status_path": "status",
+    "result_url_path": "result_url",
+    "resume": {"job_id": "job-42"},
+    "cancel": {
+      "url_template": "{base}/jobs/{job_id}",
+      "method": "DELETE",
+      "on_cancellation": true,
+      "on_deadline": true
+    }
+  }
+}
+~~~
+
+Celery, Redis, RabbitMQ, SQS e gli altri broker non sono dipendenze del core e
+non vengono amministrati dalla libreria. Restano un dettaglio interno del
+servizio remoto o del runtime che orchestra la chiamata. Questo mantiene la
+libreria autoconsistente e provider-neutral.
 
 ## SDK Python
 
@@ -85,8 +120,15 @@ with Engine() as engine:
             },
         },
         deadline="2026-08-20T22:00:00Z",
+        idempotency_key="pipeline-run-42",
     )
 ~~~
+
+La chiave viene collocata in header, query o body secondo
+`connection.idempotency`; il default e l'header `Idempotency-Key`. Retry e
+richieste figlie usano chiavi stabili. Il motore rifiuta localmente il riuso
+della stessa chiave con un input diverso, mentre la deduplicazione durevole e
+responsabilita del servizio remoto o del runtime.
 
 Le sole operazioni normative dell'SDK sono test, generate, enrich, download e
 upload. La serializzazione universale resta privata alla facciata Python, cos�
