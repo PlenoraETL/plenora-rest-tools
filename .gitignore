@@ -1,4 +1,6 @@
 /target/
+/.release/
+/dist/
 __pycache__/
 *.py[cod]
 *.so

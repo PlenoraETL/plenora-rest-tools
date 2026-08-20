@@ -10,10 +10,10 @@
     {
       "name": "plenora-rest-core",
       "surface": "rust",
-      "version": "0.1.0",
-      "digest": "sha256:55df3dd06609ff0e5b53a517c68a708e75153fffdec074f46310b764d55529e1",
+      "version": "0.2.0",
+      "digest": "sha256:2333dfb1ed481a876bd7c24a485b6718111c1b28b1063e95d453bd03cf95af7b",
       "verification": [
-        "cargo package --package plenora-rest-core --allow-dirty",
+        "powershell -File scripts/release.ps1",
         "cargo test -p plenora-rest-core --test public_surface",
         "cargo test -p plenora-rest-core --test black_box"
       ]
@@ -21,20 +21,21 @@
     {
       "name": "plenora-rest",
       "surface": "python_sdk",
-      "version": "0.1.0",
-      "digest": "sha256:ff7ab8a854d339aff47a45d1298dc193c436deb1c0c4c786bd6c91886503d096",
+      "version": "0.2.0",
+      "digest": "sha256:3d5d961c28249c273a6b170be58328f3d57bb3c07290f8d8d47d9fd4840e48f2",
       "api_modes": ["sync"],
       "verification": [
-        "maturin build --release",
+        "powershell -File scripts/release.ps1",
         "install wheel in a clean virtualenv and run python/tests/test_smoke.py"
       ]
     },
     {
       "name": "plenora.rest-tools",
       "surface": "runtime",
-      "version": "0.1.0",
-      "digest": "sha256:55df3dd06609ff0e5b53a517c68a708e75153fffdec074f46310b764d55529e1",
+      "version": "0.2.0",
+      "digest": "sha256:2333dfb1ed481a876bd7c24a485b6718111c1b28b1063e95d453bd03cf95af7b",
       "verification": [
+        "powershell -File scripts/release.ps1",
         "cargo test -p plenora-rest-core --test runtime_binding"
       ]
     }

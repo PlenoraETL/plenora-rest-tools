@@ -1,0 +1,79 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+  artifact-metadata: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  github-release:
+    name: Reproducible GitHub release
+    if: github.repository == 'PlenoraETL/plenora-rest-tools'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out the tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate tag and component versions
+        id: version
+        shell: bash
+        run: |
+          version="$(python3 scripts/release.py validate-version "${GITHUB_REF_NAME}")"
+          echo "value=${version}" >> "${GITHUB_OUTPUT}"
+
+      - name: Run the complete verification gate
+        run: docker build --file Dockerfile.verify --tag plenora-rest-tools-verify .
+
+      - name: Build twice, compare, and generate the SBOM
+        shell: pwsh
+        run: ./scripts/release.ps1
+
+      - name: Attest build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-checksums: dist/SHA256SUMS
+
+      - name: Attest the SBOM for binary artifacts
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            dist/*.crate
+            dist/*.whl
+          sbom-path: dist/plenora-rest-tools-${{ steps.version.outputs.value }}.spdx.json
+
+      - name: Retain the release bundle in Actions
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: plenora-rest-tools-${{ steps.version.outputs.value }}
+          path: dist/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 90
+
+      - name: Publish the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            echo "Release ${GITHUB_REF_NAME} already exists; refusing to replace signed assets."
+            exit 1
+          fi
+          gh release create "${GITHUB_REF_NAME}" dist/* \
+            --verify-tag \
+            --title "plenora-rest-tools ${{ steps.version.outputs.value }}" \
+            --generate-notes

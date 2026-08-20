@@ -1,0 +1,41 @@
+FROM ghcr.io/pyo3/maturin:v1.14.1@sha256:2665227312dd1eab1c29c70a001dc8aac53155a2d048bede3b2df7f1691c8e38 AS build
+
+ARG SOURCE_DATE_EPOCH
+
+ENV CARGO_INCREMENTAL=0 \
+    CARGO_TARGET_DIR=/tmp/cargo-target \
+    RUSTFLAGS="--remap-path-prefix=/io=/workspace -C strip=symbols" \
+    SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
+
+WORKDIR /io
+COPY . .
+
+RUN find . -type f \( \
+        -name "*.json" -o \
+        -name "*.md" -o \
+        -name "*.ps1" -o \
+        -name "*.py" -o \
+        -name "*.pyi" -o \
+        -name "*.rs" -o \
+        -name "*.toml" -o \
+        -name "*.yml" -o \
+        -name "Cargo.lock" -o \
+        -name "Dockerfile*" \
+    \) -exec sed -i 's/\r$//' {} +
+
+RUN test -n "${SOURCE_DATE_EPOCH}" \
+    && case "${SOURCE_DATE_EPOCH}" in *[!0-9]*) exit 1 ;; esac \
+    && cargo package --package plenora-rest-core --locked --allow-dirty --no-verify \
+    && mkdir -p /tmp/release-artifacts /tmp/wheels \
+    && cp /tmp/cargo-target/package/plenora-rest-core-*.crate /tmp/release-artifacts/ \
+    && maturin build \
+        --release \
+        --locked \
+        --strip \
+        --compatibility manylinux2014 \
+        --interpreter /opt/python/cp310-cp310/bin/python \
+        --out /tmp/wheels \
+    && cp /tmp/wheels/*.whl /tmp/release-artifacts/
+
+FROM scratch AS artifacts
+COPY --from=build /tmp/release-artifacts/ /

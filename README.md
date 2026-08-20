@@ -232,7 +232,7 @@ export Rust � contracts/bindings/rust-v1.json. Il manifest di adozione v4 �
 adoption-manifest.json e pinna plenora-contracts al commit:
 
 ~~~text
-e0484e54c96c5441ea09f44a2419bcabbe7f7242
+83ed391212b28100ffa6097a2963f746b6209b37
 ~~~
 
 Gate locale completo:
@@ -243,6 +243,27 @@ Gate locale completo:
 
 Il gate esegue rustfmt, Clippy con warning negati, test Rust, build release
 della wheel, installazione in un ambiente pulito e test black-box dell'SDK.
+
+## Release riproducibile
+
+La release 0.2.x distribuisce il crate Rust e una wheel ABI3
+manylinux2014 x86_64. La toolchain Maturin, le immagini Docker e il
+SOURCE_DATE_EPOCH sono fissati in release-metadata.json. Il comando locale
+costruisce ogni artefatto due volte in ambienti isolati e fallisce se i byte o
+i nomi non coincidono:
+
+~~~powershell
+./scripts/release.ps1
+~~~
+
+Il bundle in dist contiene crate, wheel, SBOM SPDX 2.3 e SHA256SUMS. Il digest
+del crate e della wheel deve coincidere anche con adoption-manifest.json.
+
+Il workflow di release parte soltanto da un tag v<versione> coerente con tutti
+i manifest. Prima di creare la GitHub Release riesegue il gate completo,
+verifica la riproducibilita e genera attestazioni Sigstore di provenance e
+SBOM. Il tag e la pubblicazione restano operazioni esplicite; il workflow non
+pubblica automaticamente su crates.io o PyPI.
 
 ## Struttura
 
