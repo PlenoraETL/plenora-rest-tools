@@ -1,0 +1,5 @@
+exclude:
+  - "./target/**"
+  - "./.release/**"
+  - "./dist/**"
+  - "./.git/**"

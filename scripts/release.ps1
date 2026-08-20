@@ -83,12 +83,9 @@ $syftArguments = @(
     "--volume", "$($distribution.FullName):/out",
     "anchore/syft@sha256:678bfa565b60f747aac0f8e964fe5588a24445b8d0a480e91f6efd70020dfbb0",
     "scan", "dir:/source",
+    "--config", "/source/scripts/syft-release.yaml",
     "--source-name", "plenora-rest-tools",
     "--source-version", $version,
-    "--exclude", "./target/**",
-    "--exclude", "./.release/**",
-    "--exclude", "./dist/**",
-    "--exclude", "./.git/**",
     "--output", "spdx-json@2.3=/out/$sbomName"
 )
 & docker @syftArguments
