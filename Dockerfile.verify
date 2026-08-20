@@ -1,4 +1,4 @@
-FROM rust:1.97.1-bookworm
+FROM rust:1.97.1-bookworm@sha256:0e2bcaef56d041a486784e54104a81aebe0da44bd03019bd70bc0401e42e4a97
 
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1
@@ -8,15 +8,17 @@ RUN rustup component add rustfmt clippy \
     && apt-get install -y --no-install-recommends python3-venv patchelf \
     && rm -rf /var/lib/apt/lists/* \
     && python3 -m venv /opt/verify \
-    && /opt/verify/bin/pip install "maturin>=1.9,<2.0"
+    && /opt/verify/bin/pip install "maturin==1.14.1"
 
 WORKDIR /workspace
 COPY . .
 
+RUN python3 -m py_compile scripts/release.py \
+    && python3 scripts/release.py current-version
 RUN cargo fmt --all -- --check
 RUN cargo clippy --workspace --all-targets -- -D warnings
 RUN cargo test --workspace
-RUN /opt/verify/bin/maturin build --release --out /tmp/wheels
+RUN /opt/verify/bin/maturin build --release --locked --out /tmp/wheels
 RUN python3 -m venv /tmp/wheel-test \
     && /tmp/wheel-test/bin/pip install /tmp/wheels/*.whl \
     && cd /tmp \
