@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "version": "0.2.0",
-  "source_date_epoch": 1787239041,
+  "version": "0.2.1",
+  "source_date_epoch": 1787249482,
   "builders": {
     "manylinux": "ghcr.io/pyo3/maturin@sha256:2665227312dd1eab1c29c70a001dc8aac53155a2d048bede3b2df7f1691c8e38",
     "sbom": "anchore/syft@sha256:678bfa565b60f747aac0f8e964fe5588a24445b8d0a480e91f6efd70020dfbb0"

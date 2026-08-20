@@ -3,7 +3,7 @@
   "component": "plenora-rest-tools",
   "artifact": {
     "name": "plenora-rest-core",
-    "version": "0.2.0"
+    "version": "0.2.1"
   },
   "capability_entrypoint": "plenora_rest_core::capabilities",
   "lifecycle_entrypoints": [
