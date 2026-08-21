@@ -1296,10 +1296,10 @@ impl Engine {
                 metrics,
             )
             .await;
-        if result.is_ok()
-            && let Some(key) = active_key
-        {
-            remove_active_job(&key);
+        if result.is_ok() {
+            if let Some(key) = active_key {
+                remove_active_job(&key);
+            }
         }
         result
     }
@@ -1325,10 +1325,10 @@ impl Engine {
                 metrics,
             )
             .await;
-        if result.is_ok()
-            && let Some(key) = active_key
-        {
-            remove_active_job(&key);
+        if result.is_ok() {
+            if let Some(key) = active_key {
+                remove_active_job(&key);
+            }
         }
         result
     }
@@ -3111,11 +3111,12 @@ fn apply_idempotency(
                 .iter()
                 .find(|(existing, _)| existing.eq_ignore_ascii_case(name))
                 .map(|(_, value)| value)
-                && existing != key
             {
-                return Err(EngineError::InvalidInput(
-                    "idempotency header conflicts with a configured header".to_owned(),
-                ));
+                if existing != key {
+                    return Err(EngineError::InvalidInput(
+                        "idempotency header conflicts with a configured header".to_owned(),
+                    ));
+                }
             }
             insert_header(headers, name, key.to_owned());
         }
@@ -3140,12 +3141,12 @@ fn insert_idempotency_field(
     key: &str,
     location: &str,
 ) -> Result<(), EngineError> {
-    if let Some(existing) = target.get(name)
-        && existing.as_str() != Some(key)
-    {
-        return Err(EngineError::InvalidInput(format!(
-            "idempotency {location} field conflicts with a configured parameter"
-        )));
+    if let Some(existing) = target.get(name) {
+        if existing.as_str() != Some(key) {
+            return Err(EngineError::InvalidInput(format!(
+                "idempotency {location} field conflicts with a configured parameter"
+            )));
+        }
     }
     target.insert(name.to_owned(), Value::String(key.to_owned()));
     Ok(())

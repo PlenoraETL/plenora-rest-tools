@@ -40,5 +40,23 @@ RUN test -n "${SOURCE_DATE_EPOCH}" \
         --out /tmp/wheels \
     && cp /tmp/wheels/*.whl /tmp/release-artifacts/
 
+FROM build AS python-abi3
+
+RUN set -eux; \
+    for tag in cp310-cp310 cp311-cp311 cp312-cp312 cp313-cp313 cp314-cp314; do \
+        interpreter="/opt/python/${tag}/bin/python"; \
+        target="/tmp/abi3-${tag}"; \
+        "${interpreter}" -m pip install \
+            --disable-pip-version-check \
+            --no-deps \
+            --target "${target}" \
+            /tmp/wheels/*.whl; \
+        cd /tmp; \
+        PYTHONPATH="${target}" "${interpreter}" -m unittest \
+            discover \
+            -s /io/python/tests \
+            -v; \
+    done
+
 FROM scratch AS artifacts
 COPY --from=build /tmp/release-artifacts/ /
