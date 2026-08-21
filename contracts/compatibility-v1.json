@@ -1,0 +1,193 @@
+{
+  "policy": "Published v1 schemas and public bindings are immutable. Breaking changes require a new contract version.",
+  "python_public_exports": [
+    "CancellationToken",
+    "CapabilityDocument",
+    "ConnectionConfig",
+    "Engine",
+    "EngineConfig",
+    "ExecutionResult",
+    "FileOutput",
+    "FileTransferInput",
+    "PlenoraError",
+    "SCHEMA_VERSION",
+    "__version__",
+    "version"
+  ],
+  "rust_binding": {
+    "artifact_name": "plenora-rest-core",
+    "capability_entrypoint": "plenora_rest_core::capabilities",
+    "component": "plenora-rest-tools",
+    "lifecycle_entrypoints": [
+      "plenora_rest_core::Engine::close",
+      "plenora_rest_core::Engine::is_closed"
+    ],
+    "operations": [
+      {
+        "entrypoints": [
+          "plenora_rest_core::Engine::execute",
+          "plenora_rest_core::Engine::execute_with_control"
+        ],
+        "operation": "rest.test",
+        "version": 1
+      },
+      {
+        "entrypoints": [
+          "plenora_rest_core::Engine::execute",
+          "plenora_rest_core::Engine::execute_with_control"
+        ],
+        "operation": "rest.generate",
+        "version": 1
+      },
+      {
+        "entrypoints": [
+          "plenora_rest_core::Engine::execute",
+          "plenora_rest_core::Engine::execute_with_control"
+        ],
+        "operation": "rest.enrich",
+        "version": 1
+      },
+      {
+        "entrypoints": [
+          "plenora_rest_core::Engine::execute",
+          "plenora_rest_core::Engine::execute_with_control"
+        ],
+        "operation": "rest.download",
+        "version": 1
+      },
+      {
+        "entrypoints": [
+          "plenora_rest_core::Engine::execute",
+          "plenora_rest_core::Engine::execute_with_control"
+        ],
+        "operation": "rest.upload",
+        "version": 1
+      }
+    ],
+    "runtime_transport_entrypoint": "plenora_rest_core::RuntimeBinding::invoke_json",
+    "schema_version": 1
+  },
+  "rust_public_exports": [
+    "ASYNC_JOB_RECOVERY_CONTRACT",
+    "ApiKeyLocation",
+    "ArtifactReference",
+    "AsyncJobRecovery",
+    "AuthConfig",
+    "BatchConfig",
+    "BatchInputFormat",
+    "BodyType",
+    "CAPABILITY_ATTRIBUTES_CONTRACT",
+    "CAPABILITY_NAME",
+    "CAPABILITY_SCHEMA_VERSION",
+    "COMPONENT_ID",
+    "CachePolicy",
+    "CancellationToken",
+    "CapabilityDocument",
+    "CapabilityInterface",
+    "CapabilityStatus",
+    "CircuitBreakerPolicy",
+    "ConnectionConfig",
+    "CookiePolicy",
+    "ERROR_CONTENT_TYPE",
+    "ERROR_CONTRACT",
+    "EXECUTION_REQUEST_CONTRACT",
+    "EXECUTION_RESULT_CONTRACT",
+    "Engine",
+    "EngineConfig",
+    "EngineError",
+    "ErrorCategory",
+    "ErrorPayload",
+    "ErrorPhase",
+    "ExecutionControl",
+    "ExecutionControls",
+    "ExecutionError",
+    "ExecutionInput",
+    "ExecutionMetrics",
+    "ExecutionOperation",
+    "ExecutionOptions",
+    "ExecutionOutput",
+    "ExecutionRequest",
+    "ExecutionResult",
+    "ExecutionStatus",
+    "FILE_TRANSFER_INPUT_CONTRACT",
+    "FILE_TRANSFER_RESULT_CONTRACT",
+    "FileTransferDirection",
+    "FileTransferInput",
+    "HttpMethod",
+    "HttpResponseMetadata",
+    "IdempotencyConfig",
+    "IdempotencyLocation",
+    "IntegrityMetadata",
+    "IterationSpec",
+    "JSON_CONTENT_TYPE",
+    "JsonObject",
+    "OAuthClientAuth",
+    "OperationCapability",
+    "OutputMapping",
+    "PYTHON_INTERFACE_CONTRACT",
+    "PaginationConfig",
+    "ParameterLocation",
+    "ParameterMode",
+    "ParameterSpec",
+    "PayloadCapability",
+    "PollingCancelConfig",
+    "PollingConfig",
+    "PollingResumeConfig",
+    "ProxyConfig",
+    "QuerySerialization",
+    "QueryStyle",
+    "REST_DOWNLOAD",
+    "REST_ENRICH",
+    "REST_GENERATE",
+    "REST_TEST",
+    "REST_UPLOAD",
+    "RUNTIME_BINDING_VERSION",
+    "RUNTIME_INTERFACE_CONTRACT",
+    "RUNTIME_VECTOR_CONTRACT",
+    "RUST_INTERFACE_CONTRACT",
+    "RemoteEffect",
+    "RequestConfig",
+    "ResponseConfig",
+    "ResponseFormat",
+    "ResponseTransform",
+    "RetryAdvice",
+    "RetryKind",
+    "RetryPolicy",
+    "RuntimeBinding",
+    "RuntimeMessage",
+    "RuntimeMessageKind",
+    "RuntimeResources",
+    "SCHEMA_VERSION",
+    "SideEffect",
+    "Surface",
+    "TlsConfig",
+    "capabilities"
+  ],
+  "schema_version": 1,
+  "schemas": {
+    "plenora-rest-async-job-recovery-v1.schema.json": {
+      "canonical_sha256": "6674d3b343d600036db930e73bc2722e549f7a28c11ad336e6884a58769f0d2c",
+      "id": "https://schemas.plenora.dev/components/rest/plenora-rest-async-job-recovery-v1.schema.json"
+    },
+    "plenora-rest-capability-attributes-v1.schema.json": {
+      "canonical_sha256": "58017f95715373e61ee23dc8faaff37d4efff3d5d1bf1ceae9aed10eb7f0f30a",
+      "id": "https://schemas.plenora.dev/components/rest/plenora-rest-capability-attributes-v1.schema.json"
+    },
+    "plenora-rest-execution-request-v1.schema.json": {
+      "canonical_sha256": "95dad0d3675d750ebcf1486182b604bf13895379acf9ce166093d1342eff5c44",
+      "id": "https://schemas.plenora.dev/components/rest/plenora-rest-execution-request-v1.schema.json"
+    },
+    "plenora-rest-execution-result-v1.schema.json": {
+      "canonical_sha256": "6d1d73b2a0c84edd9fb9fa7512bd62cdded470c903be995f610d1ed856ac17f2",
+      "id": "https://schemas.plenora.dev/components/rest/plenora-rest-execution-result-v1.schema.json"
+    },
+    "plenora-rest-file-transfer-input-v1.schema.json": {
+      "canonical_sha256": "d0c8f220a3142948ce77d2f3ed6ff5b2abd36b3586e02ac65599d5a230531ea7",
+      "id": "https://schemas.plenora.dev/components/rest/plenora-rest-file-transfer-input-v1.schema.json"
+    },
+    "plenora-rest-file-transfer-result-v1.schema.json": {
+      "canonical_sha256": "4c17ef3f1e2551468498b2d27a7d572acf3d7c898ad9b93d131a1735dbb0dcbf",
+      "id": "https://schemas.plenora.dev/components/rest/plenora-rest-file-transfer-result-v1.schema.json"
+    }
+  }
+}

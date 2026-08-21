@@ -92,7 +92,7 @@ libreria autoconsistente e provider-neutral.
 
 ## SDK Python
 
-Richiede Python 3.10 o successivo. La wheel usa ABI3 da Python 3.10 e non
+Richiede CPython da 3.10 a 3.14. La wheel usa ABI3 da Python 3.10 e non
 dipende da requests o da altri client HTTP Python.
 
 ~~~powershell
@@ -241,8 +241,23 @@ Gate locale completo:
 ./scripts/verify.ps1
 ~~~
 
-Il gate esegue rustfmt, Clippy con warning negati, test Rust, build release
-della wheel, installazione in un ambiente pulito e test black-box dell'SDK.
+Il gate valida gli schemi Draft 2020-12 e il baseline immutabile v1, verifica
+la MSRV Rust 1.85.1, esegue rustfmt, Clippy con warning negati, test Rust,
+baseline rapido di produzione e test black-box della wheel su CPython
+3.10-3.14.
+
+## Supporto di produzione
+
+La matrice iniziale supportata e intenzionalmente limitata a GNU/Linux
+manylinux2014 x86_64, CPython 3.10-3.14 e Rust 1.85.1 o successivo. Windows,
+macOS, ARM, musl, PyPy e un SDK Python asincrono non fanno parte della matrice
+corrente.
+
+Il baseline CI usa carichi brevi e deterministici per concorrenza limitata,
+fault transitori e streaming multi-megabyte. La campagna finale di load, soak e
+fault injection di staging resta separata dal gate ordinario e viene eseguita
+dopo il consolidamento funzionale. I criteri completi sono documentati in
+[docs/production-readiness.md](docs/production-readiness.md).
 
 ## Release riproducibile
 

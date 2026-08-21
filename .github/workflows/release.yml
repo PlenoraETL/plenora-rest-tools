@@ -36,7 +36,8 @@ jobs:
           echo "value=${version}" >> "${GITHUB_OUTPUT}"
 
       - name: Run the complete verification gate
-        run: docker build --file Dockerfile.verify --tag plenora-rest-tools-verify .
+        shell: pwsh
+        run: ./scripts/verify.ps1
 
       - name: Build twice, compare, and generate the SBOM
         shell: pwsh
