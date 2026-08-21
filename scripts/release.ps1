@@ -77,6 +77,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 $sbomName = "plenora-rest-tools-$version.spdx.json"
+$sbomPath = Join-Path $distribution.FullName $sbomName
 $syftArguments = @(
     "run", "--rm",
     "--volume", "$($repositoryRoot):/source:ro",
@@ -86,14 +87,19 @@ $syftArguments = @(
     "--config", "/source/scripts/syft-release.yaml",
     "--source-name", "plenora-rest-tools",
     "--source-version", $version,
-    "--output", "spdx-json@2.3=/out/$sbomName"
+    "--output", "spdx-json@2.3"
 )
-& docker @syftArguments
+$sbomJson = & docker @syftArguments
 if ($LASTEXITCODE -ne 0) {
     throw "SBOM generation failed with exit code $LASTEXITCODE."
 }
 
-$sbomPath = Join-Path $distribution.FullName $sbomName
+$utf8WithoutBom = New-Object System.Text.UTF8Encoding($false)
+[System.IO.File]::WriteAllText(
+    $sbomPath,
+    (($sbomJson -join "`n") + "`n"),
+    $utf8WithoutBom
+)
 & $pythonCommand.Source $releaseTool normalize-sbom $sbomPath $version
 if ($LASTEXITCODE -ne 0) {
     throw "SBOM normalization failed."

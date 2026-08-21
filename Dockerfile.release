@@ -10,7 +10,9 @@ ENV CARGO_INCREMENTAL=0 \
 WORKDIR /io
 COPY . .
 
-RUN find . -type f \( \
+RUN find . -type d -exec chmod 0755 {} + \
+    && find . -type f -exec chmod 0644 {} + \
+    && find . -type f \( \
         -name "*.json" -o \
         -name "*.md" -o \
         -name "*.ps1" -o \
@@ -18,6 +20,7 @@ RUN find . -type f \( \
         -name "*.pyi" -o \
         -name "*.rs" -o \
         -name "*.toml" -o \
+        -name "*.yaml" -o \
         -name "*.yml" -o \
         -name "Cargo.lock" -o \
         -name "Dockerfile*" \
