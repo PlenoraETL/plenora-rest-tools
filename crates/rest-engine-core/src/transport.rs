@@ -108,6 +108,11 @@ pub(crate) struct PreparedRequest {
     /// Jar of the cookie session, resolved once when the operation is admitted
     /// and used for its whole duration.
     pub admitted_jar: Option<CookieJar>,
+    /// Session named by the caller's request. Kept when a credential scope
+    /// removes the cookies from a cross-origin follow-up, so that a request of
+    /// an operation whose session has ended is still refused before it reaches
+    /// the network.
+    pub caller_session: Option<CookieSession>,
     pub cache: CachePolicy,
     pub circuit_breaker: CircuitBreakerPolicy,
     pub requests_per_second: Option<f64>,
@@ -649,6 +654,12 @@ impl Transport {
         &self,
         request: &mut PreparedRequest,
     ) -> Result<Option<JarLease>, EngineError> {
+        // A follow-up whose cookies were stripped still belongs to the caller's
+        // session: it must not run once that session has ended.
+        if request.cookies.session.is_none() {
+            self.check_cookie_session(request.caller_session.as_ref())
+                .await?;
+        }
         Ok(match self.cookie_jar(&request.cookies).await? {
             Some((jar, lease)) => {
                 request.admitted_jar = Some(jar);
@@ -681,6 +692,28 @@ impl Transport {
             leases: jar.leases.clone(),
         };
         Ok(Some((jar, lease)))
+    }
+
+    /// Refuses a handle that is stale, foreign, or used on an engine without a
+    /// cookie store. `None` is accepted: the request names no session.
+    pub async fn check_cookie_session(
+        &self,
+        session: Option<&CookieSession>,
+    ) -> Result<(), EngineError> {
+        let Some(handle) = session else {
+            return Ok(());
+        };
+        if !self.config.allow_cookie_store {
+            return Err(EngineError::PolicyViolation(ErrorDetail::from(
+                "cookie storage is not enabled for this engine",
+            )));
+        }
+        self.sessions
+            .lock()
+            .await
+            .resolve(handle)
+            .map(|_| ())
+            .map_err(session_refusal_error)
     }
 
     /// Monotonic counter that gives every pooled entry a deterministic
@@ -1327,6 +1360,7 @@ impl Transport {
             },
             cookies: CookiePolicy::default(),
             admitted_jar: None,
+            caller_session: None,
             cache: CachePolicy::default(),
             circuit_breaker: CircuitBreakerPolicy::default(),
             requests_per_second: original.requests_per_second,

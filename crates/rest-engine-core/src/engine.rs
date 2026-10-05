@@ -140,6 +140,17 @@ impl Engine {
         if let Err(error) = validate_execution_configuration(&request) {
             return failed_result(error);
         }
+        // Checked once for the whole operation, before any network activity
+        // and before a credential scope can strip the session from a
+        // follow-up: a stale handle must refuse the operation, not let parts
+        // of it run without cookies.
+        if let Err(error) = self
+            .transport
+            .check_cookie_session(request.connection.cookies.session.as_ref())
+            .await
+        {
+            return failed_result(error);
+        }
         if let Err(error) = self.admit_idempotency(&request) {
             return failed_result(error);
         }
@@ -1809,6 +1820,7 @@ impl Engine {
             retry: connection.retry.clone(),
             cookies: connection.cookies.clone(),
             admitted_jar: None,
+            caller_session: connection.cookies.session.clone(),
             cache,
             circuit_breaker: connection.circuit_breaker.clone(),
             requests_per_second: connection.requests_per_second,
@@ -1889,6 +1901,7 @@ impl Engine {
             retry: connection.retry.clone(),
             cookies: connection.cookies.clone(),
             admitted_jar: None,
+            caller_session: connection.cookies.session.clone(),
             cache: connection.cache.clone(),
             circuit_breaker: connection.circuit_breaker.clone(),
             requests_per_second: connection.requests_per_second,
@@ -2158,6 +2171,7 @@ impl Engine {
             retry,
             cookies: connection.cookies.clone(),
             admitted_jar: None,
+            caller_session: connection.cookies.session.clone(),
             cache: connection.cache.clone(),
             circuit_breaker: connection.circuit_breaker.clone(),
             requests_per_second: connection.requests_per_second,
@@ -3916,6 +3930,9 @@ impl CredentialScope {
             is_transferable_cross_origin_header(name)
                 || preserved.is_some_and(|kept| kept.eq_ignore_ascii_case(name))
         });
+        // The session's cookies do not cross the origin, but the caller's
+        // handle stays in `caller_session`, so the transport still refuses the
+        // request if the session has ended.
         request.cookies = CookiePolicy::default();
         request.tls.client_identity_pem = None;
     }

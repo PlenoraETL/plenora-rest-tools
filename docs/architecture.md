@@ -336,6 +336,13 @@ sua sessione. Lo slot viene liberato, e la sua generazione avanza, soltanto
 dopo che l'ultima richiesta in corso lo ha rilasciato: fino ad allora non viene
 riusato.
 
+L'handle del chiamante si valida una volta all'inizio dell'operazione, prima di
+qualunque attività di rete e prima che lo scope delle credenziali possa toglierlo
+da una richiesta di follow-up verso un'altra origin. Anche quando lo scope
+toglie i cookie, la richiesta conserva l'handle del chiamante e il trasporto la
+rifiuta se la sessione è finita nel frattempo: polling ripreso, paginazione,
+result URL e cancellazione remota di una sessione chiusa non partono.
+
 Aprire una sessione quando tutti gli slot sono occupati espelle quella usata
 meno di recente fra quelle che nessuna operazione ha prenotato, mai una ancora
 prenotata, perché espellere una sessione attiva la dividerebbe fra richieste

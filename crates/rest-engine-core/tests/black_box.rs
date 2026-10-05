@@ -4395,3 +4395,178 @@ async fn closing_a_session_during_oauth_keeps_the_admitted_request_and_refuses_n
     assert_ne!(reopened, session);
     assert_refused_before_network(&engine, &token).await;
 }
+
+async fn write_json_response(stream: &mut TcpStream, status: &str, body: &str) {
+    let response = format!(
+        "HTTP/1.1 {status}
+Content-Type: application/json
+Content-Length: {}
+Connection: close
+
+{body}",
+        body.len()
+    );
+    stream.write_all(response.as_bytes()).await.unwrap();
+    stream.shutdown().await.unwrap();
+}
+
+/// A listener that records whether anything connected to it within `wait`.
+async fn watched_listener(wait: Duration) -> (String, JoinHandle<bool>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let watcher = tokio::spawn(async move { timeout(wait, listener.accept()).await.is_ok() });
+    (url, watcher)
+}
+
+#[tokio::test]
+async fn a_resumed_cross_origin_poll_with_a_stale_session_never_reaches_the_network() {
+    // The poll and the cancellation target other origins, so the credential
+    // scope strips the session from them before they reach the transport. The
+    // stale handle must still refuse the operation up front.
+    let (poll_base, poll_watcher) = watched_listener(Duration::from_secs(1)).await;
+    let (cancel_base, cancel_watcher) = watched_listener(Duration::from_secs(1)).await;
+    let engine = cookie_engine(4);
+    let session = engine.open_cookie_session().await.unwrap();
+    engine.close_cookie_session(&session).await.unwrap();
+
+    let result = execute(
+        &engine,
+        json!({
+            "schema_version": 1,
+            "operation": "test",
+            "connection": {
+                "url": "http://127.0.0.1:9/submit",
+                "method": "POST",
+                "cookies": {"session": session},
+                "polling": {
+                    "url_template": format!("{poll_base}/jobs/{{job_id}}"),
+                    "allow_cross_origin": true,
+                    "interval_ms": 0,
+                    "max_attempts": 1,
+                    "resume": {"job_id": "existing-1"},
+                    "cancel": {
+                        "url_template": format!("{cancel_base}/jobs/{{job_id}}"),
+                        "on_poll_timeout": true
+                    }
+                }
+            }
+        }),
+    )
+    .await;
+
+    assert_eq!(result["status"], "failed", "{result}");
+    assert_eq!(result["errors"][0]["code"], "POLICY_VIOLATION", "{result}");
+    assert_eq!(result["metrics"]["requests"], 0, "{result}");
+    assert!(!poll_watcher.await.unwrap(), "the poll must not be sent");
+    assert!(
+        !cancel_watcher.await.unwrap(),
+        "the cancellation must not be sent"
+    );
+}
+
+#[tokio::test]
+async fn a_remote_cancellation_after_the_session_closed_is_not_sent() {
+    // The session is valid when the operation starts and is closed while the
+    // poll is in flight. The poll times out and triggers a remote cancellation
+    // on another origin, where the scope strips the session: that request
+    // belongs to an ended session and must be refused before the network.
+    let owner = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let owner_url = format!("http://{}", owner.local_addr().unwrap());
+    let (arrived, arrival) = tokio::sync::oneshot::channel();
+    let (release, released) = tokio::sync::oneshot::channel::<()>();
+    let owner_server = tokio::spawn(async move {
+        let (mut submit, _) = owner.accept().await.unwrap();
+        let _ = read_request(&mut submit).await;
+        write_json_response(
+            &mut submit,
+            "202 Accepted",
+            r#"{"id":"job-1","status":"queued"}"#,
+        )
+        .await;
+        let (mut poll, _) = owner.accept().await.unwrap();
+        let _ = read_request(&mut poll).await;
+        let _ = arrived.send(());
+        released.await.unwrap();
+        write_json_response(&mut poll, "200 OK", r#"{"status":"running"}"#).await;
+    });
+    let (cancel_base, cancel_watcher) = watched_listener(Duration::from_secs(3)).await;
+
+    let engine = Arc::new(cookie_engine(4));
+    let session = engine.open_cookie_session().await.unwrap();
+    let request = json!({
+        "schema_version": 1,
+        "operation": "test",
+        "connection": {
+            "url": format!("{owner_url}/submit"),
+            "method": "POST",
+            "cookies": {"session": session},
+            "polling": {
+                "url_template": format!("{owner_url}/jobs/{{job_id}}"),
+                "location_header": null,
+                "allow_cross_origin": true,
+                "interval_ms": 0,
+                "max_attempts": 1,
+                "cancel": {
+                    "url_template": format!("{cancel_base}/jobs/{{job_id}}"),
+                    "on_poll_timeout": true
+                }
+            }
+        }
+    });
+    let running_engine = Arc::clone(&engine);
+    let running = tokio::spawn(async move { execute(&running_engine, request).await });
+    timeout(Duration::from_secs(5), arrival)
+        .await
+        .expect("the poll never arrived")
+        .unwrap();
+    engine.close_cookie_session(&session).await.unwrap();
+    release.send(()).unwrap();
+
+    let result = running.await.unwrap();
+    owner_server.await.unwrap();
+    assert_eq!(result["errors"][0]["code"], "POLLING_TIMEOUT", "{result}");
+    assert_eq!(result["metrics"]["requests"], 2, "{result}");
+    assert_eq!(
+        result["recoveries"][0]["cancel_requested"], true,
+        "{result}"
+    );
+    assert_eq!(
+        result["recoveries"][0]["cancel_accepted"], false,
+        "{result}"
+    );
+    assert!(
+        !cancel_watcher.await.unwrap(),
+        "a cancellation for an ended session must not be sent"
+    );
+}
+
+#[tokio::test]
+async fn a_stale_session_is_refused_before_the_idempotency_key_is_recorded() {
+    // The operation-level check runs before idempotency admission: a refused
+    // attempt must not record the key, or retrying the same key with a fresh
+    // session would be reported as a conflicting reuse.
+    let (url, server, _) = recorded_server(vec![(200, r#"{"ok":true}"#, vec![])]).await;
+    let engine = cookie_engine(4);
+    let stale = engine.open_cookie_session().await.unwrap();
+    engine.close_cookie_session(&stale).await.unwrap();
+    let attempt = |session: &CookieSession| {
+        json!({
+            "schema_version": 1,
+            "operation": "test",
+            "connection": {"url": url, "method": "POST", "cookies": {"session": session}},
+            "options": {"idempotency_key": "retry-with-new-session"}
+        })
+    };
+
+    let refused = execute(&engine, attempt(&stale)).await;
+    assert_eq!(
+        refused["errors"][0]["code"], "POLICY_VIOLATION",
+        "{refused}"
+    );
+    assert_eq!(refused["metrics"]["requests"], 0);
+
+    let fresh = engine.open_cookie_session().await.unwrap();
+    let retried = execute(&engine, attempt(&fresh)).await;
+    server.await.unwrap();
+    assert_eq!(retried["status"], "success", "{retried}");
+}

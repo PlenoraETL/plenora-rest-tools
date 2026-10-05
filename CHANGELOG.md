@@ -30,6 +30,10 @@ del contratto delle richieste, raccolte in un'unica rottura.
   richieste nuove, e lo slot viene riusato soltanto dopo la fine di quella in
   corso. Il valore casuale dell'handle è di 128 bit dalla sorgente del sistema
   (getrandom, già nel grafo tramite uuid, ora dipendenza diretta pinnata).
+- L'handle si valida all'inizio dell'operazione, prima della rete e prima che
+  lo scope delle credenziali lo tolga dalle richieste cross-origin; queste
+  ultime restano legate alla sessione del chiamante e non partono se è finita
+  (polling ripreso, cancellazione remota).
 - Superficie congelata aggiornata con decisione esplicita: export CookieSession
   ed entrypoint di sessione in compatibility-v1.json e bindings/rust-v1.json.
 
