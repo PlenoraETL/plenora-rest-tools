@@ -3661,7 +3661,7 @@ fn pagination_url(base: &Url, target: &str, allow_cross_origin: bool) -> Result<
     Ok(resolved)
 }
 
-fn link_header_target(
+pub(crate) fn link_header_target(
     headers: &BTreeMap<String, String>,
     expected_relation: &str,
 ) -> Result<Option<String>, EngineError> {

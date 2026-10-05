@@ -47,7 +47,7 @@ const MAX_CACHED_TOKENS: usize = 256;
 /// Longest `Set-Cookie` header the engine will accept. Well above any real
 /// cookie; anything larger is a remote service pushing bulk data into
 /// engine-held state.
-const MAX_SET_COOKIE_BYTES: usize = 8 * 1024;
+pub(crate) const MAX_SET_COOKIE_BYTES: usize = 8 * 1024;
 
 /// SHA-256 fingerprint used by the client, token, and cache isolation keys.
 type Fingerprint = [u8; 32];
@@ -323,7 +323,7 @@ impl SessionRegistry {
 /// be able to push arbitrarily large values into engine-held state one header at
 /// a time. A legitimate `Set-Cookie` is far below this limit.
 #[derive(Default)]
-struct BoundedJar {
+pub(crate) struct BoundedJar {
     inner: Jar,
 }
 
@@ -2131,7 +2131,12 @@ fn response_content_length(response: &reqwest::Response) -> Option<u64> {
 }
 
 fn strong_response_etag(response: &reqwest::Response) -> Option<String> {
-    let value = response.headers().get(ETAG)?.to_str().ok()?.trim();
+    strong_etag(response.headers().get(ETAG)?.to_str().ok()?)
+}
+
+/// The strong validator carried by an `ETag` value, if it is one.
+pub(crate) fn strong_etag(value: &str) -> Option<String> {
+    let value = value.trim();
     if value.starts_with("W/")
         || value.len() < 2
         || !value.starts_with('"')
@@ -2143,10 +2148,10 @@ fn strong_response_etag(response: &reqwest::Response) -> Option<String> {
     }
 }
 
-struct ContentRange {
-    start: u64,
-    end: u64,
-    total: u64,
+pub(crate) struct ContentRange {
+    pub(crate) start: u64,
+    pub(crate) end: u64,
+    pub(crate) total: u64,
 }
 
 fn satisfied_content_range(response: &reqwest::Response) -> Result<ContentRange, EngineError> {
@@ -2164,6 +2169,11 @@ fn satisfied_content_range(response: &reqwest::Response) -> Result<ContentRange,
                 "download Content-Range is not valid text",
             ))
         })?;
+    parse_content_range(value)
+}
+
+/// A satisfied `Content-Range` value: `bytes <start>-<end>/<total>`.
+pub(crate) fn parse_content_range(value: &str) -> Result<ContentRange, EngineError> {
     let (unit, range_and_total) = value.trim().split_once(' ').ok_or_else(|| {
         EngineError::InvalidResponse(ErrorDetail::from("download Content-Range is malformed"))
     })?;
@@ -2585,18 +2595,18 @@ fn merge_headers(cached: &mut BTreeMap<String, String>, revalidated: &BTreeMap<S
     }
 }
 
-fn response_forbids_store(headers: &BTreeMap<String, String>) -> bool {
+pub(crate) fn response_forbids_store(headers: &BTreeMap<String, String>) -> bool {
     header_has_directive(headers, CACHE_CONTROL.as_str(), "no-store")
         || headers
             .get(VARY.as_str())
             .is_some_and(|value| value.split(',').any(|value| value.trim() == "*"))
 }
 
-fn response_requires_revalidation(headers: &BTreeMap<String, String>) -> bool {
+pub(crate) fn response_requires_revalidation(headers: &BTreeMap<String, String>) -> bool {
     header_has_directive(headers, CACHE_CONTROL.as_str(), "no-cache")
 }
 
-fn cache_max_age_ms(headers: &BTreeMap<String, String>) -> Option<u64> {
+pub(crate) fn cache_max_age_ms(headers: &BTreeMap<String, String>) -> Option<u64> {
     headers
         .get(CACHE_CONTROL.as_str())?
         .split(',')
@@ -2678,7 +2688,7 @@ fn retry_delay(policy: &RetryPolicy, attempt: u32, retry_after_ms: Option<u64>) 
     Duration::from_millis(delay)
 }
 
-fn parse_retry_after(value: &str, now: SystemTime) -> Option<u64> {
+pub(crate) fn parse_retry_after(value: &str, now: SystemTime) -> Option<u64> {
     let value = value.trim();
     if let Ok(seconds) = value.parse::<u64>() {
         return seconds.checked_mul(1_000);

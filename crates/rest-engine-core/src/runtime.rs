@@ -438,7 +438,7 @@ fn reject_inline_secrets(request: &ExecutionRequest) -> Result<(), EngineError> 
     Ok(())
 }
 
-fn validate_reference(reference: &str) -> Result<(), EngineError> {
+pub(crate) fn validate_reference(reference: &str) -> Result<(), EngineError> {
     let normalized = reference.replace('\\', "/");
     if reference.is_empty()
         || reference.len() > 512
