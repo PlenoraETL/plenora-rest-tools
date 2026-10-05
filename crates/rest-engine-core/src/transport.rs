@@ -2,6 +2,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     hash::{Hash, Hasher},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    num::IntErrorKind,
     path::{Path, PathBuf},
     sync::Arc,
     sync::atomic::{AtomicU64, AtomicUsize, Ordering},
@@ -2690,8 +2691,15 @@ fn retry_delay(policy: &RetryPolicy, attempt: u32, retry_after_ms: Option<u64>) 
 
 pub(crate) fn parse_retry_after(value: &str, now: SystemTime) -> Option<u64> {
     let value = value.trim();
-    if let Ok(seconds) = value.parse::<u64>() {
-        return seconds.checked_mul(1_000);
+    // delay-seconds has no upper bound (RFC 9110, 10.2.3). A value too large
+    // for u64 milliseconds is the longest possible wait, not an absent
+    // header: it saturates, and retry_delay then caps it at
+    // max_retry_after_ms. Reading it as absent fell back to the exponential
+    // backoff and retried sooner than the service asked.
+    match value.parse::<u64>() {
+        Ok(seconds) => return Some(seconds.saturating_mul(1_000)),
+        Err(error) if *error.kind() == IntErrorKind::PosOverflow => return Some(u64::MAX),
+        Err(_) => {}
     }
     let date = httpdate::parse_http_date(value).ok()?;
     let delay = date.duration_since(now).unwrap_or(Duration::ZERO);
@@ -2786,6 +2794,28 @@ mod tests {
         assert_eq!(
             parse_retry_after(&httpdate::fmt_http_date(now - Duration::from_secs(1)), now),
             Some(0)
+        );
+    }
+
+    #[test]
+    fn retry_after_beyond_the_representable_wait_saturates() {
+        // Found by the property test against RFC 9110: both values used to
+        // read as "no Retry-After", so the retry came after the exponential
+        // backoff instead of after max_retry_after_ms.
+        let now = UNIX_EPOCH + Duration::from_secs(1_000_000);
+        assert_eq!(parse_retry_after("18446744073709552", now), Some(u64::MAX));
+        assert_eq!(
+            parse_retry_after("99999999999999999999999", now),
+            Some(u64::MAX)
+        );
+        let policy = crate::RetryPolicy::default();
+        assert_eq!(
+            super::retry_delay(
+                &policy,
+                1,
+                parse_retry_after("99999999999999999999999", now)
+            ),
+            Duration::from_millis(policy.max_retry_after_ms)
         );
     }
 
