@@ -17,14 +17,15 @@ use sha2::{Digest, Sha256};
 use tokio::{fs, io::AsyncReadExt, time::sleep};
 
 use crate::{
-    ASYNC_JOB_RECOVERY_CONTRACT, AsyncJobRecovery, BatchConfig, BatchInputFormat, BodyType,
-    CachePolicy, CancellationToken, CapabilityDocument, ConnectionConfig, EngineConfig,
-    EngineError, ExecutionControl, ExecutionError, ExecutionMetrics, ExecutionOperation,
-    ExecutionOutput, ExecutionRequest, ExecutionResult, ExecutionStatus, FileTransferDirection,
-    FileTransferInput, HttpMethod, HttpResponseMetadata, IdempotencyLocation, IntegrityMetadata,
-    JsonObject, OutputMapping, PaginationConfig, ParameterLocation, ParameterMode,
-    PollingCancelConfig, PollingConfig, QuerySerialization, QueryStyle, ResponseConfig,
-    ResponseTransform, SCHEMA_VERSION, capabilities, json_path, response_body,
+    ASYNC_JOB_RECOVERY_CONTRACT, AsyncJobRecovery, AuthConfig, BatchConfig, BatchInputFormat,
+    BodyType, CachePolicy, CancellationToken, CapabilityDocument, ConnectionConfig, CookiePolicy,
+    EngineConfig, EngineError, ExecutionControl, ExecutionError, ExecutionMetrics,
+    ExecutionOperation, ExecutionOutput, ExecutionRequest, ExecutionResult, ExecutionStatus,
+    FileTransferDirection, FileTransferInput, HttpMethod, HttpResponseMetadata,
+    IdempotencyLocation, IntegrityMetadata, JsonObject, OutputMapping, PaginationConfig,
+    ParameterLocation, ParameterMode, PollingCancelConfig, PollingConfig, QuerySerialization,
+    QueryStyle, ResponseConfig, ResponseTransform, SCHEMA_VERSION, capabilities, json_path,
+    response_body,
     transport::{
         DownloadTarget, PreparedBody, PreparedFile, PreparedFileSource, PreparedRequest,
         PreparedStream, ResponseData, Transport, same_origin,
@@ -53,6 +54,10 @@ struct ActiveAsyncJob {
 #[derive(Clone)]
 struct ActiveRemoteCancel {
     request: PreparedRequest,
+    /// Kept so the revocation is re-checked when the request is actually sent.
+    /// A cancellation is registered while polling and may fire much later, by
+    /// which time a further hop may have revoked the authorization.
+    scope: CredentialScope,
     on_cancellation: bool,
     on_deadline: bool,
     on_poll_timeout: bool,
@@ -68,6 +73,13 @@ enum RemoteCancelTrigger {
 tokio::task_local! {
     static ACTIVE_ASYNC_JOBS: Arc<Mutex<BTreeMap<String, ActiveAsyncJob>>>;
 }
+
+/// Total wall-clock allowance for best-effort remote cancellations issued after
+/// a deadline or an explicit cancellation.
+const REMOTE_CANCEL_BUDGET: Duration = Duration::from_secs(5);
+
+/// Maximum remote cancellations issued concurrently within that budget.
+const REMOTE_CANCEL_CONCURRENCY: usize = 8;
 
 const PATH_SEGMENT_ENCODE_SET: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'-')
@@ -237,21 +249,37 @@ impl Engine {
                     if let Some(recovery) = job.recovery.as_mut() {
                         recovery.cancel_requested = true;
                     }
-                    Some((key.clone(), cancel.request.clone()))
+                    // Re-applied here, not only when the job was registered: a
+                    // later hop may have revoked the authorization since.
+                    let mut request = cancel.request.clone();
+                    cancel.scope.apply(&mut request, None);
+                    Some((key.clone(), request))
                 })
                 .collect::<Vec<_>>()
         };
-        for (key, request) in requests {
-            let accepted = self
-                .transport
-                .execute(request)
-                .await
-                .is_ok_and(|response| (200..300).contains(&response.status));
-            let mut jobs = jobs.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            if let Some(recovery) = jobs.get_mut(&key).and_then(|job| job.recovery.as_mut()) {
-                recovery.cancel_accepted = Some(accepted);
-            }
-        }
+        // Best-effort cleanup after a deadline or a cancellation must not extend
+        // the very deadline it is reacting to: the remote cancellations run with
+        // bounded concurrency inside a single global budget, and whatever does
+        // not finish in time is simply left unreported.
+        let cleanup = stream::iter(requests)
+            .map(|(key, request)| {
+                let jobs = jobs.clone();
+                async move {
+                    let accepted = self
+                        .transport
+                        .execute(request)
+                        .await
+                        .is_ok_and(|response| (200..300).contains(&response.status));
+                    let mut jobs = jobs.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                    if let Some(recovery) = jobs.get_mut(&key).and_then(|job| job.recovery.as_mut())
+                    {
+                        recovery.cancel_accepted = Some(accepted);
+                    }
+                }
+            })
+            .buffer_unordered(REMOTE_CANCEL_CONCURRENCY)
+            .collect::<Vec<()>>();
+        let _ = tokio::time::timeout(REMOTE_CANCEL_BUDGET, cleanup).await;
     }
 
     async fn cancel_active_job(&self, key: &str, trigger: RemoteCancelTrigger) {
@@ -272,13 +300,21 @@ impl Engine {
             if let Some(recovery) = job.recovery.as_mut() {
                 recovery.cancel_requested = true;
             }
-            cancel.request.clone()
+            let mut request = cancel.request.clone();
+            cancel.scope.apply(&mut request, None);
+            request
         };
-        let accepted = self
-            .transport
-            .execute(request)
-            .await
-            .is_ok_and(|response| (200..300).contains(&response.status));
+        // Same budget as the deadline and cancellation paths: a poll that has
+        // already exhausted `max_wait_ms` must not then block indefinitely on a
+        // best-effort remote cancellation. On expiry the recovery handle keeps
+        // `cancel_accepted = None`, which is exactly "requested, outcome
+        // unknown".
+        let Ok(accepted) =
+            tokio::time::timeout(REMOTE_CANCEL_BUDGET, self.transport.execute(request)).await
+        else {
+            return;
+        };
+        let accepted = accepted.is_ok_and(|response| (200..300).contains(&response.status));
         let mut locked = jobs.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(recovery) = locked.get_mut(key).and_then(|job| job.recovery.as_mut()) {
             recovery.cancel_accepted = Some(accepted);
@@ -420,13 +456,14 @@ impl Engine {
             None,
             request.options.idempotency_key.as_deref(),
         )?;
+        let mut credential_scope = CredentialScope::new(initial.url.clone());
         let (prepared, is_poll_result, active_key) = match &request.connection.polling {
             Some(polling) => {
                 let completion = if polling.resume.is_some() {
                     self.await_resumed_poll_completion(
                         &request.connection,
                         polling,
-                        &initial.url,
+                        &mut credential_scope,
                         metrics,
                     )
                     .await?
@@ -439,6 +476,7 @@ impl Engine {
                         polling,
                         initial_value,
                         initial_response,
+                        &mut credential_scope,
                         metrics,
                     )
                     .await?
@@ -449,6 +487,7 @@ impl Engine {
                     &completion.value,
                     &completion.response,
                     completion.job_id.as_ref(),
+                    &mut credential_scope,
                 )?;
                 (prepared, true, completion.active_key)
             }
@@ -532,6 +571,13 @@ impl Engine {
         if length > limit {
             return Err(EngineError::FileTooLarge { limit_bytes: limit });
         }
+        // The transport reopens the file by path for every send, redirect, and
+        // retry, so the hashed bytes and the transmitted bytes are only the same
+        // as long as nothing rewrites the file underneath us. The digest is
+        // therefore recomputed once the transfer is done: comparing content
+        // rather than size and timestamps detects a same-size rewrite, a
+        // restored mtime, and a replacement through rename, none of which
+        // metadata alone would reveal.
         let sha256 = hash_file(&source, limit).await?;
         if let Some(expected) = validated_checksum(file.expected_sha256.as_deref())? {
             if !sha256.eq_ignore_ascii_case(&expected) {
@@ -594,11 +640,30 @@ impl Engine {
             .request_prepared_json(
                 &request.connection,
                 prepared,
+                None,
                 metrics,
                 responses,
                 &request.options,
             )
             .await?;
+        // Reported as a checksum mismatch rather than an I/O error on purpose:
+        // this check runs *after* the remote request completed, so the contract
+        // must say the remote effect is unknown and the failure belongs to the
+        // finalize phase. `FileIo` would claim `remote_effect: none` and tell
+        // the caller nothing happened remotely, which is exactly wrong here.
+        let transferred =
+            hash_file(&source, limit)
+                .await
+                .map_err(|_| EngineError::ChecksumMismatch {
+                    expected: sha256.clone(),
+                    actual: "unreadable".to_owned(),
+                })?;
+        if transferred != sha256 {
+            return Err(EngineError::ChecksumMismatch {
+                expected: sha256,
+                actual: transferred,
+            });
+        }
         metrics.bytes_uploaded = metrics.bytes_uploaded.saturating_add(length);
         Ok(OperationResult {
             output: ExecutionOutput::File {
@@ -947,6 +1012,13 @@ impl Engine {
         options: &crate::ExecutionOptions,
     ) -> Result<Vec<Value>, EngineError> {
         let mut output = Vec::new();
+        // Origin that owns the credentials for the whole pagination run. It is
+        // fixed by the first page and never re-derived, so no later page can
+        // become the origin that owns them. Cursor, offset, and page values are
+        // remote input too: `prepare_request` substitutes placeholders anywhere
+        // in the URL, including the host, so every mode is scoped, not only the
+        // ones that follow an explicit link.
+        let mut credential_scope: Option<CredentialScope> = None;
 
         match pagination {
             PaginationConfig::Offset {
@@ -966,10 +1038,11 @@ impl Engine {
                     parameters.insert(limit_param.clone(), usize_value(limit)?);
                     let scoped_options = scoped_execution_options(options, request_index);
                     let (value, _, _, _) = self
-                        .request_json(
+                        .request_page(
                             connection,
                             &parameters,
                             None,
+                            &mut credential_scope,
                             metrics,
                             responses,
                             &scoped_options,
@@ -1002,10 +1075,11 @@ impl Engine {
                     parameters.insert(page_size_param.clone(), usize_value(limit)?);
                     let scoped_options = scoped_execution_options(options, request_index);
                     let (value, _, _, _) = self
-                        .request_json(
+                        .request_page(
                             connection,
                             &parameters,
                             None,
+                            &mut credential_scope,
                             metrics,
                             responses,
                             &scoped_options,
@@ -1039,10 +1113,11 @@ impl Engine {
                     }
                     let scoped_options = scoped_execution_options(options, page_index);
                     let (value, _, _, _) = self
-                        .request_json(
+                        .request_page(
                             connection,
                             &parameters,
                             None,
+                            &mut credential_scope,
                             metrics,
                             responses,
                             &scoped_options,
@@ -1080,10 +1155,11 @@ impl Engine {
                     };
                     let scoped_options = scoped_execution_options(options, page_index);
                     let (value, final_url, _, _) = self
-                        .request_json(
+                        .request_page(
                             connection,
                             parameters,
                             next_url.as_deref(),
+                            &mut credential_scope,
                             metrics,
                             responses,
                             &scoped_options,
@@ -1131,10 +1207,11 @@ impl Engine {
                     };
                     let scoped_options = scoped_execution_options(options, page_index);
                     let (value, final_url, _, headers) = self
-                        .request_json(
+                        .request_page(
                             connection,
                             parameters,
                             next_url.as_deref(),
+                            &mut credential_scope,
                             metrics,
                             responses,
                             &scoped_options,
@@ -1176,21 +1253,86 @@ impl Engine {
             url_override,
             options.idempotency_key.as_deref(),
         )?;
-        self.request_prepared_json(connection, request, metrics, responses, options)
+        self.request_prepared_json(connection, request, None, metrics, responses, options)
             .await
     }
 
-    async fn request_prepared_json(
+    /// Pagination step.
+    ///
+    /// `credential_scope` is fixed by the URL the first page is *sent to* and
+    /// then reused unchanged for every later page and for every follow-up
+    /// derived from them. It is deliberately not taken from a response: the URL
+    /// a page finishes on may already be a polling or result URL the remote
+    /// service chose, and letting that become the owning origin would hand the
+    /// credentials to it on the next page.
+    #[allow(clippy::too_many_arguments)]
+    async fn request_page(
         &self,
         connection: &ConnectionConfig,
-        request: PreparedRequest,
+        parameters: &JsonObject,
+        url_override: Option<&str>,
+        credential_scope: &mut Option<CredentialScope>,
         metrics: &mut ExecutionMetrics,
         responses: &mut Vec<HttpResponseMetadata>,
         options: &crate::ExecutionOptions,
     ) -> Result<(Value, Url, u32, BTreeMap<String, String>), EngineError> {
+        let mut request = self.prepare_request(
+            connection,
+            parameters,
+            url_override,
+            options.idempotency_key.as_deref(),
+        )?;
+        // The owning origin is the URL the first page is sent to, and the
+        // authorization only ever narrows: a page served by another origin
+        // revokes it for every later page as well.
+        let scope =
+            credential_scope.get_or_insert_with(|| CredentialScope::new(request.url.clone()));
+        scope.narrow(&request.url);
+        scope.apply(
+            &mut request,
+            preserved_idempotency_header(connection, options),
+        );
+        self.request_prepared_json(
+            connection,
+            request,
+            Some(scope),
+            metrics,
+            responses,
+            options,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn request_prepared_json(
+        &self,
+        connection: &ConnectionConfig,
+        request: PreparedRequest,
+        credential_scope: Option<&mut CredentialScope>,
+        metrics: &mut ExecutionMetrics,
+        responses: &mut Vec<HttpResponseMetadata>,
+        options: &crate::ExecutionOptions,
+    ) -> Result<(Value, Url, u32, BTreeMap<String, String>), EngineError> {
+        // Origin that owns the credentials carried by this request; every
+        // follow-up leaving it must not take them along.
+        //
+        // An explicit origin always wins: deriving it from `request.url` would
+        // re-anchor the scope to a URL a remote service chose, so a page already
+        // stripped of credentials could hand them back to its own origin through
+        // a polling follow-up.
+        // An explicit scope is borrowed, not copied, so a restriction applied
+        // while following the polling chain is visible to the caller afterwards.
+        let mut owned_scope;
+        let credential_scope = match credential_scope {
+            Some(scope) => scope,
+            None => {
+                owned_scope = CredentialScope::new(request.url.clone());
+                &mut owned_scope
+            }
+        };
         let result = match &connection.polling {
             Some(polling) if polling.resume.is_some() => {
-                self.resume_poll(connection, polling, &request.url, metrics)
+                self.resume_poll(connection, polling, credential_scope, metrics)
                     .await
             }
             polling => {
@@ -1204,6 +1346,7 @@ impl Engine {
                             polling,
                             initial_value,
                             initial_response,
+                            credential_scope,
                             metrics,
                         )
                         .await
@@ -1274,6 +1417,7 @@ impl Engine {
         polling: &PollingConfig,
         initial_value: Value,
         initial_response: ResponseData,
+        credential_scope: &mut CredentialScope,
         metrics: &mut ExecutionMetrics,
     ) -> Result<(Value, Url, u32, BTreeMap<String, String>, u16), EngineError> {
         let completion = self
@@ -1282,6 +1426,7 @@ impl Engine {
                 polling,
                 initial_value,
                 initial_response,
+                credential_scope,
                 metrics,
             )
             .await?;
@@ -1293,6 +1438,7 @@ impl Engine {
                 completion.value,
                 completion.response,
                 completion.job_id.as_ref(),
+                credential_scope,
                 metrics,
             )
             .await;
@@ -1308,11 +1454,11 @@ impl Engine {
         &self,
         connection: &ConnectionConfig,
         polling: &PollingConfig,
-        base_url: &Url,
+        credential_scope: &mut CredentialScope,
         metrics: &mut ExecutionMetrics,
     ) -> Result<(Value, Url, u32, BTreeMap<String, String>, u16), EngineError> {
         let completion = self
-            .await_resumed_poll_completion(connection, polling, base_url, metrics)
+            .await_resumed_poll_completion(connection, polling, credential_scope, metrics)
             .await?;
         let active_key = completion.active_key.clone();
         let result = self
@@ -1322,6 +1468,7 @@ impl Engine {
                 completion.value,
                 completion.response,
                 completion.job_id.as_ref(),
+                credential_scope,
                 metrics,
             )
             .await;
@@ -1339,6 +1486,7 @@ impl Engine {
         polling: &PollingConfig,
         initial_value: Value,
         initial_response: ResponseData,
+        credential_scope: &mut CredentialScope,
         metrics: &mut ExecutionMetrics,
     ) -> Result<PollCompletion, EngineError> {
         let job_id = polling_job_id(&initial_value, &initial_response, polling);
@@ -1365,19 +1513,37 @@ impl Engine {
             ));
         }
 
-        let active_key =
-            self.register_polled_job(connection, polling, &poll_url, job_id.as_ref())?;
-        self.await_poll_url(connection, polling, poll_url, job_id, active_key, metrics)
-            .await
+        // Narrowed in place, so everything derived afterwards inherits the
+        // restriction: the remote cancellation, the result URL, and — because
+        // the caller shares this scope — any later pagination request as well.
+        credential_scope.narrow(&poll_url);
+        let active_key = self.register_polled_job(
+            connection,
+            polling,
+            &poll_url,
+            job_id.as_ref(),
+            credential_scope,
+        )?;
+        self.await_poll_url(
+            connection,
+            polling,
+            poll_url,
+            job_id,
+            active_key,
+            credential_scope,
+            metrics,
+        )
+        .await
     }
 
     async fn await_resumed_poll_completion(
         &self,
         connection: &ConnectionConfig,
         polling: &PollingConfig,
-        base_url: &Url,
+        credential_scope: &mut CredentialScope,
         metrics: &mut ExecutionMetrics,
     ) -> Result<PollCompletion, EngineError> {
+        let base_url = &credential_scope.origin.clone();
         let resume = polling.resume.as_ref().ok_or_else(|| {
             EngineError::InvalidInput("polling resume configuration is missing".to_owned())
         })?;
@@ -1398,18 +1564,27 @@ impl Engine {
                 "cross-origin polling is blocked".to_owned(),
             ));
         }
-        let active_key = self.register_polled_job(connection, polling, &poll_url, Some(&job_id))?;
+        credential_scope.narrow(&poll_url);
+        let active_key = self.register_polled_job(
+            connection,
+            polling,
+            &poll_url,
+            Some(&job_id),
+            credential_scope,
+        )?;
         self.await_poll_url(
             connection,
             polling,
             poll_url,
             Some(job_id),
             active_key,
+            credential_scope,
             metrics,
         )
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn await_poll_url(
         &self,
         connection: &ConnectionConfig,
@@ -1417,6 +1592,7 @@ impl Engine {
         poll_url: Url,
         job_id: Option<Value>,
         active_key: String,
+        credential_scope: &CredentialScope,
         metrics: &mut ExecutionMetrics,
     ) -> Result<PollCompletion, EngineError> {
         if polling.max_attempts == 0 {
@@ -1426,23 +1602,22 @@ impl Engine {
             ));
         }
         let poll_started = Instant::now();
+        let budget = polling.max_wait_ms.map(Duration::from_millis);
+        // `max_wait_ms` is a hard bound: it caps the backoff sleep *and* the
+        // request itself, so a slow poll cannot run past the configured limit.
+        let remaining = |elapsed: Duration| budget.map(|budget| budget.saturating_sub(elapsed));
         let mut interval_ms = polling.interval_ms;
+        let mut attempts = 0_u32;
         for _ in 0..polling.max_attempts {
-            if polling
-                .max_wait_ms
-                .is_some_and(|limit| poll_started.elapsed().as_millis() >= u128::from(limit))
-            {
+            if remaining(poll_started.elapsed()).is_some_and(|left| left.is_zero()) {
                 break;
             }
             if interval_ms > 0 {
-                let delay = polling.max_wait_ms.map_or(interval_ms, |limit| {
-                    interval_ms.min(limit.saturating_sub(
-                        poll_started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
-                    ))
-                });
-                sleep(Duration::from_millis(delay)).await;
+                let delay = Duration::from_millis(interval_ms);
+                let delay = remaining(poll_started.elapsed()).map_or(delay, |left| delay.min(left));
+                sleep(delay).await;
             }
-            let request = self.prepare_followup_request(
+            let mut request = self.prepare_followup_request(
                 connection,
                 poll_url.clone(),
                 polling.method.clone(),
@@ -1452,9 +1627,24 @@ impl Engine {
                     .unwrap_or(self.config.request_timeout_ms),
                 CachePolicy::default(),
             );
-            let (value, response) = self
-                .execute_prepared_json(connection, request, metrics, true)
-                .await?;
+            credential_scope.apply(&mut request, None);
+            let attempt = self.execute_prepared_json(connection, request, metrics, true);
+            // Counted before awaiting: once the request is issued it has been
+            // sent, whether or not the remaining budget lets us read the reply.
+            let (value, response) = match remaining(poll_started.elapsed()) {
+                Some(left) if left.is_zero() => break,
+                Some(left) => {
+                    attempts = attempts.saturating_add(1);
+                    match tokio::time::timeout(left, attempt).await {
+                        Ok(result) => result?,
+                        Err(_) => break,
+                    }
+                }
+                None => {
+                    attempts = attempts.saturating_add(1);
+                    attempt.await?
+                }
+            };
             match poll_state(&value, polling)? {
                 Some(PollState::Success) => {
                     return Ok(PollCompletion {
@@ -1484,9 +1674,9 @@ impl Engine {
 
         self.cancel_active_job(&active_key, RemoteCancelTrigger::PollTimeout)
             .await;
-        Err(EngineError::PollingTimeout {
-            attempts: polling.max_attempts,
-        })
+        // Report the attempts actually issued: `max_wait_ms` can end the loop
+        // before `max_attempts` is reached.
+        Err(EngineError::PollingTimeout { attempts })
     }
 
     fn register_polled_job(
@@ -1495,6 +1685,7 @@ impl Engine {
         polling: &PollingConfig,
         poll_url: &Url,
         job_id: Option<&Value>,
+        credential_scope: &CredentialScope,
     ) -> Result<String, EngineError> {
         let key = poll_url.as_str().to_owned();
         let recovery = job_id
@@ -1508,7 +1699,16 @@ impl Engine {
         let cancel = polling
             .cancel
             .as_ref()
-            .map(|cancel| self.prepare_remote_cancel(connection, polling, cancel, poll_url, job_id))
+            .map(|cancel| {
+                self.prepare_remote_cancel(
+                    connection,
+                    polling,
+                    cancel,
+                    poll_url,
+                    job_id,
+                    credential_scope,
+                )
+            })
             .transpose()?;
         register_active_job(key.clone(), ActiveAsyncJob { recovery, cancel });
         Ok(key)
@@ -1521,6 +1721,7 @@ impl Engine {
         cancel: &PollingCancelConfig,
         poll_url: &Url,
         job_id: Option<&Value>,
+        credential_scope: &CredentialScope,
     ) -> Result<ActiveRemoteCancel, EngineError> {
         if cancel.timeout_ms == 0 {
             return Err(EngineError::InvalidInput(
@@ -1548,9 +1749,11 @@ impl Engine {
             cancel.timeout_ms,
             CachePolicy::default(),
         );
+        credential_scope.apply(&mut request, None);
         request.retry.max_attempts = 1;
         Ok(ActiveRemoteCancel {
             request,
+            scope: credential_scope.clone(),
             on_cancellation: cancel.on_cancellation,
             on_deadline: cancel.on_deadline,
             on_poll_timeout: cancel.on_poll_timeout,
@@ -1584,6 +1787,7 @@ impl Engine {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn complete_poll(
         &self,
         connection: &ConnectionConfig,
@@ -1591,6 +1795,7 @@ impl Engine {
         status_value: Value,
         status_response: ResponseData,
         job_id: Option<&Value>,
+        credential_scope: &mut CredentialScope,
         metrics: &mut ExecutionMetrics,
     ) -> Result<(Value, Url, u32, BTreeMap<String, String>, u16), EngineError> {
         if polling.result_url_path.is_none() && polling.result_url_template.is_none() {
@@ -1608,6 +1813,7 @@ impl Engine {
             &status_value,
             &status_response,
             job_id,
+            credential_scope,
         )?;
         let (value, response) = self
             .execute_prepared_json(connection, request, metrics, true)
@@ -1628,6 +1834,7 @@ impl Engine {
         status_value: &Value,
         status_response: &ResponseData,
         job_id: Option<&Value>,
+        credential_scope: &mut CredentialScope,
     ) -> Result<PreparedRequest, EngineError> {
         let target = polling_result_url(status_value, status_response, polling, job_id)?;
         if !polling.allow_cross_origin && !same_origin(&status_response.final_url, &target) {
@@ -1635,7 +1842,7 @@ impl Engine {
                 "cross-origin polling result URL is blocked".to_owned(),
             ));
         }
-        Ok(PreparedRequest {
+        let mut request = PreparedRequest {
             url: target,
             method: polling.result_method.clone(),
             headers: connection.headers.clone(),
@@ -1656,27 +1863,25 @@ impl Engine {
             requests_per_second: connection.requests_per_second,
             tls: connection.tls.clone(),
             proxy: connection.proxy.clone(),
-        })
+        };
+        credential_scope.narrow(&request.url);
+        credential_scope.apply(&mut request, None);
+        Ok(request)
     }
 
     async fn resolve_upload_source(
         &self,
         file: &FileTransferInput,
     ) -> Result<PathBuf, EngineError> {
-        self.ensure_file_transfers_allowed()?;
-        let root = self.canonical_file_root().await?;
-        let base = match &root {
-            Some(root) => root.clone(),
-            None => canonical_current_directory().await?,
-        };
+        let root = self.transfer_root().await?;
         let requested = required_path(&file.path)?;
         let candidate = if requested.is_absolute() {
             requested
         } else {
-            base.join(requested)
+            root.join(requested)
         };
         let source = fs::canonicalize(candidate).await.map_err(file_io)?;
-        ensure_within_root(&source, root.as_deref())?;
+        ensure_within_root(&source, &root)?;
         Ok(source)
     }
 
@@ -1684,17 +1889,12 @@ impl Engine {
         &self,
         file: &FileTransferInput,
     ) -> Result<PathBuf, EngineError> {
-        self.ensure_file_transfers_allowed()?;
-        let root = self.canonical_file_root().await?;
-        let base = match &root {
-            Some(root) => root.clone(),
-            None => canonical_current_directory().await?,
-        };
+        let root = self.transfer_root().await?;
         let requested = required_path(&file.path)?;
         let candidate = if requested.is_absolute() {
             requested
         } else {
-            base.join(requested)
+            root.join(requested)
         };
         let filename = candidate.file_name().ok_or_else(|| {
             EngineError::InvalidInput("download path must include a filename".to_owned())
@@ -1703,7 +1903,7 @@ impl Engine {
             EngineError::InvalidInput("download path has no parent directory".to_owned())
         })?;
         let parent = fs::canonicalize(parent).await.map_err(file_io)?;
-        ensure_within_root(&parent, root.as_deref())?;
+        ensure_within_root(&parent, &root)?;
         let target = parent.join(filename);
         if fs::try_exists(&target).await.map_err(file_io)? {
             let metadata = fs::symlink_metadata(&target).await.map_err(file_io)?;
@@ -1731,6 +1931,19 @@ impl Engine {
                 "file transfers are not enabled for this engine".to_owned(),
             ))
         }
+    }
+
+    /// Confinement root for every local file transfer.
+    ///
+    /// `allow_file_transfers` alone is not sufficient: without a `file_root`
+    /// there is no boundary to enforce, so the engine would accept any absolute
+    /// path and resolve relative paths against the process working directory.
+    /// The documented contract requires both, and this is where that is enforced.
+    async fn transfer_root(&self) -> Result<PathBuf, EngineError> {
+        self.ensure_file_transfers_allowed()?;
+        self.canonical_file_root().await?.ok_or_else(|| {
+            EngineError::PolicyViolation("file transfers require a configured file_root".to_owned())
+        })
     }
 
     async fn canonical_file_root(&self) -> Result<Option<PathBuf>, EngineError> {
@@ -1952,14 +2165,13 @@ fn validated_checksum(value: Option<&str>) -> Result<Option<String>, EngineError
     Ok(Some(value.to_ascii_lowercase()))
 }
 
-fn ensure_within_root(path: &Path, root: Option<&Path>) -> Result<(), EngineError> {
-    if root.is_none_or(|root| path.starts_with(root)) {
+fn ensure_within_root(path: &Path, root: &Path) -> Result<(), EngineError> {
+    if path.starts_with(root) {
         Ok(())
     } else {
-        Err(EngineError::PolicyViolation(format!(
-            "file path '{}' is outside the configured file_root",
-            path.display()
-        )))
+        Err(EngineError::PolicyViolation(
+            "file path is outside the configured file_root".to_owned(),
+        ))
     }
 }
 
@@ -2492,15 +2704,143 @@ fn transform_condition(row: &JsonObject, condition: &str) -> bool {
     (actual == expected) == equals
 }
 
+/// Operand of a numeric transform.
+///
+/// Integers stay integers: routing every value through `f64` silently rewrites
+/// identifiers and counters beyond 2^53, which are common in REST payloads.
+/// `Unsigned` exists because JSON integers above `i64::MAX` are legal and
+/// `serde_json` represents them exactly.
+#[derive(Clone, Copy)]
+enum Numeric {
+    Signed(i64),
+    Unsigned(u64),
+    /// An integer written as a string and too large for `i64` or `u64`.
+    /// Carrying it exactly keeps arithmetic that brings it back into range from
+    /// being rounded on the way in.
+    Wide(i128),
+    Float(f64),
+}
+
+impl Numeric {
+    fn as_f64(self) -> f64 {
+        match self {
+            Self::Signed(value) => value as f64,
+            Self::Unsigned(value) => value as f64,
+            Self::Wide(value) => value as f64,
+            Self::Float(value) => value,
+        }
+    }
+
+    /// The exact integer value, when there is one.
+    fn as_i128(self) -> Option<i128> {
+        match self {
+            Self::Signed(value) => Some(i128::from(value)),
+            Self::Unsigned(value) => Some(i128::from(value)),
+            Self::Wide(value) => Some(value),
+            Self::Float(_) => None,
+        }
+    }
+
+    fn is_integer(self) -> bool {
+        self.as_i128().is_some()
+    }
+
+    fn into_value(self) -> Value {
+        match self {
+            Self::Signed(value) => Value::Number(Number::from(value)),
+            Self::Unsigned(value) => Value::Number(Number::from(value)),
+            Self::Wide(value) => integer_value(value).unwrap_or(Value::Null),
+            Self::Float(value) => Number::from_f64(value)
+                .map(Value::Number)
+                .unwrap_or(Value::Null),
+        }
+    }
+}
+
+/// Narrows an exact integer result back to a JSON representable integer.
+///
+/// Returns `None` when the value fits neither `i64` nor `u64`: emitting a
+/// rounded `f64` there would reintroduce exactly the silent precision loss this
+/// type exists to prevent, so the transform yields null instead.
+fn integer_value(value: i128) -> Option<Value> {
+    if let Ok(value) = i64::try_from(value) {
+        return Some(Value::Number(Number::from(value)));
+    }
+    u64::try_from(value)
+        .ok()
+        .map(|value| Value::Number(Number::from(value)))
+}
+
+fn numeric_operand(value: &Value) -> Option<Numeric> {
+    if let Some(integer) = value.as_i64() {
+        return Some(Numeric::Signed(integer));
+    }
+    if let Some(integer) = value.as_u64() {
+        return Some(Numeric::Unsigned(integer));
+    }
+    if let Some(float) = value.as_f64() {
+        return Some(Numeric::Float(float));
+    }
+    let text = value.as_str()?.trim();
+    if let Ok(integer) = text.parse::<i64>() {
+        return Some(Numeric::Signed(integer));
+    }
+    if let Ok(integer) = text.parse::<u64>() {
+        return Some(Numeric::Unsigned(integer));
+    }
+    // A numeric identifier carried as a string can exceed `u64`. Parsing it as
+    // `i128` before reaching for `f64` keeps the value exact, which matters
+    // because the very next step may bring it back into a representable range.
+    if let Ok(integer) = text.parse::<i128>() {
+        return Some(Numeric::Wide(integer));
+    }
+    text.parse::<f64>().ok().map(Numeric::Float)
+}
+
+/// Result of an exact integer computation on two integral operands.
+enum IntegerOutcome {
+    Exact(i128),
+    /// The operands are integers but the result is not, as in `7 / 2`. Falling
+    /// back to floating point is the answer the caller wants.
+    Fractional,
+    /// The result is an integer too large to represent. Falling back to
+    /// floating point here would silently return a rounded value, which is the
+    /// precision loss this type exists to prevent.
+    Unrepresentable,
+}
+
+/// Applies `integer` when both operands are integral, and floating point
+/// arithmetic when either operand is a float or the exact result is fractional.
+///
+/// `i128` is wide enough for any sum, difference, or product of two JSON
+/// integers except the extremes of `u64 * u64`, which `checked_*` reports.
+fn numeric_arithmetic(
+    left: Numeric,
+    right: Numeric,
+    integer: impl Fn(i128, i128) -> IntegerOutcome,
+    float: impl Fn(f64, f64) -> f64,
+) -> Value {
+    if let (Some(left), Some(right)) = (left.as_i128(), right.as_i128()) {
+        match integer(left, right) {
+            IntegerOutcome::Exact(result) => {
+                return integer_value(result).unwrap_or(Value::Null);
+            }
+            IntegerOutcome::Unrepresentable => return Value::Null,
+            IntegerOutcome::Fractional => {}
+        }
+    }
+    Numeric::Float(float(left.as_f64(), right.as_f64())).into_value()
+}
+
+/// Wraps a checked `i128` operation: `None` means the exact result overflows.
+fn checked_integer(result: Option<i128>) -> IntegerOutcome {
+    result.map_or(IntegerOutcome::Unrepresentable, IntegerOutcome::Exact)
+}
+
 fn transform_value(source: &Value, transform: &ResponseTransform) -> Value {
     let original = || source.clone();
-    let numeric = || source.as_f64().or_else(|| source.as_str()?.parse().ok());
-    let argument = || {
-        transform
-            .value
-            .as_ref()
-            .and_then(|value| value.as_f64().or_else(|| value.as_str()?.parse().ok()))
-    };
+    let numeric = || numeric_operand(source);
+    let argument = || transform.value.as_ref().and_then(numeric_operand);
     let number = |value: f64| {
         Number::from_f64(value)
             .map(Value::Number)
@@ -2509,29 +2849,54 @@ fn transform_value(source: &Value, transform: &ResponseTransform) -> Value {
     match transform.operation.as_str() {
         "subtract" => numeric()
             .zip(argument())
-            .map(|(a, b)| number(a - b))
+            .map(|(a, b)| {
+                numeric_arithmetic(a, b, |a, b| checked_integer(a.checked_sub(b)), |a, b| a - b)
+            })
             .unwrap_or_else(original),
         "add" => numeric()
             .zip(argument())
-            .map(|(a, b)| number(a + b))
+            .map(|(a, b)| {
+                numeric_arithmetic(a, b, |a, b| checked_integer(a.checked_add(b)), |a, b| a + b)
+            })
             .unwrap_or_else(original),
         "multiply" => numeric()
             .zip(argument())
-            .map(|(a, b)| number(a * b))
+            .map(|(a, b)| {
+                numeric_arithmetic(a, b, |a, b| checked_integer(a.checked_mul(b)), |a, b| a * b)
+            })
             .unwrap_or_else(original),
         "divide" => numeric().zip(argument()).map_or_else(original, |(a, b)| {
-            if b == 0.0 { Value::Null } else { number(a / b) }
+            if b.as_f64() == 0.0 {
+                Value::Null
+            } else {
+                // Only an exact integer division stays integral; a remainder
+                // means the true result is fractional, not unrepresentable.
+                numeric_arithmetic(
+                    a,
+                    b,
+                    |a, b| match a.checked_rem(b) {
+                        Some(0) => checked_integer(a.checked_div(b)),
+                        Some(_) => IntegerOutcome::Fractional,
+                        None => IntegerOutcome::Unrepresentable,
+                    },
+                    |a, b| a / b,
+                )
+            }
         }),
         "round" => numeric().map_or_else(original, |value| {
-            let decimals = argument().unwrap_or(0.0).clamp(0.0, 15.0) as i32;
+            if value.is_integer() {
+                // Rounding an integer to any number of decimals is the integer.
+                return value.into_value();
+            }
+            let decimals = argument().map_or(0.0, Numeric::as_f64).clamp(0.0, 15.0) as i32;
             let factor = 10_f64.powi(decimals);
-            number((value * factor).round() / factor)
+            number((value.as_f64() * factor).round() / factor)
         }),
         "kelvin_to_celsius" => numeric()
-            .map(|value| number(value - 273.15))
+            .map(|value| number(value.as_f64() - 273.15))
             .unwrap_or_else(original),
         "celsius_to_kelvin" => numeric()
-            .map(|value| number(value + 273.15))
+            .map(|value| number(value.as_f64() + 273.15))
             .unwrap_or_else(original),
         "uppercase" => source
             .as_str()
@@ -3066,7 +3431,7 @@ fn selected_response_headers(
     headers
         .iter()
         .filter(|(name, _)| {
-            !is_sensitive_response_header(name)
+            !is_sensitive_header_name(name)
                 && (selected.iter().any(|name| name == "*")
                     || selected
                         .iter()
@@ -3156,16 +3521,352 @@ fn public_response_url(url: &Url) -> String {
     url.origin().ascii_serialization()
 }
 
-fn is_sensitive_response_header(name: &str) -> bool {
+/// Authorization to carry the caller's credentials, scoped to the origin that
+/// owns them.
+///
+/// Cross-origin follow-ups are opt-in, but authorizing the *navigation* is not
+/// the same as authorizing the *forwarding of credentials*: a remote service
+/// controlling a link, a `Location` header, or a result URL must not be able to
+/// steer a bearer token, Basic credentials, an API key, an explicit cookie, or
+/// an mTLS identity to an origin of its choosing.
+///
+/// The authorization is monotone. Once a chain has left the owning origin it
+/// stays revoked for every descendant, including one that returns to the owning
+/// origin: an `A -> B -> A` sequence would otherwise let B choose which
+/// authenticated request the engine sends to A, which is a confused deputy even
+/// though B never sees the secret itself.
+#[derive(Clone)]
+struct CredentialScope {
+    origin: Url,
+    /// Shared and write-once. Revocation reaches every holder of a clone,
+    /// including a request that was already built — the remote cancellation is
+    /// materialized when the job is registered, but may only be sent much
+    /// later, after a further hop has revoked the authorization.
+    revoked: Arc<AtomicBool>,
+}
+
+impl CredentialScope {
+    fn new(origin: Url) -> Self {
+        Self {
+            origin,
+            revoked: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn allows(&self, target: &Url) -> bool {
+        !self.revoked.load(Ordering::Acquire) && same_origin(&self.origin, target)
+    }
+
+    /// Narrows the chain for a follow-up aimed at `target`.
+    fn narrow(&self, target: &Url) {
+        if !self.allows(target) {
+            self.revoked.store(true, Ordering::Release);
+        }
+    }
+
+    /// Strips the credentials from `request` unless this scope still authorizes
+    /// them for its URL.
+    ///
+    /// `preserved` names a header that is not a credential and has to survive,
+    /// so that dropping it cannot quietly weaken an unrelated guarantee.
+    fn apply(&self, request: &mut PreparedRequest, preserved: Option<&str>) {
+        if self.allows(&request.url) {
+            return;
+        }
+        request.auth = AuthConfig::None;
+        request.headers.retain(|name, _| {
+            is_transferable_cross_origin_header(name)
+                || preserved.is_some_and(|kept| kept.eq_ignore_ascii_case(name))
+        });
+        request.cookies = CookiePolicy::default();
+        request.tls.client_identity_pem = None;
+    }
+}
+
+/// Name of the header carrying the idempotency key, when the engine adds one.
+///
+/// The key is generated by the caller and is not a credential, but dropping it
+/// on a cross-origin page would silently break a safety property: an idempotency
+/// key also switches on retries for non-idempotent methods, so a request that
+/// lost the key would still be retried, without the protection the key gives.
+/// Keeping it also matches the query and body locations, which are part of the
+/// URL or the payload and were never stripped.
+fn preserved_idempotency_header<'a>(
+    connection: &'a ConnectionConfig,
+    options: &crate::ExecutionOptions,
+) -> Option<&'a str> {
+    if options.idempotency_key.is_none()
+        || connection.idempotency.location != IdempotencyLocation::Header
+    {
+        return None;
+    }
+    let name = connection.idempotency.name.trim();
+    // Both conditions matter: the name has to earn the exception by naming an
+    // idempotency key, and it must not read as a credential.
+    if !names_an_idempotency_key(name) || is_disallowed_idempotency_header(name) {
+        return None;
+    }
+    Some(name)
+}
+
+/// True when an idempotency header name would smuggle a credential-shaped
+/// header past the checks that exist for exactly that.
+///
+/// The name is caller configured, so the allowlist exception must not become a
+/// way to widen the allowlist: naming the idempotency header `Authorization`
+/// would otherwise forward an auth header to an origin the remote service
+/// chose. The exception is therefore granted only to a name that says it
+/// carries an idempotency key — which the default `Idempotency-Key` does, even
+/// though the credential classifier flags its `key` component.
+pub(crate) fn is_disallowed_idempotency_header(name: &str) -> bool {
+    // Trimmed first: `apply_idempotency` trims before inserting the header, so
+    // judging the untrimmed name would let `" Authorization "` through and still
+    // emit a real `Authorization` header.
+    let name = name.trim().to_ascii_lowercase();
+    if name.is_empty() {
+        return true;
+    }
+    if has_credential_compound(&name) {
+        return true;
+    }
+    // Only an exact idempotency word is discounted, and `key` only alongside
+    // one. A component that merely begins with it — `IdempotencyToken`,
+    // `IdempotencyApiKey` — is judged like any other.
+    let marks_idempotency = header_components(&name).any(is_idempotency_word);
+    header_components(&name)
+        .filter(|component| {
+            !is_idempotency_word(component) && !(marks_idempotency && *component == "key")
+        })
+        .any(is_credential_component)
+}
+
+fn is_idempotency_word(component: &str) -> bool {
+    matches!(component, "idempotency" | "idempotence" | "idempotent")
+}
+
+/// True when the name positively claims to carry an idempotency *key*.
+///
+/// Required before the cross-origin allowlist exception is granted. Rejecting
+/// credential-shaped names is not enough on its own: it would still let an
+/// arbitrary header such as `X-Vendor-Code` ride across an origin carrying a
+/// caller-controlled value, and `Idempotency-Status` names a status, not a key.
+fn names_an_idempotency_key(name: &str) -> bool {
+    /// Names that are idempotency keys by convention without saying so.
+    const ALIASES: [&str; 2] = ["request-id", "x-request-id"];
+
+    let name = name.trim().to_ascii_lowercase();
+    if ALIASES.contains(&name.as_str()) {
+        return true;
+    }
+    let components = header_components(&name).collect::<Vec<_>>();
+    let glued = ["idempotencykey", "idempotencekey", "idempotentkey"];
+    components.iter().any(|component| glued.contains(component))
+        || (components.iter().copied().any(is_idempotency_word) && components.contains(&"key"))
+}
+
+/// Whole header-name components that read as credentials.
+const CREDENTIAL_WORDS: [&str; 15] = [
+    "authorization",
+    "bearer",
+    "cookie",
+    "credential",
+    "credentials",
+    "jwt",
+    "key",
+    "passcode",
+    "passphrase",
+    "passwd",
+    "password",
+    "secret",
+    "session",
+    "signature",
+    "token",
+];
+
+/// One-time-code stems, matched at either end of a component.
+///
+/// These letter sequences do not open or close any ordinary English word, so
+/// matching both ends catches `X-OTP`, `X-OTPCode` and `X-VendorOTP` alike
+/// without enumerating the words that can sit next to them — and a new spelling
+/// nobody anticipated is caught by the same rule.
+const ONE_TIME_CODE_STEMS: [&str; 3] = ["hotp", "otp", "totp"];
+
+/// Words that end a component's meaning. Matched as suffixes so a glued name
+/// such as `IdempotencyToken` or `X-SessionToken` is still recognised, while a
+/// word that merely *starts* with one — `Secretariat` — is not.
+///
+/// `key` is deliberately absent: it would classify `X-Monkey`.
+const CREDENTIAL_SUFFIXES: [&str; 13] = [
+    "accesskey",
+    "apikey",
+    "authorization",
+    "credential",
+    "jwt",
+    "passcode",
+    "passphrase",
+    "passwd",
+    "password",
+    "privatekey",
+    "secret",
+    "signature",
+    "token",
+];
+
+/// Compound markers spelled across adjacent components, as in `X-Api-Key`, or
+/// glued into one, as in `X-CsrfToken`.
+///
+/// The `*key` entries look redundant next to the generic `key` handling, but
+/// they are not: when `key` is its own component the idempotency rule discounts
+/// it, and only the pairing with the component before it — `api` + `key` —
+/// still says credential.
+const CREDENTIAL_COMPOUNDS: [&str; 16] = [
+    "accesskey",
+    "accesstoken",
+    "apikey",
+    "authtoken",
+    "clientkey",
+    "clientsecret",
+    "clienttoken",
+    "consumerkey",
+    "csrftoken",
+    "encryptionkey",
+    "idtoken",
+    "masterkey",
+    "privatekey",
+    "refreshtoken",
+    "secretkey",
+    "sessionid",
+];
+
+/// Ordinary English words ending in `key`.
+///
+/// Anything else ending in `key` is treated as a credential. Enumerating the
+/// benign side is what makes this robust: a missing entry here over-classifies
+/// a header, while a missing entry in a list of credential spellings would let
+/// one through — `X-AppKey`, `X-AccountKey`, `X-ServiceKey` and their kin are
+/// endless, and each omission is a leak.
+///
+/// Only ordinary words belong here. A vendor identifier goes in
+/// `BENIGN_HEADER_NAMES` instead: exempting a bare component would exempt every
+/// header that happens to contain it, including ones nobody has looked at.
+const BENIGN_KEY_WORDS: [&str; 7] = [
+    "donkey", "hockey", "jockey", "malarkey", "monkey", "turkey", "whiskey",
+];
+
+/// Complete header names that end in `key` but identify routing or
+/// partitioning, not a secret.
+///
+/// Matched in full, not by component, so the exemption covers exactly the
+/// header it was verified for. Cosmos DB requires both of these on ordinary
+/// document operations. Add an entry only with that kind of evidence, and only
+/// as a whole name.
+const BENIGN_HEADER_NAMES: [&str; 2] = [
+    "x-ms-documentdb-partitionkey",
+    "x-ms-documentdb-raw-partitionkey",
+];
+
+/// Splits a header name into its components.
+///
+/// Every character that cannot appear inside a word is a separator, not just
+/// `-` and `_`: the HTTP token grammar also allows `.`, `!`, `+`, `~` and more,
+/// so `X.Token` is a legal name that has to be classified like `X-Token`.
+fn header_components(name: &str) -> impl Iterator<Item = &str> {
+    name.split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|component| !component.is_empty())
+}
+
+fn is_credential_component(component: &str) -> bool {
+    // A trailing plural is stripped before matching, so `X-Api-Keys` and
+    // `X-Access-Tokens` are read exactly like their singular spellings.
+    let stem = component.strip_suffix('s').unwrap_or(component);
+    if stem.ends_with("key") && !BENIGN_KEY_WORDS.contains(&stem) {
+        return true;
+    }
+    if ONE_TIME_CODE_STEMS
+        .iter()
+        .any(|code| stem.starts_with(code) || stem.ends_with(code))
+    {
+        return true;
+    }
+    if CREDENTIAL_WORDS.contains(&component)
+        || CREDENTIAL_WORDS.contains(&stem)
+        || CREDENTIAL_SUFFIXES
+            .iter()
+            .any(|suffix| component.ends_with(suffix) || stem.ends_with(suffix))
+        || component.starts_with("authenticat")
+    {
+        return true;
+    }
+    // `auth*` reads as a credential — `authn`, `authz`, `authtoken` — with the
+    // `author*` family as the one ordinary exception, which `authoriz*` is not
+    // part of despite sharing the prefix.
+    component.starts_with("auth")
+        && (!component.starts_with("author") || component.starts_with("authoriz"))
+}
+
+/// True when a compound marker is spelled out by a run of adjacent components,
+/// or ends one of them.
+fn has_credential_compound(name: &str) -> bool {
+    let components = header_components(name).collect::<Vec<_>>();
+    if components.iter().any(|component| {
+        CREDENTIAL_COMPOUNDS
+            .iter()
+            .any(|marker| component.ends_with(marker))
+    }) {
+        return true;
+    }
+    (0..components.len()).any(|start| {
+        let mut joined = String::new();
+        components[start..].iter().any(|component| {
+            joined.push_str(component);
+            CREDENTIAL_COMPOUNDS.contains(&joined.as_str())
+        })
+    })
+}
+
+/// Conservative classification of header names that may carry credentials.
+///
+/// An exact blacklist cannot cover vendor specific names such as `X-Auth-Token`
+/// or `X-Amz-Security-Token`, so the classification is intentionally
+/// over-inclusive. It governs which headers are withheld from public results
+/// and which inline headers the runtime boundary refuses.
+///
+/// It deliberately does *not* decide what crosses an origin: forwarding uses
+/// `is_transferable_cross_origin_header`, an allowlist, because there a single
+/// unrecognised name would be a leak rather than a missed redaction.
+pub(crate) fn is_sensitive_header_name(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    if BENIGN_HEADER_NAMES.contains(&name.as_str()) {
+        return false;
+    }
+    has_credential_compound(&name) || header_components(&name).any(is_credential_component)
+}
+
+/// Request headers that may follow a request to a *different* origin.
+///
+/// Forwarding is an allowlist rather than a blocklist on purpose. Classifying
+/// credentials by pattern is adequate for redaction, where a miss only reveals
+/// a header the caller already sent to that origin, but it is the wrong shape
+/// here: one unrecognised vendor header name is enough to hand a secret to an
+/// origin the remote service picked. Only headers describing the representation
+/// the caller asked for are carried across.
+fn is_transferable_cross_origin_header(name: &str) -> bool {
     matches!(
         name.to_ascii_lowercase().as_str(),
-        "authorization"
-            | "proxy-authorization"
-            | "proxy-authenticate"
-            | "cookie"
-            | "set-cookie"
-            | "www-authenticate"
-            | "x-api-key"
+        "accept"
+            | "accept-charset"
+            | "accept-encoding"
+            | "accept-language"
+            | "cache-control"
+            | "content-type"
+            | "if-match"
+            | "if-modified-since"
+            | "if-none-match"
+            | "if-range"
+            | "if-unmodified-since"
+            | "pragma"
+            | "range"
+            | "user-agent"
     )
 }
 
@@ -3319,11 +4020,17 @@ fn active_recoveries() -> Vec<AsyncJobRecovery> {
         .unwrap_or_default()
 }
 
+/// Contract bound on `recoveries` in the execution and file transfer results.
+const MAX_RECOVERIES: usize = 128;
+
 fn recoveries_from(jobs: &Arc<Mutex<BTreeMap<String, ActiveAsyncJob>>>) -> Vec<AsyncJobRecovery> {
+    // The map is keyed by poll URL, so truncation at the contract bound is
+    // deterministic rather than dependent on iteration order.
     jobs.lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .values()
         .filter_map(|job| job.recovery.clone())
+        .take(MAX_RECOVERIES)
         .collect()
 }
 
@@ -3334,8 +4041,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        link_header_target, map_value, render_template, resolve_parameters,
-        selected_response_headers,
+        is_disallowed_idempotency_header, is_sensitive_header_name, link_header_target, map_value,
+        names_an_idempotency_key, render_template, resolve_parameters, selected_response_headers,
     };
     use crate::{ConnectionConfig, OutputMapping, ParameterLocation, ParameterMode, ParameterSpec};
 
@@ -3408,6 +4115,179 @@ mod tests {
             link_header_target(&headers, "last").unwrap().as_deref(),
             Some("/last")
         );
+    }
+
+    #[test]
+    fn idempotency_header_exception_is_granted_only_to_idempotency_names() {
+        for name in [
+            "Idempotency-Key",
+            " Idempotency-Key ",
+            "idempotence-key",
+            "X-Idempotency-Key",
+            "Request-Id",
+        ] {
+            assert!(
+                !is_disallowed_idempotency_header(name),
+                "{name} names an idempotency key and must keep the exception"
+            );
+        }
+        // The name is caller configured, so the exception must not become a way
+        // of forwarding an auth header. Whitespace matters because
+        // `apply_idempotency` trims before inserting the header.
+        for name in [
+            "Authorization",
+            " Authorization ",
+            "Authorization-Idempotency",
+            "Idempotency-Authorization",
+            "Cookie",
+            "X-Idempotency-Token",
+            "Proxy-Authorization",
+            "   ",
+            // Gluing the marker onto a credential, or splitting a compound
+            // marker with it, must not buy the exception either.
+            "AuthorizationIdempotency",
+            "X-AuthIdempotency",
+            "X-Api-Key-Idempotency",
+            "Idempotency-Private-Key",
+            "Idempotency-Session-Id",
+            // The HTTP token grammar allows more than `-` and `_`, so a name
+            // using other legal punctuation must be classified the same way.
+            "Idempotency.Token",
+            "X!Token",
+            // Gluing the marker to the credential must not swallow it either.
+            "IdempotencyToken",
+            "IdempotencyAuthorization",
+            "IdempotencyApiKey",
+            "IdempotencyPassword",
+        ] {
+            assert!(
+                is_disallowed_idempotency_header(name),
+                "{name} reads as a credential and must lose the exception"
+            );
+        }
+    }
+
+    #[test]
+    fn the_cross_origin_exception_requires_naming_an_idempotency_key() {
+        // Not being credential-shaped is not enough: the exception has to be
+        // earned, or any header name would ride across an origin carrying a
+        // caller-controlled value.
+        for name in [
+            "Idempotency-Key",
+            "X-Idempotency-Key",
+            "IdempotencyKey",
+            "Request-Id",
+        ] {
+            assert!(
+                names_an_idempotency_key(name),
+                "{name} names an idempotency key"
+            );
+        }
+        for name in [
+            "X-Vendor-Code",
+            "X-Trace",
+            "Authorization",
+            // Mentioning idempotency is not the same as naming a key.
+            "Idempotency-Status",
+        ] {
+            assert!(
+                !names_an_idempotency_key(name),
+                "{name} must not earn the cross-origin exception"
+            );
+        }
+    }
+
+    #[test]
+    fn sensitive_header_classification_matches_components_not_substrings() {
+        for name in [
+            "Authorization",
+            "Proxy-Authorization",
+            "WWW-Authenticate",
+            "Cookie",
+            "Set-Cookie",
+            "X-Api-Key",
+            "X-ApiKey",
+            "X-Auth-Token",
+            "X-Amz-Security-Token",
+            "X-Secret",
+            "X-Session-Id",
+            "X-Request-Signature",
+            "X_Access_Token",
+            // Other legal HTTP token punctuation separates components too.
+            "X.Token",
+            "X!Api!Key",
+            // Concatenated vendor spellings.
+            "X-SessionToken",
+            "X-ClientToken",
+            "X-JWT",
+            "X-Passphrase",
+            // `key` is not a generic suffix, so the credential-bearing
+            // spellings are enumerated; `X-Monkey` below must stay benign.
+            "X-ClientKey",
+            "X-ConsumerKey",
+            "X-SessionKey",
+            "X-SecretKey",
+            "X-SigningKey",
+            "X-SubscriptionKey",
+            "X-AppKey",
+            "X-AccountKey",
+            "X-ServiceKey",
+            "X-EncryptionKey",
+            // A passkey is an authentication credential.
+            "Passkey",
+            "X-Passkey",
+            "X-Passcode",
+            // A one-time code is caught wherever its stem sits in the
+            // component: alone, at the front, or at the end.
+            "X-OTP",
+            "X-TOTP",
+            "X-HOTP",
+            "X-OTPCode",
+            "X-TOTPCode",
+            "X-HOTPCode",
+            "X-OTPValue",
+            "X-VendorOTP",
+            "X-Vendor-TOTP",
+            "X-OTP-Code",
+            // Plural spellings name the same credentials.
+            "X-Api-Keys",
+            "X-Access-Tokens",
+            "X-Secrets",
+            // The routing exemption is granted to verified full names only, so
+            // an unrelated header carrying the same component keeps the
+            // conservative treatment.
+            "X-PartitionKey",
+            "X-Master-PartitionKey",
+        ] {
+            assert!(is_sensitive_header_name(name), "{name} must be sensitive");
+        }
+        // Substring matching would classify these as credentials and either
+        // reject a legitimate runtime request or silently drop the header.
+        for name in [
+            "ETag",
+            "Content-Type",
+            "X-RateLimit-Remaining",
+            "Keep-Alive",
+            "X-Author",
+            "X-Authored-By",
+            "X-Monkey",
+            "X-Monkeys",
+            "Retry-After",
+            // Compound markers are matched against whole components, so a word
+            // that merely contains one is not a credential.
+            "X-Secretariat",
+            "X-Tokenizer",
+            // Documented routing identifiers, not secrets: Cosmos DB requires
+            // them on ordinary document operations. Exempted by full name, so
+            // the exemption covers exactly what was verified.
+            "x-ms-documentdb-partitionkey",
+            "x-ms-documentdb-raw-partitionkey",
+        ] {
+            assert!(
+                !is_sensitive_header_name(name),
+                "{name} must not be classified as a credential"
+            );
+        }
     }
 
     #[test]

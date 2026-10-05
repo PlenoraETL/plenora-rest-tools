@@ -8,7 +8,7 @@ resolver = "3"
 [workspace.package]
 version = "0.2.2"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.85.1"
 license = "MIT OR Apache-2.0"
 authors = ["PlenoraETL contributors"]
 repository = "https://github.com/PlenoraETL/plenora-rest-tools"
@@ -19,7 +19,7 @@ csv = "1.3"
 futures-util = "0.3"
 httpdate = "1.0"
 percent-encoding = "2.3"
-quick-xml = "0.38"
+quick-xml = "0.41"
 pyo3 = "0.29"
 reqwest = { version = "0.12", default-features = false, features = ["brotli", "charset", "cookies", "deflate", "gzip", "http2", "json", "multipart", "rustls-tls", "stream", "zstd"] }
 serde = { version = "1.0", features = ["derive"] }

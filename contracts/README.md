@@ -80,7 +80,8 @@ Sul confine runtime sono vietati:
 
 - byte grezzi di file;
 - path locali privati;
-- autenticazione e header sensibili inline;
+- autenticazione e header sensibili inline, sia in connection.headers sia nei
+  parametri con location header o cookie;
 - credenziali del proxy;
 - tipi interni del client HTTP.
 

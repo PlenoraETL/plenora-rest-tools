@@ -8,6 +8,7 @@ import hashlib
 import json
 import re
 import shutil
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import NoReturn
@@ -77,6 +78,169 @@ def source_date_epoch() -> int:
     return epoch
 
 
+# Images pinned by digest inside the release tooling. Duplicating a digest is
+# only safe if something checks that the copies agree; otherwise a partial
+# update silently produces a release built by an image the metadata does not
+# describe.
+#
+# The check looks at where each reference actually takes effect — every `FROM`
+# instruction, the image argument array that `docker run` receives — rather than
+# at digests appearing anywhere in the file, which a stale comment or an unused
+# decoy string would satisfy.
+IMAGE_REFERENCE = re.compile(r"[A-Za-z0-9][^\s\"']*@sha256:[0-9a-f]{64}")
+DOCKERFILE = Path("Dockerfile.release")
+RELEASE_SCRIPT = Path("scripts") / "release.ps1"
+FROM_INSTRUCTION = re.compile(
+    r"^[ \t]*FROM[ \t]+(?:--\S+[ \t]+)*(\S+)(?:[ \t]+AS[ \t]+(\S+))?[ \t]*$",
+    re.MULTILINE | re.IGNORECASE,
+)
+# `$syftArguments = @( ... )` — matched case-insensitively because PowerShell
+# variable names are, and captured for every assignment so a second one cannot
+# hide behind the first.
+SYFT_ASSIGNMENT = re.compile(
+    r"\$syftArguments\s*=\s*@\((.*?)^\s*\)",
+    re.MULTILINE | re.DOTALL | re.IGNORECASE,
+)
+# Any later write to the variable or one of its elements would change the image
+# actually executed while leaving the checked assignment untouched.
+SYFT_MUTATION = re.compile(
+    r"\$syftArguments\s*(?:\[[^\]]*\]\s*=|\+=)|\$syftArguments\s*=(?!\s*@\()",
+    re.IGNORECASE,
+)
+
+
+def normalized_image(reference: str) -> str:
+    """Repository and digest, dropping the optional informational tag.
+
+    `repo:tag@sha256:...` and `repo@sha256:...` denote the same image: the
+    digest is what identifies it, the tag is documentation.
+    """
+    repository, digest = reference.split("@", 1)
+    name = repository.rsplit("/", 1)[-1]
+    if ":" in name:
+        repository = repository[: len(repository) - len(name)] + name.split(":", 1)[0]
+    return f"{repository}@{digest}"
+
+
+def dockerfile_base_images() -> list[str]:
+    """Every external image the release Dockerfile builds `FROM`.
+
+    References to an earlier build stage are not images and are skipped; every
+    remaining base must be pinned, so an extra unpinned stage cannot slip in
+    behind a pinned one. Line continuations are folded first so a `FROM` split
+    across lines is still seen.
+    """
+    content = re.sub(
+        r"\\[ \t]*\r?\n[ \t]*", " ", (ROOT / DOCKERFILE).read_text(encoding="utf-8")
+    )
+    stages: set[str] = set()
+    images: list[str] = []
+    for match in FROM_INSTRUCTION.finditer(content):
+        base, alias = match.group(1), match.group(2)
+        if base.lower() not in stages and base.lower() != "scratch":
+            if IMAGE_REFERENCE.fullmatch(base) is None:
+                fail(
+                    f"{DOCKERFILE.as_posix()} builds FROM {base!r}, which is not "
+                    "pinned by a full sha256 digest"
+                )
+            images.append(base)
+        if alias:
+            stages.add(alias.lower())
+    if not images:
+        fail(f"{DOCKERFILE.as_posix()} declares no external base image")
+    return images
+
+
+def syft_run_images() -> list[str]:
+    """Digest-pinned images inside the argument array passed to `docker run`.
+
+    Restricting the search to that array is what makes the check meaningful: a
+    digest sitting in an unused variable elsewhere in the script no longer
+    satisfies it, and a later reassignment or element write is refused outright
+    rather than silently swapping the image that actually runs.
+    """
+    content = (ROOT / RELEASE_SCRIPT).read_text(encoding="utf-8")
+    assignments = SYFT_ASSIGNMENT.findall(content)
+    if not assignments:
+        fail(
+            f"{RELEASE_SCRIPT.as_posix()} does not define the $syftArguments "
+            "array the SBOM builder is invoked with"
+        )
+    if len(assignments) != 1:
+        fail(
+            f"{RELEASE_SCRIPT.as_posix()} assigns $syftArguments "
+            f"{len(assignments)} times; the image that actually runs is ambiguous"
+        )
+    if SYFT_MUTATION.search(content):
+        fail(
+            f"{RELEASE_SCRIPT.as_posix()} mutates $syftArguments after building "
+            "it, so the verified image is not necessarily the one executed"
+        )
+    images = IMAGE_REFERENCE.findall(assignments[0])
+    if not images:
+        fail(
+            f"{RELEASE_SCRIPT.as_posix()} passes no digest-pinned image to "
+            "docker run for the SBOM builder"
+        )
+    return images
+
+
+BUILDER_USERS = {
+    "manylinux": (DOCKERFILE, dockerfile_base_images),
+    "sbom": (RELEASE_SCRIPT, syft_run_images),
+}
+
+
+def validate_builders() -> None:
+    metadata = json.loads((ROOT / "release-metadata.json").read_text(encoding="utf-8"))
+    builders = metadata.get("builders")
+    if not isinstance(builders, dict) or not builders:
+        fail("release-metadata.json must declare a non-empty builders object")
+    if set(builders) != set(BUILDER_USERS):
+        fail(
+            "release-metadata.json builders must be exactly "
+            f"{sorted(BUILDER_USERS)}, found {sorted(builders)}"
+        )
+    for name, reference in sorted(builders.items()):
+        if not isinstance(reference, str) or IMAGE_REFERENCE.fullmatch(reference) is None:
+            fail(
+                f"builder {name!r} must be an image pinned by a full sha256 "
+                f"digest, found {reference!r}"
+            )
+        relative, discover = BUILDER_USERS[name]
+        label = relative.as_posix()
+        expected = normalized_image(reference)
+        unexpected = sorted(
+            {image for image in discover() if normalized_image(image) != expected}
+        )
+        if unexpected:
+            fail(
+                f"{label} runs {unexpected} but release-metadata.json declares "
+                f"the {name} builder as {reference}"
+            )
+    # Any other digest-pinned reference in these files is a stale copy that the
+    # metadata no longer describes.
+    declared = {normalized_image(reference) for reference in builders.values()}
+    for relative, _ in BUILDER_USERS.values():
+        content = (ROOT / relative).read_text(encoding="utf-8")
+        stale = sorted(
+            reference
+            for reference in set(IMAGE_REFERENCE.findall(content))
+            if normalized_image(reference) not in declared
+        )
+        if stale:
+            fail(
+                f"{relative.as_posix()} contains digest-pinned images that "
+                f"release-metadata.json does not declare: {stale}"
+            )
+    # stderr: `validate-version` and `current-version` write the resolved
+    # version to stdout and callers capture that stream verbatim.
+    print(
+        f"builder digests are consistent across {len(builders)} images",
+        file=sys.stderr,
+    )
+
+
 def normalized_version(tag: str) -> str:
     version = tag[1:] if tag.startswith("v") else tag
     if VERSION_PATTERN.fullmatch(version) is None:
@@ -85,6 +249,7 @@ def normalized_version(tag: str) -> str:
 
 
 def validate_version(expected: str) -> None:
+    validate_builders()
     version = normalized_version(expected)
     versions = current_versions()
     mismatches = {path: actual for path, actual in versions.items() if actual != version}

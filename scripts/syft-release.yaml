@@ -1,5 +1,8 @@
+# `dist` is deliberately NOT excluded: the SBOM is attested as the SBOM of the
+# published crate and wheel, so Syft must catalog those artifacts and not only
+# the source tree they were built from. The intermediate build directories stay
+# excluded because they are not part of any released artifact.
 exclude:
   - "./target/**"
   - "./.release/**"
-  - "./dist/**"
   - "./.git/**"

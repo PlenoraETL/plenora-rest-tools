@@ -1,16 +1,17 @@
 use std::{
-    collections::{BTreeMap, HashMap},
-    hash::{DefaultHasher, Hash, Hasher},
+    collections::{BTreeMap, HashMap, HashSet},
+    hash::{Hash, Hasher},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     path::{Path, PathBuf},
     sync::Arc,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::atomic::{AtomicU64, AtomicUsize, Ordering},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use futures_util::StreamExt;
 use reqwest::{
     Body, Certificate, Client, Identity, Method, Proxy, Url,
+    cookie::{CookieStore, Jar},
     header::{
         ACCEPT_ENCODING, CACHE_CONTROL, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, ETAG,
         HeaderMap, HeaderName, HeaderValue, IF_MODIFIED_SINCE, IF_NONE_MATCH, IF_RANGE,
@@ -37,6 +38,30 @@ use crate::{
 };
 
 static DOWNLOAD_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+/// Upper bound for cached OAuth tokens; keeps secret material from accumulating
+/// for an unbounded number of credential references.
+const MAX_CACHED_TOKENS: usize = 256;
+
+/// Longest `Set-Cookie` header the engine will accept. Well above any real
+/// cookie; anything larger is a remote service pushing bulk data into
+/// engine-held state.
+const MAX_SET_COOKIE_BYTES: usize = 8 * 1024;
+
+/// Upper bound for cookie jars, so a caller cycling through `jar_id` values
+/// cannot grow engine state without limit. Reaching it evicts an idle jar; a
+/// jar still held by a client or an in-flight request is never taken away.
+const MAX_COOKIE_JARS: usize = 256;
+
+/// SHA-256 fingerprint used by the client, token, and cache isolation keys.
+type Fingerprint = [u8; 32];
+
+/// Ceiling for the half-open probe lease.
+///
+/// Retry, backoff, and `Retry-After` policies are caller supplied and have no
+/// upper bound of their own, so an estimate derived from them could otherwise
+/// become effectively permanent and keep a circuit open indefinitely.
+const MAX_PROBE_LEASE: Duration = Duration::from_secs(15 * 60);
 
 #[derive(Clone)]
 pub(crate) struct PreparedFile {
@@ -137,6 +162,20 @@ struct DownloadState {
     digest: Sha256,
     etag: Option<String>,
     expected_total: Option<u64>,
+    /// Cleared once the staging file has been persisted or explicitly discarded.
+    /// While set, dropping the state removes the partial file, which is what makes
+    /// a cancelled or timed out download cancellation-safe.
+    cleanup: bool,
+}
+
+impl Drop for DownloadState {
+    fn drop(&mut self) {
+        if !self.cleanup {
+            return;
+        }
+        drop(self.file.take());
+        let _ = std::fs::remove_file(&self.temporary);
+    }
 }
 
 struct PendingResponse {
@@ -150,13 +189,81 @@ struct PendingResponse {
 #[derive(Clone)]
 pub(crate) struct Transport {
     config: EngineConfig,
-    clients: Arc<Mutex<HashMap<ClientKey, Client>>>,
+    clients: Arc<Mutex<HashMap<ClientKey, PooledClient>>>,
     tokens: Arc<Mutex<HashMap<TokenKey, CachedToken>>>,
     token_refresh: Arc<Mutex<()>>,
     cache: Arc<Mutex<CacheStore>>,
     circuits: Arc<Mutex<HashMap<CircuitKey, CircuitState>>>,
     concurrency: Arc<Semaphore>,
     rate_state: Arc<Mutex<RateState>>,
+    sequence: Arc<AtomicU64>,
+    /// Cookie jars owned by the engine rather than by a pooled client.
+    ///
+    /// A jar living inside a client would vanish when that client is evicted,
+    /// so a later request would silently start from an empty session. Owning
+    /// them keeps a session tied to its `jar_id` for as long as the engine
+    /// lives, independently of how the connection pool churns.
+    jars: Arc<Mutex<HashMap<String, CookieJar>>>,
+}
+
+/// Cookie store that drops implausibly long `Set-Cookie` headers.
+///
+/// A resource bound, not a vulnerability mitigation: a remote service should not
+/// be able to push arbitrarily large values into engine-held state one header at
+/// a time. A legitimate `Set-Cookie` is far below this limit.
+#[derive(Default)]
+struct BoundedJar {
+    inner: Jar,
+}
+
+impl CookieStore for BoundedJar {
+    fn set_cookies(&self, cookie_headers: &mut dyn Iterator<Item = &HeaderValue>, url: &Url) {
+        let accepted = cookie_headers
+            .filter(|value| value.len() <= MAX_SET_COOKIE_BYTES)
+            .cloned()
+            .collect::<Vec<_>>();
+        if accepted.is_empty() {
+            return;
+        }
+        self.inner.set_cookies(&mut accepted.iter(), url);
+    }
+
+    fn cookies(&self, url: &Url) -> Option<HeaderValue> {
+        self.inner.cookies(url)
+    }
+}
+
+#[derive(Clone)]
+struct CookieJar {
+    jar: Arc<BoundedJar>,
+    /// Operations currently holding this jar, counted by this crate rather than
+    /// inferred from `Arc::strong_count`.
+    ///
+    /// How many references a pooled HTTP client keeps to its cookie store is an
+    /// implementation detail of that client; counting reservations here is
+    /// independent of it, and a pooled client alone never makes a jar look busy.
+    leases: Arc<AtomicUsize>,
+    /// Identifies this jar instance. Never reused, so a client built against a
+    /// previous instance of the same `jar_id` is not mistaken for a current one.
+    incarnation: u64,
+    sequence: u64,
+}
+
+/// Keeps a jar reserved for as long as an operation needs it.
+///
+/// Taken while the registry lock is held, so a jar cannot be evicted between
+/// the lookup that found it and the reservation that protects it. Released on
+/// drop, including when the operation fails or is cancelled.
+struct JarLease {
+    leases: Arc<AtomicUsize>,
+}
+
+impl Drop for JarLease {
+    fn drop(&mut self) {
+        // Released without the registry lock, so the atomic itself has to carry
+        // the ordering that lets a later eviction see the count reach zero.
+        self.leases.fetch_sub(1, Ordering::Release);
+    }
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
@@ -164,27 +271,37 @@ struct ClientKey {
     host: String,
     port: u16,
     address: IpAddr,
-    policy_fingerprint: u64,
-    cookie_jar_id: Option<String>,
+    policy_fingerprint: Fingerprint,
+    /// Jar instance, not just its id: a pooled client owns the `Arc<Jar>` it was
+    /// built with, so a client created before the jar was evicted and recreated
+    /// would keep sending the previous session's cookies.
+    cookie_jar: Option<(String, u64)>,
+}
+
+#[derive(Clone)]
+struct PooledClient {
+    client: Client,
+    sequence: u64,
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 struct TokenKey {
     token_url: String,
-    auth_fingerprint: u64,
-    transport_fingerprint: u64,
+    auth_fingerprint: Fingerprint,
+    transport_fingerprint: Fingerprint,
 }
 
 struct CachedToken {
     token: String,
     expires_at: Instant,
+    sequence: u64,
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 struct CacheKey {
     method: String,
     url: String,
-    request_fingerprint: u64,
+    request_fingerprint: Fingerprint,
 }
 
 #[derive(Clone)]
@@ -198,6 +315,7 @@ struct CachedResponse {
     must_revalidate: bool,
     server_fresh_for_ms: Option<u64>,
     size_bytes: usize,
+    sequence: u64,
 }
 
 #[derive(Default)]
@@ -212,11 +330,36 @@ struct CircuitKey {
     group: String,
 }
 
+/// Outcome of admitting a request past the circuit breaker. `probe` is set only
+/// when this request is the half-open probe, and carries the generation that
+/// entitles it to record the result. `epoch` is the state generation the
+/// admission decision was based on.
+struct CircuitAdmission {
+    key: CircuitKey,
+    probe: Option<u64>,
+    epoch: u64,
+}
+
 #[derive(Default)]
 struct CircuitState {
     consecutive_failures: u32,
     opened_at: Option<Instant>,
-    half_open_in_flight: bool,
+    /// Current half-open probe, if any: its generation and its start.
+    ///
+    /// The start is a lease, so a cancelled or abandoned probe cannot keep the
+    /// circuit open forever. The generation makes the lease safe: once it
+    /// expires and a new probe is admitted, the abandoned one may still finish,
+    /// and only the probe owning the current generation may record an outcome.
+    half_open_probe: Option<(u64, Instant)>,
+    /// Bumped whenever the circuit opens or a probe starts.
+    ///
+    /// A request admitted while the circuit was closed carries no probe
+    /// generation, yet it can still finish after the circuit opened and a probe
+    /// began. Recording its outcome would reset `opened_at` and let ordinary
+    /// traffic through while the probe is still in flight, so an admission from
+    /// a superseded epoch is ignored.
+    epoch: u64,
+    sequence: u64,
 }
 
 struct RateState {
@@ -243,11 +386,117 @@ impl Transport {
             rate_state: Arc::new(Mutex::new(RateState {
                 next_allowed: Instant::now(),
             })),
+            sequence: Arc::new(AtomicU64::new(1)),
+            jars: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Reserves the jar this request needs, before any step that can reach the
+    /// network.
+    ///
+    /// Doing this up front is what keeps the error honest: refusing later, from
+    /// `client_for`, would report a policy violation with no remote effect after
+    /// an OAuth token had already been fetched.
+    /// The returned value is a lease: holding it keeps a strong reference to the
+    /// jar, so no concurrent request can evict it while this one authenticates
+    /// and resolves DNS. Dropping it early would let the admission succeed and
+    /// the later lookup fail, after the remote effect had already happened.
+    async fn admit_cookie_jar(
+        &self,
+        cookies: &CookiePolicy,
+    ) -> Result<Option<JarLease>, EngineError> {
+        if !cookies.enabled {
+            return Ok(None);
+        }
+        self.cookie_jar(cookies)
+            .await
+            .map(|(_, lease)| Some(lease))
+            .ok_or_else(|| {
+                EngineError::PolicyViolation(
+                    "the engine is holding the maximum number of cookie jars".to_owned(),
+                )
+            })
+    }
+
+    /// The jar backing `jar_id`, creating it on first use, together with a lease
+    /// that keeps it alive for as long as the caller holds it.
+    ///
+    /// Returns `None` when cookies are disabled, and also when the registry is
+    /// full, which the caller turns into a policy violation.
+    async fn cookie_jar(&self, cookies: &CookiePolicy) -> Option<(CookieJar, JarLease)> {
+        if !cookies.enabled {
+            return None;
+        }
+        let (incarnation, sequence) = (self.next_sequence(), self.next_sequence());
+        let mut jars = self.jars.lock().await;
+        if !jars.contains_key(&cookies.jar_id) && jars.len() >= MAX_COOKIE_JARS {
+            // Only an unreserved jar may go. Evicting one that an operation is
+            // still holding would let two requests sharing a `jar_id` run
+            // against different sessions. Reservations are taken and read under
+            // this lock, so a zero count here cannot be stale.
+            //
+            // A pooled client is not a reservation: it holds the jar so that a
+            // live connection keeps its session, but nothing is running on it.
+            // Such a jar may go, at the cost of a reconnection, so it is only
+            // the second choice — a jar nothing has connected to is cheaper to
+            // lose. Either way only the victim's own entries are touched.
+            //
+            // Locks are taken jars then clients, the same order as `client_for`,
+            // so the two cannot cross.
+            let mut clients = self.clients.lock().await;
+            let connected = clients
+                .keys()
+                .filter_map(|key| key.cookie_jar.as_ref().map(|(id, _)| id.clone()))
+                .collect::<HashSet<_>>();
+            let unreserved = |jar: &&CookieJar| jar.leases.load(Ordering::Acquire) == 0;
+            let victim = jars
+                .iter()
+                .filter(|(id, jar)| unreserved(jar) && !connected.contains(*id))
+                .min_by_key(|(_, jar)| jar.sequence)
+                .or_else(|| {
+                    jars.iter()
+                        .filter(|(_, jar)| unreserved(jar))
+                        .min_by_key(|(_, jar)| jar.sequence)
+                })
+                .map(|(id, _)| id.clone());
+            match victim {
+                Some(victim) => {
+                    clients.retain(|key, _| {
+                        !key.cookie_jar.as_ref().is_some_and(|(id, _)| *id == victim)
+                    });
+                    drop(clients);
+                    jars.remove(&victim);
+                }
+                // Every jar is reserved by an active operation. Refusing is the
+                // honest answer; the caller can retry.
+                None => return None,
+            }
+        }
+        let jar = jars
+            .entry(cookies.jar_id.clone())
+            .or_insert_with(|| CookieJar {
+                jar: Arc::new(BoundedJar::default()),
+                leases: Arc::new(AtomicUsize::new(0)),
+                incarnation,
+                sequence,
+            })
+            .clone();
+        jar.leases.fetch_add(1, Ordering::Acquire);
+        let lease = JarLease {
+            leases: jar.leases.clone(),
+        };
+        Some((jar, lease))
+    }
+
+    /// Monotonic counter that gives every pooled entry a deterministic
+    /// insertion order for eviction.
+    fn next_sequence(&self) -> u64 {
+        self.sequence.fetch_add(1, Ordering::Relaxed)
     }
 
     pub async fn execute(&self, mut request: PreparedRequest) -> Result<ResponseData, EngineError> {
         self.validate_request(&request)?;
+        let _jar_lease = self.admit_cookie_jar(&request.cookies).await?;
         let auth_stats = self.resolve_auth(&mut request).await?;
 
         let mut response = self.execute_cached(&request).await?;
@@ -269,6 +518,7 @@ impl Transport {
         success_statuses: &[u16],
     ) -> Result<DownloadData, EngineError> {
         self.validate_request(&request)?;
+        let _jar_lease = self.admit_cookie_jar(&request.cookies).await?;
         if target.resume {
             if request.method != HttpMethod::Get {
                 return Err(EngineError::InvalidInput(
@@ -322,6 +572,21 @@ impl Transport {
                 request.method.as_str()
             )));
         }
+        // Refused rather than approximated, and refused here so that a request
+        // that cannot run produces no effect at all — not even an OAuth token
+        // acquisition, which `execute` performs before consulting the cache.
+        //
+        // A cached entry belongs to the session that produced it, but the cookie
+        // jar lives inside the HTTP client and changes while the operation runs:
+        // a retry or a redirect can pick up a new session after the key was
+        // computed, and cookies expire on their own with nothing to observe.
+        // Keying the cache on a snapshot of the jar would therefore describe a
+        // session that may not be the one that answered.
+        if request.cookies.enabled && request.cache.enabled {
+            return Err(EngineError::PolicyViolation(
+                "the HTTP cache cannot be combined with the cookie store".to_owned(),
+            ));
+        }
         if request.cookies.enabled {
             if !self.config.allow_cookie_store {
                 return Err(EngineError::PolicyViolation(
@@ -369,12 +634,22 @@ impl Transport {
                 "HTTP cache capacity is disabled by this engine".to_owned(),
             ));
         }
+        // Defensive: `validate_request` already refused this combination before
+        // anything reached the network.
+        if request.cookies.enabled {
+            return Err(EngineError::PolicyViolation(
+                "the HTTP cache cannot be combined with the cookie store".to_owned(),
+            ));
+        }
+        // A client certificate authenticates the request just as much as a
+        // bearer token does, so caching it needs the same explicit opt-in.
         let authenticated = !matches!(request.auth, AuthConfig::None)
             || request
                 .headers
                 .keys()
                 .any(|name| name.eq_ignore_ascii_case("authorization"))
-            || request.cookies.enabled;
+            || request.cookies.enabled
+            || request.tls.client_identity_pem.is_some();
         if authenticated && !request.cache.allow_authenticated {
             return Err(EngineError::PolicyViolation(
                 "authenticated HTTP caching requires allow_authenticated".to_owned(),
@@ -444,6 +719,7 @@ impl Transport {
                 must_revalidate: response_requires_revalidation(&response.headers),
                 server_fresh_for_ms: cache_max_age_ms(&response.headers),
                 size_bytes: cached_response_size(&response.body, &response.headers),
+                sequence: self.next_sequence(),
             };
             self.store_cache_entry(key, cached).await;
         }
@@ -454,9 +730,9 @@ impl Transport {
         &self,
         request: &PreparedRequest,
     ) -> Result<ResponseData, EngineError> {
-        let key = self.admit_circuit(request).await?;
+        let admission = self.admit_circuit(request).await?;
         let result = self.execute_authenticated(request).await;
-        if let Some(key) = key {
+        if let Some(admission) = admission {
             let failed = match &result {
                 Ok(response) => request
                     .circuit_breaker
@@ -464,7 +740,7 @@ impl Transport {
                     .contains(&response.status),
                 Err(error) => is_retryable_transport_error(error),
             };
-            self.record_circuit(&key, &request.circuit_breaker, failed)
+            self.record_circuit(&admission, &request.circuit_breaker, failed)
                 .await;
         }
         result
@@ -484,7 +760,7 @@ impl Transport {
             let Some(oldest) = store
                 .entries
                 .iter()
-                .min_by_key(|(_, value)| value.last_access)
+                .min_by_key(|(_, value)| (value.last_access, value.sequence))
                 .map(|(key, _)| key.clone())
             else {
                 break;
@@ -504,7 +780,7 @@ impl Transport {
     async fn admit_circuit(
         &self,
         request: &PreparedRequest,
-    ) -> Result<Option<CircuitKey>, EngineError> {
+    ) -> Result<Option<CircuitAdmission>, EngineError> {
         let policy = &request.circuit_breaker;
         if !policy.enabled {
             return Ok(None);
@@ -528,36 +804,110 @@ impl Transport {
             origin: request.url.origin().ascii_serialization(),
             group: policy.group.clone(),
         };
+        let sequence = self.next_sequence();
+        let recovery = Duration::from_millis(policy.recovery_timeout_ms);
+        // A probe whose future was cancelled never reaches `record_circuit`, so
+        // the in-flight marker is a lease that expires instead of a sticky flag.
+        //
+        // The lease is an upper-bound *estimate*, not a guarantee: a probe runs a
+        // whole retry loop, and its real duration also includes `Retry-After`
+        // waits, redirects, rate limiting, and name resolution. Correctness does
+        // not rest on it — the epoch and the probe generation already stop a
+        // superseded probe from recording anything. The lease exists only so an
+        // abandoned probe cannot wedge the circuit open forever, so it is
+        // estimated generously and then clamped: too short would admit a second
+        // probe next to a healthy one, too long would bring back the wedge it is
+        // meant to prevent.
+        let attempts = request.retry.max_attempts.max(1);
+        let per_attempt = request.timeout.saturating_add(Duration::from_millis(
+            request
+                .retry
+                .max_backoff_ms
+                .max(request.retry.backoff_base_ms)
+                .max(if request.retry.respect_retry_after {
+                    request.retry.max_retry_after_ms
+                } else {
+                    0
+                }),
+        ));
+        let probe_lease = recovery
+            .max(per_attempt.saturating_mul(attempts))
+            .min(MAX_PROBE_LEASE);
         let mut circuits = self.circuits.lock().await;
         if !circuits.contains_key(&key) && circuits.len() >= self.config.max_circuit_origins {
-            if let Some(oldest) = circuits.keys().next().cloned() {
+            let oldest = circuits
+                .iter()
+                .min_by_key(|(_, state)| state.sequence)
+                .map(|(key, _)| key.clone());
+            if let Some(oldest) = oldest {
                 circuits.remove(&oldest);
             }
         }
         let state = circuits.entry(key.clone()).or_default();
+        if state.sequence == 0 {
+            state.sequence = sequence;
+        }
+        let mut probe = None;
         if let Some(opened_at) = state.opened_at {
-            let recovery = Duration::from_millis(policy.recovery_timeout_ms);
-            if opened_at.elapsed() < recovery || state.half_open_in_flight {
+            let probing = state
+                .half_open_probe
+                .is_some_and(|(_, started)| started.elapsed() < probe_lease);
+            if opened_at.elapsed() < recovery || probing {
                 return Err(EngineError::CircuitOpen { origin: key.origin });
             }
-            state.half_open_in_flight = true;
+            let generation = self.next_sequence();
+            state.half_open_probe = Some((generation, Instant::now()));
+            state.epoch = state.epoch.saturating_add(1);
+            probe = Some(generation);
         }
-        Ok(Some(key))
+        Ok(Some(CircuitAdmission {
+            key,
+            probe,
+            epoch: state.epoch,
+        }))
     }
 
-    async fn record_circuit(&self, key: &CircuitKey, policy: &CircuitBreakerPolicy, failed: bool) {
+    async fn record_circuit(
+        &self,
+        admission: &CircuitAdmission,
+        policy: &CircuitBreakerPolicy,
+        failed: bool,
+    ) {
+        let sequence = self.next_sequence();
         let mut circuits = self.circuits.lock().await;
-        let state = circuits.entry(key.clone()).or_default();
+        let state = circuits.entry(admission.key.clone()).or_default();
+        if state.sequence == 0 {
+            state.sequence = sequence;
+        }
+        // An admission from a superseded epoch describes a decision that no
+        // longer holds: the circuit has opened, or a probe has started, since it
+        // was let through. Recording it would close or reopen the circuit on
+        // behalf of a request nobody is waiting for.
+        if admission.epoch != state.epoch {
+            return;
+        }
+        // A probe whose lease expired has likewise been superseded.
+        let current_probe = state.half_open_probe.map(|(generation, _)| generation);
+        if let Some(generation) = admission.probe {
+            if current_probe != Some(generation) {
+                return;
+            }
+        }
         if failed {
             state.consecutive_failures = state.consecutive_failures.saturating_add(1);
-            if state.half_open_in_flight || state.consecutive_failures >= policy.failure_threshold {
+            if admission.probe.is_some() || state.consecutive_failures >= policy.failure_threshold {
+                if state.opened_at.is_none() {
+                    state.epoch = state.epoch.saturating_add(1);
+                }
                 state.opened_at = Some(Instant::now());
             }
         } else {
             state.consecutive_failures = 0;
             state.opened_at = None;
         }
-        state.half_open_in_flight = false;
+        if admission.probe.is_some() {
+            state.half_open_probe = None;
+        }
     }
 
     async fn execute_authenticated(
@@ -612,11 +962,11 @@ impl Transport {
         target: &DownloadTarget,
         success_statuses: &[u16],
     ) -> Result<DownloadData, EngineError> {
-        let key = self.admit_circuit(request).await?;
+        let admission = self.admit_circuit(request).await?;
         let result = self
             .download_authenticated(request, target, success_statuses)
             .await;
-        if let Some(key) = key {
+        if let Some(admission) = admission {
             let failed = match &result {
                 Ok(response) => request
                     .circuit_breaker
@@ -627,7 +977,7 @@ impl Transport {
                 }
                 Err(error) => is_retryable_transport_error(error),
             };
-            self.record_circuit(&key, &request.circuit_breaker, failed)
+            self.record_circuit(&admission, &request.circuit_breaker, failed)
                 .await;
         }
         result
@@ -855,13 +1205,30 @@ impl Transport {
         };
         let refresh_margin = (expires_in / 10).clamp(1, 30);
         let ttl = expires_in.saturating_sub(refresh_margin).max(1);
-        self.tokens.lock().await.insert(
-            key,
-            CachedToken {
-                token: token.clone(),
-                expires_at: Instant::now() + Duration::from_secs(ttl),
-            },
-        );
+        let sequence = self.next_sequence();
+        {
+            let mut tokens = self.tokens.lock().await;
+            let now = Instant::now();
+            tokens.retain(|_, cached| cached.expires_at > now);
+            while tokens.len() >= MAX_CACHED_TOKENS {
+                let oldest = tokens
+                    .iter()
+                    .min_by_key(|(_, cached)| (cached.expires_at, cached.sequence))
+                    .map(|(key, _)| key.clone());
+                let Some(oldest) = oldest else {
+                    break;
+                };
+                tokens.remove(&oldest);
+            }
+            tokens.insert(
+                key,
+                CachedToken {
+                    token: token.clone(),
+                    expires_at: now + Duration::from_secs(ttl),
+                    sequence,
+                },
+            );
+        }
         Ok((token, stats))
     }
 
@@ -1157,6 +1524,7 @@ impl Transport {
             }
         }
         persist_download(&state.temporary, &target.path, target.overwrite).await?;
+        state.cleanup = false;
         Ok(DownloadData {
             status,
             final_url,
@@ -1230,15 +1598,25 @@ impl Transport {
             }
             None => None,
         };
+        // The lease is redundant here — the operation that asked for this client
+        // already holds one for the same `jar_id` — but holding it costs nothing
+        // and keeps this lookup correct on its own.
+        let leased = self.cookie_jar(cookies).await;
+        let jar = leased.as_ref().map(|(jar, _)| jar);
+        if cookies.enabled && jar.is_none() {
+            return Err(EngineError::PolicyViolation(
+                "the engine is holding the maximum number of cookie jars".to_owned(),
+            ));
+        }
         let key = ClientKey {
             host: host.clone(),
             port,
             address,
             policy_fingerprint: fingerprint(&(tls, proxy)),
-            cookie_jar_id: cookies.enabled.then(|| cookies.jar_id.clone()),
+            cookie_jar: jar.map(|jar| (cookies.jar_id.clone(), jar.incarnation)),
         };
-        if let Some(client) = self.clients.lock().await.get(&key).cloned() {
-            return Ok(client);
+        if let Some(pooled) = self.clients.lock().await.get(&key) {
+            return Ok(pooled.client.clone());
         }
 
         let mut builder = Client::builder()
@@ -1248,8 +1626,8 @@ impl Transport {
             .redirect(Policy::none())
             .no_proxy()
             .user_agent(&self.config.user_agent);
-        if cookies.enabled {
-            builder = builder.cookie_store(true);
+        if let Some(jar) = jar {
+            builder = builder.cookie_provider(jar.jar.clone());
         }
         if !self.config.automatic_decompression {
             builder = builder.no_brotli().no_deflate().no_gzip().no_zstd();
@@ -1296,13 +1674,24 @@ impl Transport {
             .build()
             .map_err(|error| EngineError::Runtime(error.to_string()))?;
         if self.config.max_pooled_origins > 0 {
+            let sequence = self.next_sequence();
             let mut clients = self.clients.lock().await;
             if clients.len() >= self.config.max_pooled_origins {
-                if let Some(oldest_key) = clients.keys().next().cloned() {
-                    clients.remove(&oldest_key);
+                let oldest = clients
+                    .iter()
+                    .min_by_key(|(_, pooled)| pooled.sequence)
+                    .map(|(key, _)| key.clone());
+                if let Some(oldest) = oldest {
+                    clients.remove(&oldest);
                 }
             }
-            clients.insert(key, client.clone());
+            clients.insert(
+                key,
+                PooledClient {
+                    client: client.clone(),
+                    sequence,
+                },
+            );
         }
         Ok(client)
     }
@@ -1600,6 +1989,7 @@ async fn create_download_state(target: &Path) -> Result<DownloadState, EngineErr
         digest: Sha256::new(),
         etag: None,
         expected_total: None,
+        cleanup: true,
     })
 }
 
@@ -1621,7 +2011,11 @@ async fn reset_download_state(state: &mut DownloadState) -> Result<(), EngineErr
 
 async fn discard_download_state(state: &mut DownloadState) {
     drop(state.file.take());
-    let _ = fs::remove_file(&state.temporary).await;
+    // Only disarm when the staging file is really gone; otherwise leave the
+    // Drop guard to try again rather than leaking a partial download.
+    if fs::remove_file(&state.temporary).await.is_ok() {
+        state.cleanup = false;
+    }
 }
 
 async fn create_download_file(target: &Path) -> Result<(PathBuf, fs::File), EngineError> {
@@ -1788,17 +2182,59 @@ fn number_as_u64(value: &Value) -> Option<u64> {
         .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
 }
 
-fn fingerprint(value: &(impl Hash + ?Sized)) -> u64 {
-    let mut hasher = DefaultHasher::new();
+/// Feeds `Hash` output into SHA-256 so isolation keys keep a collision resistant
+/// fingerprint instead of a 64 bit `DefaultHasher` value.
+#[derive(Default)]
+struct DigestHasher {
+    digest: Sha256,
+}
+
+impl DigestHasher {
+    fn fingerprint(self) -> Fingerprint {
+        self.digest.finalize().into()
+    }
+}
+
+impl Hasher for DigestHasher {
+    fn write(&mut self, bytes: &[u8]) {
+        self.digest.update(bytes);
+    }
+
+    fn finish(&self) -> u64 {
+        self.digest
+            .clone()
+            .finalize()
+            .iter()
+            .take(8)
+            .fold(0_u64, |accumulator, byte| {
+                (accumulator << 8) | u64::from(*byte)
+            })
+    }
+}
+
+fn fingerprint(value: &(impl Hash + ?Sized)) -> Fingerprint {
+    let mut hasher = DigestHasher::default();
     value.hash(&mut hasher);
-    hasher.finish()
+    hasher.fingerprint()
 }
 
 fn cache_key(request: &PreparedRequest) -> Result<CacheKey, EngineError> {
-    let mut hasher = DefaultHasher::new();
+    let mut hasher = DigestHasher::default();
     request.headers.hash(&mut hasher);
     request.auth.hash(&mut hasher);
     request.cookies.hash(&mut hasher);
+    // The transport identity is part of who is asking, not just of how the
+    // connection is made: two requests that differ only by client certificate,
+    // trust anchor, or proxy are different requests and must not share an entry.
+    // The connection pool already isolates them; the cache is consulted before
+    // the pool, so it needs the same isolation of its own.
+    request.tls.hash(&mut hasher);
+    request.proxy.hash(&mut hasher);
+    // The redirect policy decides which resource actually answered: a request
+    // that followed a redirect must not serve its answer to one that forbids
+    // them.
+    request.allow_redirects.hash(&mut hasher);
+    request.max_redirects.hash(&mut hasher);
     match &request.body {
         PreparedBody::None => 0_u8.hash(&mut hasher),
         PreparedBody::Json(value) => {
@@ -1841,7 +2277,7 @@ fn cache_key(request: &PreparedRequest) -> Result<CacheKey, EngineError> {
     Ok(CacheKey {
         method: request.method.as_str().to_owned(),
         url: request.url.as_str().to_owned(),
-        request_fingerprint: hasher.finish(),
+        request_fingerprint: hasher.fingerprint(),
     })
 }
 
@@ -1854,7 +2290,10 @@ fn cached_response(
         status: cached.status,
         body: cached.body.clone(),
         final_url: cached.final_url.clone(),
-        attempts: 0,
+        // The public contract requires `attempts >= 1`; a cache hit still
+        // resolves one request attempt. `network_requests` stays zero because
+        // that is the metric describing actual network traffic.
+        attempts: 1,
         network_requests: 0,
         auth_requests: 0,
         auth_retries: 0,

@@ -35,8 +35,11 @@ class QuerySerialization(TypedDict, total=False):
     explode: bool
 
 
-class ParameterSpec(TypedDict, total=False):
+class _ParameterSpecRequired(TypedDict):
     name: str
+
+
+class ParameterSpec(_ParameterSpecRequired, total=False):
     mode: Literal["mapped", "fixed"]
     source: Optional[str]
     value: Any
@@ -69,8 +72,11 @@ class IdempotencyConfig(TypedDict, total=False):
     location: Literal["header", "query", "body"]
 
 
-class ConnectionConfig(TypedDict, total=False):
+class _ConnectionConfigRequired(TypedDict):
     url: str
+
+
+class ConnectionConfig(_ConnectionConfigRequired, total=False):
     method: str
     headers: Dict[str, str]
     auth: JsonObject
@@ -152,12 +158,15 @@ class IntegrityMetadata(TypedDict):
     value: str
 
 
-class FileOutput(TypedDict, total=False):
+class _FileOutputRequired(TypedDict):
     type: Literal["file"]
     direction: Literal["download", "upload"]
     artifact_reference: str
     bytes_transferred: int
     checksum: IntegrityMetadata
+
+
+class FileOutput(_FileOutputRequired, total=False):
     media_type: Optional[str]
     response: Any
 
