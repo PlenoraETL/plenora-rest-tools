@@ -22,8 +22,20 @@ class JsonHandler(BaseHTTPRequestHandler):
     arrivals = threading.Semaphore(0)
     hold = threading.Event()
 
+    cookie_headers: List[Optional[str]] = []
+
     def do_GET(self) -> None:
         type(self).idempotency_headers.append(self.headers.get("Idempotency-Key"))
+        if self.path == "/session":
+            type(self).cookie_headers.append(self.headers.get("Cookie"))
+            body = b'{"ok":true}'
+            self.send_response(200)
+            self.send_header("Set-Cookie", "sid=python; Path=/")
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path == "/resumable":
             self._resumable_download()
             return
@@ -139,6 +151,41 @@ class PythonSdkSmokeTest(unittest.TestCase):
             [1, 2],
         )
         self.assertEqual(enriched["metrics"]["requests"], 2)
+
+    def test_cookie_sessions_are_opened_used_and_closed_explicitly(self) -> None:
+        server = ThreadingHTTPServer(("127.0.0.1", 0), JsonHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            JsonHandler.cookie_headers = []
+            engine = Engine({"allow_private_networks": True, "allow_cookie_store": True})
+            handle = engine.open_cookie_session()
+            connection = {
+                "url": f"http://127.0.0.1:{server.server_port}/session",
+                "method": "GET",
+                "cookies": {"session": handle},
+            }
+            first = engine.test(connection)
+            second = engine.test(connection)
+            engine.close_cookie_session(handle)
+            stale = engine.test(connection)
+            with self.assertRaises(PlenoraError) as closing_twice:
+                engine.close_cookie_session(handle)
+            other = Engine({"allow_cookie_store": True}).open_cookie_session()
+            foreign = engine.test({**connection, "cookies": {"session": other}})
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+
+        self.assertEqual(first["status"], "success")
+        self.assertEqual(second["status"], "success")
+        self.assertEqual(JsonHandler.cookie_headers, [None, "sid=python"])
+        for refused in (stale, foreign):
+            self.assertEqual(refused["status"], "failed")
+            self.assertEqual(refused["errors"][0]["code"], "POLICY_VIOLATION")
+            self.assertEqual(refused["metrics"]["requests"], 0)
+        self.assertEqual(closing_twice.exception.code, "POLICY_VIOLATION")
 
     def test_invalid_contract_raises_the_public_error(self) -> None:
         engine = Engine()

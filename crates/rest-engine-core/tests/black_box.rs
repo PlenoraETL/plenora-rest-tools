@@ -1,5 +1,6 @@
 use plenora_rest_core::{
-    CancellationToken, Engine, EngineConfig, ExecutionControl, ExecutionRequest,
+    CancellationToken, CookieSession, Engine, EngineConfig, EngineError, ExecutionControl,
+    ExecutionRequest,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -1086,7 +1087,7 @@ async fn pagination_keeps_restrictions_introduced_inside_polling() {
         owner,
         vec![
             format!(r#"{{"status":"pending","poll":"{poller_url}"}}"#),
-            format!(r#"{{"status":"completed","items":[{{"id":2}}]}}"#),
+            r#"{"status":"completed","items":[{"id":2}]}"#.to_string(),
         ],
         owner_requests.clone(),
     );
@@ -1327,6 +1328,7 @@ async fn the_cache_refuses_to_run_alongside_the_cookie_store() {
         allow_cookie_store: true,
         ..EngineConfig::default()
     });
+    let cookie_session = engine.open_cookie_session().await.unwrap();
     let result = execute(
         &engine,
         json!({
@@ -1341,7 +1343,7 @@ async fn the_cache_refuses_to_run_alongside_the_cookie_store() {
                     "client_id": "id",
                     "client_secret": "secret"
                 },
-                "cookies": {"enabled": true, "jar_id": "session"},
+                "cookies": {"session": cookie_session},
                 "cache": {"enabled": true, "fresh_for_ms": 600_000, "allow_authenticated": true}
             }
         }),
@@ -1362,7 +1364,7 @@ async fn many_cookie_sessions_do_not_wedge_the_engine() {
     // A pooled client counts as a user of its jar, so with the pool as large as
     // the jar registry every jar can look busy at once. Releasing the clients of
     // the oldest jar is what keeps new sessions possible; without it the engine
-    // would refuse every later `jar_id` for the rest of its life.
+    // would refuse every later session for the rest of its life.
     let engine = Engine::new(EngineConfig {
         allow_private_networks: true,
         allow_cookie_store: true,
@@ -1371,6 +1373,7 @@ async fn many_cookie_sessions_do_not_wedge_the_engine() {
     });
     // Well past the 256 jar bound, each with its own session.
     for index in 0..300 {
+        let cookie_session = engine.open_cookie_session().await.unwrap();
         let (url, server, _) = recorded_server(vec![(
             200,
             r#"{"ok":true}"#,
@@ -1385,7 +1388,7 @@ async fn many_cookie_sessions_do_not_wedge_the_engine() {
                 "connection": {
                     "url": url,
                     "method": "GET",
-                    "cookies": {"enabled": true, "jar_id": format!("tenant-{index}")}
+                    "cookies": {"session": cookie_session}
                 }
             }),
         )
@@ -1409,7 +1412,7 @@ async fn a_busy_oldest_jar_does_not_block_new_sessions() {
         max_pooled_origins: 300,
         ..EngineConfig::default()
     }));
-    let session = |url: &str, jar: &str| {
+    let session = |url: &str, jar: &CookieSession| {
         json!({
             "schema_version": 1,
             "operation": "test",
@@ -1420,7 +1423,7 @@ async fn a_busy_oldest_jar_does_not_block_new_sessions() {
                 // request cannot finish on its own and hand the test a pass it
                 // did not earn.
                 "request": {"timeout_ms": 600_000},
-                "cookies": {"enabled": true, "jar_id": jar}
+                "cookies": {"session": jar}
             }
         })
     };
@@ -1438,9 +1441,9 @@ async fn a_busy_oldest_jar_does_not_block_new_sessions() {
         drop(stream);
     });
     let holder_engine = Arc::clone(&engine);
-    let holder = tokio::spawn(async move {
-        execute(&holder_engine, session(&stalled_url, "tenant-oldest")).await
-    });
+    let oldest = engine.open_cookie_session().await.unwrap();
+    let holder =
+        tokio::spawn(async move { execute(&holder_engine, session(&stalled_url, &oldest)).await });
     timeout(Duration::from_secs(5), arrival)
         .await
         .expect("the long request never reached its server")
@@ -1454,7 +1457,8 @@ async fn a_busy_oldest_jar_does_not_block_new_sessions() {
              or the eviction was never forced past its first candidate"
         );
         let (url, server, _) = recorded_server(vec![(200, r#"{"ok":true}"#, vec![])]).await;
-        let result = execute(&engine, session(&url, &format!("tenant-{index}"))).await;
+        let fresh = engine.open_cookie_session().await.unwrap();
+        let result = execute(&engine, session(&url, &fresh)).await;
         assert_eq!(
             result["status"], "success",
             "session {index} must be admitted while the oldest jar is busy: {result}"
@@ -1466,14 +1470,14 @@ async fn a_busy_oldest_jar_does_not_block_new_sessions() {
     stalled_server.abort();
 }
 
-/// One past the engine's jar bound, so the loop above forces an eviction.
+/// One past the engine's session bound, so the loops force an eviction.
 const MAX_COOKIE_JARS_IN_TEST: usize = 257;
 
 #[tokio::test]
 async fn a_jar_reserved_by_a_running_request_is_not_evicted() {
     // Evicting a jar that a request is still using would split one session in
     // two: the running request stores its cookies in the jar it is holding,
-    // while the next request naming the same `jar_id` is handed a fresh one.
+    // while the next request naming the same session is handed a fresh one.
     // The registry is driven well past its bound while the first request is
     // deliberately stuck, and the session has to survive it.
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1521,7 +1525,7 @@ async fn a_jar_reserved_by_a_running_request_is_not_evicted() {
         max_pooled_origins: 300,
         ..EngineConfig::default()
     }));
-    let session = |url: &str, jar: &str| {
+    let session = |url: &str, jar: &CookieSession| {
         json!({
             "schema_version": 1,
             "operation": "test",
@@ -1531,15 +1535,19 @@ async fn a_jar_reserved_by_a_running_request_is_not_evicted() {
                 // Far longer than the loop below can take, so the stuck request
                 // cannot time out and release its jar on its own.
                 "request": {"timeout_ms": 600_000},
-                "cookies": {"enabled": true, "jar_id": jar}
+                "cookies": {"session": jar}
             }
         })
     };
 
     let held_engine = Arc::clone(&engine);
     let held_target = held_url.clone();
+    let held_session = engine.open_cookie_session().await.unwrap();
+    let held_handle = held_session.clone();
     let held =
-        tokio::spawn(async move { execute(&held_engine, session(&held_target, "held")).await });
+        tokio::spawn(
+            async move { execute(&held_engine, session(&held_target, &held_handle)).await },
+        );
     timeout(Duration::from_secs(5), arrival)
         .await
         .expect("the held request never reached its server")
@@ -1552,7 +1560,8 @@ async fn a_jar_reserved_by_a_running_request_is_not_evicted() {
              or the eviction was never put to the test"
         );
         let (url, filler, _) = recorded_server(vec![(200, r#"{"ok":true}"#, vec![])]).await;
-        let result = execute(&engine, session(&url, &format!("tenant-{index}"))).await;
+        let fresh = engine.open_cookie_session().await.unwrap();
+        let result = execute(&engine, session(&url, &fresh)).await;
         assert_eq!(
             result["status"], "success",
             "session {index} must be admitted: {result}"
@@ -1563,7 +1572,7 @@ async fn a_jar_reserved_by_a_running_request_is_not_evicted() {
     release.send(()).unwrap();
     let first = held.await.unwrap();
     assert_eq!(first["status"], "success", "{first}");
-    let second = execute(&engine, session(&held_url, "held")).await;
+    let second = execute(&engine, session(&held_url, &held_session)).await;
     assert_eq!(second["status"], "success", "{second}");
     server.await.unwrap();
 
@@ -1609,13 +1618,14 @@ async fn oversized_set_cookie_headers_are_dropped_at_the_documented_bound() {
         allow_cookie_store: true,
         ..EngineConfig::default()
     });
+    let cookie_session = engine.open_cookie_session().await.unwrap();
     let request = json!({
         "schema_version": 1,
         "operation": "test",
         "connection": {
             "url": url,
             "method": "GET",
-            "cookies": {"enabled": true, "jar_id": "bounded"}
+            "cookies": {"session": cookie_session}
         }
     });
 
@@ -1655,6 +1665,7 @@ async fn a_cookie_jar_outlives_the_clients_that_use_it() {
         max_pooled_origins: 0,
         ..EngineConfig::default()
     });
+    let cookie_session = engine.open_cookie_session().await.unwrap();
     let with_jar = |url: &str| {
         json!({
             "schema_version": 1,
@@ -1662,7 +1673,7 @@ async fn a_cookie_jar_outlives_the_clients_that_use_it() {
             "connection": {
                 "url": url,
                 "method": "GET",
-                "cookies": {"enabled": true, "jar_id": "session"}
+                "cookies": {"session": cookie_session}
             }
         })
     };
@@ -1880,9 +1891,6 @@ async fn numeric_transforms_cover_unsigned_overflow_and_rounding_edges() {
                         {"source": "big", "column": "minus_one", "operation": "subtract", "value": 1},
                         // i64::MIN / -1 has no i64 representation but fits u64.
                         {"source": "small", "column": "negated", "operation": "divide", "value": -1},
-                        // A product beyond u64 is not representable as an exact
-                        // JSON integer, so it must be null and not a lossy float.
-                        {"source": "big", "column": "squared", "operation": "multiply", "value": u64::MAX},
                         {"source": "exact", "column": "thirds", "operation": "divide", "value": 3}
                     ]
                 }
@@ -1896,7 +1904,6 @@ async fn numeric_transforms_cover_unsigned_overflow_and_rounding_edges() {
     assert_eq!(record["rounded"], json!(u64::MAX));
     assert_eq!(record["minus_one"], json!(u64::MAX - 1));
     assert_eq!(record["negated"], json!(i64::MIN.unsigned_abs()));
-    assert_eq!(record["squared"], Value::Null);
     assert_eq!(record["thirds"], json!(3));
 }
 
@@ -2999,6 +3006,12 @@ async fn application_success_rules_have_a_stable_error_code() {
 
 #[tokio::test]
 async fn dangerous_transport_options_are_denied_by_default() {
+    let permissive = Engine::new(EngineConfig {
+        allow_cookie_store: true,
+        ..EngineConfig::default()
+    });
+    let cookie_session = permissive.open_cookie_session().await.unwrap();
+    assert!(Engine::default().open_cookie_session().await.is_err());
     for connection in [
         json!({
             "url": "https://example.com",
@@ -3013,7 +3026,7 @@ async fn dangerous_transport_options_are_denied_by_default() {
         json!({
             "url": "https://example.com",
             "method": "GET",
-            "cookies": {"enabled": true, "jar_id": "default"}
+            "cookies": {"session": cookie_session}
         }),
     ] {
         let result = execute(
@@ -3074,13 +3087,14 @@ async fn cookie_jars_are_persistent_and_explicitly_authorized() {
         allow_cookie_store: true,
         ..EngineConfig::default()
     });
+    let cookie_session = engine.open_cookie_session().await.unwrap();
     let request = json!({
         "schema_version": 1,
         "operation": "test",
         "connection": {
             "url": url,
             "method": "GET",
-            "cookies": {"enabled": true, "jar_id": "tenant-a"}
+            "cookies": {"session": cookie_session}
         }
     });
 
@@ -3522,3 +3536,1037 @@ async fn read_request(stream: &mut TcpStream) -> String {
     String::from_utf8_lossy(&request).into_owned()
 }
 use std::sync::{Arc, Mutex as StdMutex};
+
+#[tokio::test]
+async fn an_explicit_null_fixed_parameter_is_sent_in_a_json_body() {
+    let (url, server, observed) =
+        recorded_server(vec![(200, r#"{"accepted":true}"#, vec![])]).await;
+    let result = execute(
+        &local_engine(),
+        json!({
+            "schema_version": 1,
+            "operation": "test",
+            "connection": {
+                "url": url,
+                "method": "POST",
+                "parameters": [
+                    {"name": "cleared", "mode": "fixed", "value": null, "location": "body"},
+                    {"name": "kept", "mode": "fixed", "value": 1, "location": "body"}
+                ]
+            }
+        }),
+    )
+    .await;
+    server.await.unwrap();
+
+    assert_eq!(result["status"], "success", "{result}");
+    let request = observed.lock().unwrap()[0].clone();
+    assert!(request.contains(r#""cleared":null"#), "{request}");
+    assert!(request.contains(r#""kept":1"#), "{request}");
+}
+
+#[tokio::test]
+async fn a_fixed_parameter_without_a_value_is_rejected() {
+    let result = execute(
+        &local_engine(),
+        json!({
+            "schema_version": 1,
+            "operation": "test",
+            "connection": {
+                "url": "http://127.0.0.1:9/",
+                "method": "POST",
+                "parameters": [{"name": "missing", "mode": "fixed", "required": false}]
+            }
+        }),
+    )
+    .await;
+    assert_eq!(result["status"], "failed");
+    assert_eq!(result["errors"][0]["code"], "INVALID_INPUT");
+}
+
+#[tokio::test]
+async fn null_is_refused_where_a_parameter_is_rendered_as_text() {
+    let engine = local_engine();
+    let cases = [
+        (
+            "GET",
+            "http://127.0.0.1:9/{id}",
+            json!({"name": "id", "mode": "fixed", "value": null}),
+        ),
+        (
+            "GET",
+            "http://127.0.0.1:9/",
+            json!({"name": "q", "mode": "fixed", "value": null}),
+        ),
+        (
+            "GET",
+            "http://127.0.0.1:9/",
+            json!({"name": "q", "mode": "fixed", "value": ["a", null], "location": "query"}),
+        ),
+        (
+            "GET",
+            "http://127.0.0.1:9/",
+            json!({"name": "X-Flag", "mode": "fixed", "value": null, "location": "header"}),
+        ),
+        (
+            "GET",
+            "http://127.0.0.1:9/",
+            json!({"name": "sid", "mode": "fixed", "value": null, "location": "cookie"}),
+        ),
+    ];
+    for (method, url, parameter) in cases {
+        let result = execute(
+            &engine,
+            json!({
+                "schema_version": 1,
+                "operation": "test",
+                "connection": {"url": url, "method": method, "parameters": [parameter]}
+            }),
+        )
+        .await;
+        assert_eq!(result["status"], "failed", "{parameter}");
+        assert_eq!(result["errors"][0]["code"], "INVALID_INPUT", "{parameter}");
+    }
+
+    for body_type in ["form_urlencoded", "multipart"] {
+        let result = execute(
+            &engine,
+            json!({
+                "schema_version": 1,
+                "operation": "test",
+                "connection": {
+                    "url": "http://127.0.0.1:9/",
+                    "method": "POST",
+                    "request": {"body_type": body_type},
+                    "parameters": [{"name": "f", "mode": "fixed", "value": null, "location": "body"}]
+                }
+            }),
+        )
+        .await;
+        assert_eq!(result["errors"][0]["code"], "INVALID_INPUT", "{body_type}");
+    }
+
+    let raw = execute(
+        &engine,
+        json!({
+            "schema_version": 1,
+            "operation": "test",
+            "connection": {
+                "url": "http://127.0.0.1:9/",
+                "method": "POST",
+                "request": {"body_type": "raw", "raw_body": "<v>{f}</v>"},
+                "parameters": [{"name": "f", "mode": "fixed", "value": null, "location": "body"}]
+            }
+        }),
+    )
+    .await;
+    assert_eq!(raw["errors"][0]["code"], "INVALID_INPUT");
+}
+
+#[tokio::test]
+async fn a_mapped_null_from_the_input_is_refused_in_the_query() {
+    let result = execute(
+        &local_engine(),
+        json!({
+            "schema_version": 1,
+            "operation": "enrich",
+            "connection": {
+                "url": "http://127.0.0.1:9/",
+                "method": "GET",
+                "parameters": [{"name": "id", "required": true}]
+            },
+            "input": {"records": [{"id": null}]}
+        }),
+    )
+    .await;
+    assert_eq!(result["errors"][0]["code"], "INVALID_INPUT", "{result}");
+}
+
+/// Runs a single-record `generate` whose response is `body` and returns the
+/// result after applying `transforms` to the columns `a` and `b`.
+async fn transform_result(body: &str, transforms: Value) -> Value {
+    let (url, server, _) =
+        owned_recorded_server(vec![(200, body.as_bytes().to_vec(), vec![])]).await;
+    let result = execute(
+        &local_engine(),
+        json!({
+            "schema_version": 1,
+            "operation": "generate",
+            "connection": {
+                "url": url,
+                "method": "GET",
+                "response": {
+                    "output_mapping": [
+                        {"path": "a", "column": "a"},
+                        {"path": "b", "column": "b"}
+                    ],
+                    "transforms": transforms
+                }
+            }
+        }),
+    )
+    .await;
+    server.await.unwrap();
+    result
+}
+
+#[tokio::test]
+async fn unrepresentable_numeric_results_fail_instead_of_becoming_null() {
+    let cases = [
+        // A product beyond u64 has no exact JSON integer.
+        (
+            format!(r#"{{"a":{}}}"#, u64::MAX),
+            json!({"source": "a", "column": "c", "operation": "multiply", "value": u64::MAX}),
+        ),
+        // Mixed integer/float arithmetic would start from a rounded 2^53 + 1.
+        (
+            r#"{"a":9007199254740993}"#.to_owned(),
+            json!({"source": "a", "column": "c", "operation": "subtract", "value": 9007199254740992.0}),
+        ),
+        // A fractional quotient of an integer beyond 2^53 would be computed
+        // from a rounded dividend.
+        (
+            r#"{"a":9007199254740995}"#.to_owned(),
+            json!({"source": "a", "column": "c", "operation": "divide", "value": 3}),
+        ),
+        // An integer string wider than i128 must not be parsed as a float.
+        (
+            r#"{"a":"170141183460469231731687303715884105729"}"#.to_owned(),
+            json!({"source": "a", "column": "c", "operation": "subtract", "value": 1}),
+        ),
+        // A float overflow has no JSON spelling.
+        (
+            r#"{"a":1e308}"#.to_owned(),
+            json!({"source": "a", "column": "c", "operation": "multiply", "value": 10}),
+        ),
+    ];
+    for (body, transform) in cases {
+        let result = transform_result(&body, json!([transform])).await;
+        assert_eq!(result["status"], "failed", "{transform}: {result}");
+        assert_eq!(
+            result["errors"][0]["code"], "INVALID_RESPONSE",
+            "{transform}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn values_a_transform_cannot_handle_fail_the_row() {
+    let cases = [
+        (
+            r#"{"a":"abc"}"#,
+            json!({"source": "a", "column": "c", "operation": "add", "value": 1}),
+        ),
+        (
+            r#"{"a":{"x":1}}"#,
+            json!({"source": "a", "column": "c", "operation": "round"}),
+        ),
+        (
+            r#"{"a":5}"#,
+            json!({"source": "a", "column": "c", "operation": "uppercase"}),
+        ),
+        (
+            r#"{"a":[1]}"#,
+            json!({"source": "a", "column": "c", "operation": "prefix", "value": "x"}),
+        ),
+        (
+            r#"{"a":true}"#,
+            json!({"source": "a", "column": "c", "operation": "kelvin_to_celsius"}),
+        ),
+    ];
+    for (body, transform) in cases {
+        let result = transform_result(body, json!([transform])).await;
+        assert_eq!(result["status"], "failed", "{transform}: {result}");
+        assert_eq!(
+            result["errors"][0]["code"], "INVALID_RESPONSE",
+            "{transform}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn null_propagates_through_transforms() {
+    let transforms = json!([
+        {"source": "a", "column": "sum", "operation": "add", "value": 1},
+        {"source": "a", "column": "upper", "operation": "uppercase"},
+        {"source": "a", "column": "prefixed", "operation": "prefix", "value": "id-"},
+        {"source": "a", "column": "replaced", "operation": "replace", "value": {"find": "a", "replace": "b"}},
+        {"source": "a", "column": "defaulted", "operation": "default_if_null", "value": 0}
+    ]);
+    let result = transform_result(r#"{"a":null}"#, transforms).await;
+    assert_eq!(result["status"], "success", "{result}");
+    let record = &result["output"]["records"][0];
+    for column in ["sum", "upper", "prefixed", "replaced"] {
+        assert_eq!(record[column], Value::Null, "{column}");
+    }
+    assert_eq!(record["defaulted"], json!(0));
+}
+
+#[tokio::test]
+async fn a_condition_on_a_missing_or_null_column_does_not_apply() {
+    let transforms = json!([
+        {"source": "b", "column": "eq", "operation": "default_if_null", "value": "set", "condition": "a == ''"},
+        {"source": "b", "column": "ne", "operation": "default_if_null", "value": "set", "condition": "a != 'x'"},
+        {"source": "b", "column": "hit", "operation": "default_if_null", "value": "set", "condition": "b != 'x'"}
+    ]);
+    let result = transform_result(r#"{"a":null,"b":"y"}"#, transforms).await;
+    assert_eq!(result["status"], "success", "{result}");
+    let record = &result["output"]["records"][0];
+    assert_eq!(record.get("eq"), None, "{record}");
+    assert_eq!(record.get("ne"), None, "{record}");
+    assert_eq!(record["hit"], json!("y"));
+}
+
+#[tokio::test]
+async fn invalid_transforms_are_rejected_before_any_request() {
+    let invalid = [
+        json!({"source": "a", "column": "c", "operation": "explode"}),
+        json!({"source": "a", "column": "", "operation": "uppercase"}),
+        json!({"source": "", "column": "c", "operation": "uppercase"}),
+        json!({"source": "a", "column": "c", "operation": "add"}),
+        json!({"source": "a", "column": "c", "operation": "add", "value": "many"}),
+        json!({"source": "a", "column": "c", "operation": "divide", "value": 0}),
+        json!({"source": "a", "column": "c", "operation": "divide", "value": "0.0"}),
+        json!({"source": "a", "column": "c", "operation": "round", "value": 99}),
+        json!({"source": "a", "column": "c", "operation": "round", "value": 1.5}),
+        json!({"source": "a", "column": "c", "operation": "uppercase", "value": 1}),
+        json!({"source": "a", "column": "c", "operation": "prefix"}),
+        json!({"source": "a", "column": "c", "operation": "prefix", "value": null}),
+        json!({"source": "a", "column": "c", "operation": "replace", "value": {"find": ""}}),
+        json!({"source": "a", "column": "c", "operation": "default_if_null"}),
+        json!({"source": "a", "column": "c", "operation": "uppercase", "condition": "a"}),
+        json!({"source": "a", "column": "c", "operation": "uppercase", "condition": "status == 'active"}),
+        json!({"source": "a", "column": "c", "operation": "uppercase", "condition": "status == active'"}),
+        json!({"source": "a", "column": "c", "operation": "uppercase", "condition": "status == 'a'b'"}),
+        json!({"source": "a", "column": "c", "operation": "uppercase", "condition": "status == 'a\""}),
+        json!({"source": "a", "column": "c", "operation": "uppercase", "condition": "status =="}),
+        json!({"source": "a", "column": "c", "operation": "uppercase", "condition": "== 'x'"}),
+        json!({"source": "a", "column": "c", "operation": "uppercase", "condition": "a == b == c"}),
+        json!({"source": "a", "column": "c", "operation": "uppercase", "condition": "a != b == c"}),
+    ];
+    for transform in invalid {
+        // Port 9 is never contacted: validation fails first.
+        let result = execute(
+            &local_engine(),
+            json!({
+                "schema_version": 1,
+                "operation": "generate",
+                "connection": {
+                    "url": "http://127.0.0.1:9/",
+                    "method": "GET",
+                    "response": {"transforms": [transform]}
+                }
+            }),
+        )
+        .await;
+        assert_eq!(result["status"], "failed", "{transform}");
+        assert_eq!(
+            result["errors"][0]["code"], "INVALID_INPUT",
+            "{transform}: {result}"
+        );
+        assert_eq!(result["metrics"]["requests"], 0, "{transform}");
+    }
+}
+
+#[tokio::test]
+async fn a_flat_array_batch_refuses_records_without_exactly_one_value() {
+    let (url, server, observed) =
+        recorded_server(vec![(200, r#"{"results":[{"ok":1}]}"#, vec![])]).await;
+    let result = execute(
+        &local_engine(),
+        json!({
+            "schema_version": 1,
+            "operation": "enrich",
+            "connection": {
+                "url": url,
+                "method": "POST",
+                "batch": {
+                    "enabled": true,
+                    "input_key": "ids",
+                    "input_format": "flat_array",
+                    "output_path": "results"
+                }
+            },
+            "input": {"records": [{"id": 1}, {"id": null}, {"id": 3, "name": "x"}]}
+        }),
+    )
+    .await;
+    server.await.unwrap();
+
+    let indexes = result["errors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|error| (error["input_index"].clone(), error["code"].clone()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        indexes,
+        [
+            (json!(1), json!("INVALID_INPUT")),
+            (json!(2), json!("INVALID_INPUT"))
+        ],
+        "{result}"
+    );
+    let request = observed.lock().unwrap()[0].clone();
+    assert!(request.contains(r#"{"ids":[1]}"#), "{request}");
+}
+
+#[tokio::test]
+async fn a_null_transform_argument_is_rejected_before_any_request() {
+    for transform in [
+        json!({"source": "a", "column": "c", "operation": "prefix", "value": null}),
+        json!({"source": "a", "column": "c", "operation": "suffix", "value": null}),
+        json!({"source": "a", "column": "c", "operation": "add", "value": null}),
+    ] {
+        let result = execute(
+            &local_engine(),
+            json!({
+                "schema_version": 1,
+                "operation": "generate",
+                "connection": {
+                    "url": "http://127.0.0.1:9/",
+                    "method": "GET",
+                    "response": {"transforms": [transform]}
+                }
+            }),
+        )
+        .await;
+        assert_eq!(
+            result["errors"][0]["code"], "INVALID_INPUT",
+            "{transform}: {result}"
+        );
+        assert_eq!(result["metrics"]["requests"], 0, "{transform}");
+    }
+}
+
+#[tokio::test]
+async fn null_is_not_read_as_empty_text_in_transforms() {
+    let (url, server, _) = recorded_server(vec![(200, r#"{"a":null,"b":"ABC"}"#, vec![])]).await;
+    let result = execute(
+        &local_engine(),
+        json!({
+            "schema_version": 1,
+            "operation": "generate",
+            "connection": {
+                "url": url,
+                "method": "GET",
+                "response": {
+                    "output_mapping": [
+                        {"path": "a", "column": "a"},
+                        {"path": "b", "column": "b"}
+                    ],
+                    "transforms": [
+                        {"source": "a", "column": "prefixed", "operation": "prefix", "value": "id-"},
+                        {"source": "a", "column": "suffixed", "operation": "suffix", "value": "-x"},
+                        {"source": "a", "column": "replaced", "operation": "replace",
+                         "value": {"find": "x", "replace": "y"}},
+                        {"source": "b", "column": "matched", "operation": "uppercase",
+                         "condition": "a == ''"}
+                    ]
+                }
+            }
+        }),
+    )
+    .await;
+    server.await.unwrap();
+    assert_eq!(result["status"], "success", "{result}");
+    let record = &result["output"]["records"][0];
+    assert_eq!(record["prefixed"], Value::Null, "{record}");
+    assert_eq!(record["suffixed"], Value::Null, "{record}");
+    assert_eq!(record["replaced"], Value::Null, "{record}");
+    assert_eq!(record.get("matched"), None, "{record}");
+}
+
+#[tokio::test]
+async fn a_null_poll_status_is_not_read_as_an_empty_status() {
+    // An empty pending value is legal on the Rust surface; a null status must
+    // not match it as if null were "".
+    let (base_url, server, _) = recorded_server(vec![
+        (202, r#"{"accepted":true}"#, vec![("Location", "/jobs/1")]),
+        (200, r#"{"status":null}"#, vec![]),
+    ])
+    .await;
+    let result = execute(
+        &local_engine(),
+        json!({
+            "schema_version": 1,
+            "operation": "test",
+            "connection": {
+                "url": format!("{base_url}jobs"),
+                "method": "POST",
+                "polling": {
+                    "pending_values": [""],
+                    "interval_ms": 0,
+                    "max_attempts": 3
+                }
+            }
+        }),
+    )
+    .await;
+    server.await.unwrap();
+    assert_eq!(result["errors"][0]["code"], "INVALID_RESPONSE", "{result}");
+    assert_eq!(result["metrics"]["poll_requests"], 1);
+}
+
+#[tokio::test]
+async fn a_null_job_id_is_not_rendered_into_the_poll_url() {
+    let (base_url, server, observed) =
+        recorded_server(vec![(202, r#"{"id":null,"status":"queued"}"#, vec![])]).await;
+    let result = execute(
+        &local_engine(),
+        json!({
+            "schema_version": 1,
+            "operation": "test",
+            "connection": {
+                "url": format!("{base_url}jobs"),
+                "method": "POST",
+                "polling": {
+                    "url_template": "{base}/jobs/{id}",
+                    "location_header": null,
+                    "interval_ms": 0,
+                    "max_attempts": 3
+                }
+            }
+        }),
+    )
+    .await;
+    server.await.unwrap();
+    assert_eq!(result["errors"][0]["code"], "INVALID_RESPONSE", "{result}");
+    assert_eq!(
+        observed.lock().unwrap().len(),
+        1,
+        "no poll may reach /jobs/"
+    );
+}
+
+#[tokio::test]
+async fn well_formed_conditions_still_apply() {
+    let transforms = json!([
+        {"source": "b", "column": "single", "operation": "uppercase", "condition": "a == 'on'"},
+        {"source": "b", "column": "double", "operation": "uppercase", "condition": "a == \"on\""},
+        {"source": "b", "column": "bare", "operation": "uppercase", "condition": "a==on"},
+        {"source": "b", "column": "empty", "operation": "uppercase", "condition": "a != ''"},
+        {"source": "b", "column": "skipped", "operation": "uppercase", "condition": "a != 'on'"}
+    ]);
+    let result = transform_result(r#"{"a":"on","b":"x"}"#, transforms).await;
+    assert_eq!(result["status"], "success", "{result}");
+    let record = &result["output"]["records"][0];
+    for column in ["single", "double", "bare", "empty"] {
+        assert_eq!(record[column], json!("X"), "{column}: {record}");
+    }
+    assert_eq!(record.get("skipped"), None, "{record}");
+}
+
+#[tokio::test]
+async fn operators_inside_a_quoted_literal_are_part_of_the_literal() {
+    let transforms = json!([
+        {"source": "b", "column": "eq_single", "operation": "uppercase", "condition": "a == 'x==y!=z'"},
+        {"source": "b", "column": "eq_double", "operation": "uppercase", "condition": "a == \"x==y!=z\""},
+        {"source": "b", "column": "ne_single", "operation": "uppercase", "condition": "a != 'a==b'"},
+        {"source": "b", "column": "ne_double", "operation": "uppercase", "condition": "a != \"a!=b\""},
+        {"source": "b", "column": "eq_miss", "operation": "uppercase", "condition": "a == 'x==y'"},
+        {"source": "b", "column": "ne_miss", "operation": "uppercase", "condition": "a != \"x==y!=z\""}
+    ]);
+    let result = transform_result(r#"{"a":"x==y!=z","b":"v"}"#, transforms).await;
+    assert_eq!(result["status"], "success", "{result}");
+    let record = &result["output"]["records"][0];
+    for column in ["eq_single", "eq_double", "ne_single", "ne_double"] {
+        assert_eq!(record[column], json!("V"), "{column}: {record}");
+    }
+    for column in ["eq_miss", "ne_miss"] {
+        assert_eq!(record.get(column), None, "{column}: {record}");
+    }
+}
+
+#[tokio::test]
+async fn a_withheld_idempotency_header_also_withdraws_non_idempotent_retries() {
+    // `X-Deduplication-ID` does not name an idempotency key, so it is not
+    // carried to another origin. The retries it enabled must not be carried
+    // either: a POST retried without its key can execute twice.
+    let (second_url, second_server, second_observed) = recorded_server(vec![
+        (503, r#"{"error":"busy"}"#, vec![]),
+        (200, r#"{"items":[{"id":2}]}"#, vec![]),
+    ])
+    .await;
+    let first_body = format!(r#"{{"items":[{{"id":1}}],"next":"{second_url}"}}"#);
+    let (first_url, first_server, _) = owned_recorded_server(vec![(
+        200,
+        first_body.into_bytes(),
+        vec![("Content-Type", "application/json")],
+    )])
+    .await;
+
+    let result = execute(
+        &local_engine(),
+        json!({
+            "schema_version": 1,
+            "operation": "generate",
+            "connection": {
+                "url": first_url,
+                "method": "POST",
+                "response": {"records_path": "items"},
+                "retry": {"max_attempts": 3, "backoff_base_ms": 1, "max_backoff_ms": 1},
+                "idempotency": {"name": "X-Deduplication-ID", "location": "header"},
+                "pagination": {
+                    "type": "link",
+                    "link_path": "next",
+                    "max_pages": 2,
+                    "allow_cross_origin": true
+                }
+            },
+            "options": {"idempotency_key": "page-key-1"}
+        }),
+    )
+    .await;
+    first_server.await.unwrap();
+    second_server.abort();
+
+    assert_eq!(result["status"], "failed", "{result}");
+    let second = second_observed.lock().unwrap().clone();
+    assert_eq!(second.len(), 1, "the unprotected POST must not be retried");
+    assert!(
+        !second[0]
+            .to_ascii_lowercase()
+            .contains("x-deduplication-id")
+    );
+}
+
+fn cookie_engine(max_cookie_sessions: usize) -> Engine {
+    Engine::new(EngineConfig {
+        allow_private_networks: true,
+        allow_cookie_store: true,
+        max_cookie_sessions,
+        ..EngineConfig::default()
+    })
+}
+
+fn with_session(url: &str, session: &str) -> Value {
+    json!({
+        "schema_version": 1,
+        "operation": "test",
+        "connection": {"url": url, "method": "GET", "cookies": {"session": session}}
+    })
+}
+
+/// Asserts that a request on `session` is refused before any network activity.
+/// Port 9 is never contacted: a refusal that reached the network would show up
+/// as a transport error instead of a policy violation.
+async fn assert_refused_before_network(engine: &Engine, session: &str) {
+    let result = execute(engine, with_session("http://127.0.0.1:9/", session)).await;
+    assert_eq!(result["status"], "failed", "{result}");
+    assert_eq!(result["errors"][0]["code"], "POLICY_VIOLATION", "{result}");
+    assert_eq!(result["metrics"]["requests"], 0, "{result}");
+}
+
+#[tokio::test]
+async fn an_open_cookie_session_keeps_its_cookies() {
+    let (url, server, observed) = recorded_server(vec![
+        (
+            200,
+            r#"{"ok":true}"#,
+            vec![("Set-Cookie", "sid=login; Path=/")],
+        ),
+        (200, r#"{"ok":true}"#, vec![]),
+    ])
+    .await;
+    let engine = cookie_engine(4);
+    let session = engine.open_cookie_session().await.unwrap().to_token();
+    assert_eq!(
+        execute(&engine, with_session(&url, &session)).await["status"],
+        "success"
+    );
+    assert_eq!(
+        execute(&engine, with_session(&url, &session)).await["status"],
+        "success"
+    );
+    server.await.unwrap();
+    assert!(
+        observed.lock().unwrap()[1]
+            .to_ascii_lowercase()
+            .contains("cookie: sid=login")
+    );
+}
+
+#[tokio::test]
+async fn a_closed_cookie_session_is_refused_and_not_recreated() {
+    let engine = cookie_engine(4);
+    let session = engine.open_cookie_session().await.unwrap();
+    engine.close_cookie_session(&session).await.unwrap();
+    assert_refused_before_network(&engine, &session.to_token()).await;
+    // Closing twice is an error too, so a caller that lost track finds out.
+    assert!(engine.close_cookie_session(&session).await.is_err());
+    // The slot is reused, but under a new generation: the old handle stays
+    // refused while the new one works.
+    let reopened = engine.open_cookie_session().await.unwrap();
+    assert_ne!(reopened, session);
+    assert_refused_before_network(&engine, &session.to_token()).await;
+}
+
+#[tokio::test]
+async fn an_evicted_cookie_session_is_refused_and_not_recreated() {
+    let (url, server, _) = recorded_server(vec![(
+        200,
+        r#"{"ok":true}"#,
+        vec![("Set-Cookie", "sid=login; Path=/")],
+    )])
+    .await;
+    let engine = cookie_engine(2);
+    let oldest = engine.open_cookie_session().await.unwrap().to_token();
+    assert_eq!(
+        execute(&engine, with_session(&url, &oldest)).await["status"],
+        "success"
+    );
+    server.await.unwrap();
+    let _second = engine.open_cookie_session().await.unwrap();
+    // Both slots are taken, so this evicts the least recently used session.
+    let _third = engine.open_cookie_session().await.unwrap();
+    assert_refused_before_network(&engine, &oldest).await;
+}
+
+#[tokio::test]
+async fn more_than_ten_thousand_sequential_sessions_never_exhaust_the_engine() {
+    // Memory is bounded by the slots, not by how many sessions ever existed:
+    // sessions that are closed, and sessions that are simply abandoned and
+    // evicted, both leave nothing behind.
+    let engine = cookie_engine(8);
+    let mut abandoned = Vec::new();
+    for index in 0..10_500 {
+        let session = engine.open_cookie_session().await.unwrap();
+        if index % 2 == 0 {
+            engine.close_cookie_session(&session).await.unwrap();
+        } else if abandoned.len() < 4 {
+            abandoned.push(session);
+        }
+    }
+    for session in &abandoned {
+        assert_refused_before_network(&engine, &session.to_token()).await;
+    }
+    let (url, server, observed) = recorded_server(vec![
+        (
+            200,
+            r#"{"ok":true}"#,
+            vec![("Set-Cookie", "sid=last; Path=/")],
+        ),
+        (200, r#"{"ok":true}"#, vec![]),
+    ])
+    .await;
+    let last = engine.open_cookie_session().await.unwrap().to_token();
+    assert_eq!(
+        execute(&engine, with_session(&url, &last)).await["status"],
+        "success"
+    );
+    assert_eq!(
+        execute(&engine, with_session(&url, &last)).await["status"],
+        "success"
+    );
+    server.await.unwrap();
+    assert!(
+        observed.lock().unwrap()[1]
+            .to_ascii_lowercase()
+            .contains("cookie: sid=last")
+    );
+}
+
+#[tokio::test]
+async fn a_cookie_session_from_another_engine_or_forged_is_refused() {
+    let issuer = cookie_engine(4);
+    let engine = cookie_engine(4);
+    let foreign = issuer.open_cookie_session().await.unwrap();
+    assert_refused_before_network(&engine, &foreign.to_token()).await;
+    assert!(engine.close_cookie_session(&foreign).await.is_err());
+
+    // Same engine, slot and generation, but not the random part the engine
+    // issued: a handle cannot be assembled from guessable numbers.
+    let genuine = engine.open_cookie_session().await.unwrap().to_token();
+    let (prefix, nonce) = genuine.rsplit_once('.').unwrap();
+    let flipped = if nonce.starts_with('0') { "1" } else { "0" };
+    let forged = format!("{prefix}.{flipped}{}", &nonce[1..]);
+    assert_refused_before_network(&engine, &forged).await;
+}
+
+#[tokio::test]
+async fn a_malformed_cookie_session_handle_is_invalid_input() {
+    // A handle that does not parse fails the request contract itself, before
+    // anything is executed.
+    let engine = cookie_engine(4);
+    let malformed = [
+        with_session("http://127.0.0.1:9/", ""),
+        with_session("http://127.0.0.1:9/", "default"),
+        with_session("http://127.0.0.1:9/", "rcs1.zz.0.0.0"),
+        with_session(
+            "http://127.0.0.1:9/",
+            "rcs1.0000000000000000.01.0.0000000000000000",
+        ),
+        // The former shape of the cookie policy is refused, not ignored.
+        json!({
+            "schema_version": 1,
+            "operation": "test",
+            "connection": {
+                "url": "http://127.0.0.1:9/",
+                "method": "GET",
+                "cookies": {"enabled": true, "jar_id": "tenant"}
+            }
+        }),
+    ];
+    for request in malformed {
+        let error = engine
+            .execute_json(&request.to_string())
+            .await
+            .expect_err("a malformed cookie policy must be refused");
+        assert!(matches!(error, EngineError::InvalidInput(_)), "{request}");
+    }
+}
+
+#[tokio::test]
+async fn closing_a_session_during_oauth_keeps_the_admitted_request_and_refuses_new_ones() {
+    // The resource server sets a cookie on the first request, then expects the
+    // in-flight request to arrive with it.
+    let (resource_url, resource_server, resource_observed) = recorded_server(vec![
+        (
+            200,
+            r#"{"step":1}"#,
+            vec![("Set-Cookie", "sid=held; Path=/")],
+        ),
+        (200, r#"{"step":2}"#, vec![]),
+    ])
+    .await;
+
+    // The token endpoint accepts, announces the arrival, and answers only when
+    // the test says so: the request is held inside OAuth, after admission and
+    // after network activity has started.
+    let token_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let token_url = format!("http://{}/token", token_listener.local_addr().unwrap());
+    let (arrived, arrival) = tokio::sync::oneshot::channel();
+    let (release, released) = tokio::sync::oneshot::channel::<()>();
+    let token_server = tokio::spawn(async move {
+        let (mut stream, _) = token_listener.accept().await.unwrap();
+        let _ = read_request(&mut stream).await;
+        let _ = arrived.send(());
+        released.await.unwrap();
+        let body = r#"{"access_token":"t","token_type":"Bearer","expires_in":3600}"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream.write_all(response.as_bytes()).await.unwrap();
+        stream.shutdown().await.unwrap();
+    });
+
+    let engine = Arc::new(cookie_engine(1));
+    let session = engine.open_cookie_session().await.unwrap();
+    let token = session.to_token();
+    let first = execute(&engine, with_session(&resource_url, &token)).await;
+    assert_eq!(first["status"], "success", "{first}");
+
+    let mut with_oauth = with_session(&resource_url, &token);
+    with_oauth["connection"]["auth"] = json!({
+        "type": "oauth2_client_credentials",
+        "token_url": token_url,
+        "client_id": "client",
+        "client_secret": "secret"
+    });
+    let in_flight_engine = Arc::clone(&engine);
+    let in_flight = tokio::spawn(async move { execute(&in_flight_engine, with_oauth).await });
+    timeout(Duration::from_secs(5), arrival)
+        .await
+        .expect("the request never reached the token endpoint")
+        .unwrap();
+
+    engine.close_cookie_session(&session).await.unwrap();
+    // New requests are refused at once, before any network activity.
+    assert_refused_before_network(&engine, &token).await;
+    // The only slot is still held by the in-flight request: it is not reused.
+    assert!(engine.open_cookie_session().await.is_err());
+
+    release.send(()).unwrap();
+    let completed = in_flight.await.unwrap();
+    token_server.await.unwrap();
+    resource_server.await.unwrap();
+    assert_eq!(completed["status"], "success", "{completed}");
+    assert!(
+        resource_observed.lock().unwrap()[1]
+            .to_ascii_lowercase()
+            .contains("cookie: sid=held"),
+        "the in-flight request must keep the session it was admitted with"
+    );
+
+    // Released: the slot is reused, under a new generation.
+    let reopened = engine.open_cookie_session().await.unwrap();
+    assert_ne!(reopened, session);
+    assert_refused_before_network(&engine, &token).await;
+}
+
+async fn write_json_response(stream: &mut TcpStream, status: &str, body: &str) {
+    let response = format!(
+        "HTTP/1.1 {status}
+Content-Type: application/json
+Content-Length: {}
+Connection: close
+
+{body}",
+        body.len()
+    );
+    stream.write_all(response.as_bytes()).await.unwrap();
+    stream.shutdown().await.unwrap();
+}
+
+/// A listener that records whether anything connected to it within `wait`.
+async fn watched_listener(wait: Duration) -> (String, JoinHandle<bool>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let watcher = tokio::spawn(async move { timeout(wait, listener.accept()).await.is_ok() });
+    (url, watcher)
+}
+
+#[tokio::test]
+async fn a_resumed_cross_origin_poll_with_a_stale_session_never_reaches_the_network() {
+    // The poll and the cancellation target other origins, so the credential
+    // scope strips the session from them before they reach the transport. The
+    // stale handle must still refuse the operation up front.
+    let (poll_base, poll_watcher) = watched_listener(Duration::from_secs(1)).await;
+    let (cancel_base, cancel_watcher) = watched_listener(Duration::from_secs(1)).await;
+    let engine = cookie_engine(4);
+    let session = engine.open_cookie_session().await.unwrap();
+    engine.close_cookie_session(&session).await.unwrap();
+
+    let result = execute(
+        &engine,
+        json!({
+            "schema_version": 1,
+            "operation": "test",
+            "connection": {
+                "url": "http://127.0.0.1:9/submit",
+                "method": "POST",
+                "cookies": {"session": session},
+                "polling": {
+                    "url_template": format!("{poll_base}/jobs/{{job_id}}"),
+                    "allow_cross_origin": true,
+                    "interval_ms": 0,
+                    "max_attempts": 1,
+                    "resume": {"job_id": "existing-1"},
+                    "cancel": {
+                        "url_template": format!("{cancel_base}/jobs/{{job_id}}"),
+                        "on_poll_timeout": true
+                    }
+                }
+            }
+        }),
+    )
+    .await;
+
+    assert_eq!(result["status"], "failed", "{result}");
+    assert_eq!(result["errors"][0]["code"], "POLICY_VIOLATION", "{result}");
+    assert_eq!(result["metrics"]["requests"], 0, "{result}");
+    assert!(!poll_watcher.await.unwrap(), "the poll must not be sent");
+    assert!(
+        !cancel_watcher.await.unwrap(),
+        "the cancellation must not be sent"
+    );
+}
+
+#[tokio::test]
+async fn a_remote_cancellation_after_the_session_closed_is_not_sent() {
+    // The session is valid when the operation starts and is closed while the
+    // poll is in flight. The poll times out and triggers a remote cancellation
+    // on another origin, where the scope strips the session: that request
+    // belongs to an ended session and must be refused before the network.
+    let owner = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let owner_url = format!("http://{}", owner.local_addr().unwrap());
+    let (arrived, arrival) = tokio::sync::oneshot::channel();
+    let (release, released) = tokio::sync::oneshot::channel::<()>();
+    let owner_server = tokio::spawn(async move {
+        let (mut submit, _) = owner.accept().await.unwrap();
+        let _ = read_request(&mut submit).await;
+        write_json_response(
+            &mut submit,
+            "202 Accepted",
+            r#"{"id":"job-1","status":"queued"}"#,
+        )
+        .await;
+        let (mut poll, _) = owner.accept().await.unwrap();
+        let _ = read_request(&mut poll).await;
+        let _ = arrived.send(());
+        released.await.unwrap();
+        write_json_response(&mut poll, "200 OK", r#"{"status":"running"}"#).await;
+    });
+    let (cancel_base, cancel_watcher) = watched_listener(Duration::from_secs(3)).await;
+
+    let engine = Arc::new(cookie_engine(4));
+    let session = engine.open_cookie_session().await.unwrap();
+    let request = json!({
+        "schema_version": 1,
+        "operation": "test",
+        "connection": {
+            "url": format!("{owner_url}/submit"),
+            "method": "POST",
+            "cookies": {"session": session},
+            "polling": {
+                "url_template": format!("{owner_url}/jobs/{{job_id}}"),
+                "location_header": null,
+                "allow_cross_origin": true,
+                "interval_ms": 0,
+                "max_attempts": 1,
+                "cancel": {
+                    "url_template": format!("{cancel_base}/jobs/{{job_id}}"),
+                    "on_poll_timeout": true
+                }
+            }
+        }
+    });
+    let running_engine = Arc::clone(&engine);
+    let running = tokio::spawn(async move { execute(&running_engine, request).await });
+    timeout(Duration::from_secs(5), arrival)
+        .await
+        .expect("the poll never arrived")
+        .unwrap();
+    engine.close_cookie_session(&session).await.unwrap();
+    release.send(()).unwrap();
+
+    let result = running.await.unwrap();
+    owner_server.await.unwrap();
+    assert_eq!(result["errors"][0]["code"], "POLLING_TIMEOUT", "{result}");
+    assert_eq!(result["metrics"]["requests"], 2, "{result}");
+    assert_eq!(
+        result["recoveries"][0]["cancel_requested"], true,
+        "{result}"
+    );
+    assert_eq!(
+        result["recoveries"][0]["cancel_accepted"], false,
+        "{result}"
+    );
+    assert!(
+        !cancel_watcher.await.unwrap(),
+        "a cancellation for an ended session must not be sent"
+    );
+}
+
+#[tokio::test]
+async fn a_stale_session_is_refused_before_the_idempotency_key_is_recorded() {
+    // The operation-level check runs before idempotency admission: a refused
+    // attempt must not record the key, or retrying the same key with a fresh
+    // session would be reported as a conflicting reuse.
+    let (url, server, _) = recorded_server(vec![(200, r#"{"ok":true}"#, vec![])]).await;
+    let engine = cookie_engine(4);
+    let stale = engine.open_cookie_session().await.unwrap();
+    engine.close_cookie_session(&stale).await.unwrap();
+    let attempt = |session: &CookieSession| {
+        json!({
+            "schema_version": 1,
+            "operation": "test",
+            "connection": {"url": url, "method": "POST", "cookies": {"session": session}},
+            "options": {"idempotency_key": "retry-with-new-session"}
+        })
+    };
+
+    let refused = execute(&engine, attempt(&stale)).await;
+    assert_eq!(
+        refused["errors"][0]["code"], "POLICY_VIOLATION",
+        "{refused}"
+    );
+    assert_eq!(refused["metrics"]["requests"], 0);
+
+    let fresh = engine.open_cookie_session().await.unwrap();
+    let retried = execute(&engine, attempt(&fresh)).await;
+    server.await.unwrap();
+    assert_eq!(retried["status"], "success", "{retried}");
+}

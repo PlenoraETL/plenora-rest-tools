@@ -30,6 +30,9 @@ pub struct EngineConfig {
     pub automatic_decompression: bool,
     pub allowed_custom_methods: Vec<String>,
     pub allow_cookie_store: bool,
+    /// Cookie sessions the engine keeps at once. Opening one more evicts the
+    /// least recently used idle session.
+    pub max_cookie_sessions: usize,
     pub max_cache_entries: usize,
     pub max_cache_bytes: usize,
     pub max_circuit_origins: usize,
@@ -58,6 +61,7 @@ impl Default for EngineConfig {
             automatic_decompression: true,
             allowed_custom_methods: Vec::new(),
             allow_cookie_store: false,
+            max_cookie_sessions: 256,
             max_cache_entries: 1_024,
             max_cache_bytes: 64 * 1024 * 1024,
             max_circuit_origins: 256,
@@ -332,7 +336,14 @@ pub struct ParameterSpec {
     pub mode: ParameterMode,
     #[serde(default)]
     pub source: Option<String>,
-    #[serde(default)]
+    /// `None` when the field is absent, `Some(Value::Null)` when it is an
+    /// explicit JSON `null`: a fixed parameter whose value is `null` sends
+    /// `null`, it is not dropped as if it had no value.
+    #[serde(
+        default,
+        deserialize_with = "explicit_value",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub value: Option<Value>,
     #[serde(default)]
     pub required: bool,
@@ -465,7 +476,12 @@ pub struct ResponseTransform {
     pub column: String,
     pub source: String,
     pub operation: String,
-    #[serde(default)]
+    /// Absent and explicit `null` stay distinct, as for [`ParameterSpec::value`].
+    #[serde(
+        default,
+        deserialize_with = "explicit_value",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub value: Option<Value>,
     #[serde(default)]
     pub condition: Option<String>,
@@ -476,8 +492,28 @@ pub struct ResponseTransform {
 pub struct OutputMapping {
     pub path: String,
     pub column: String,
-    #[serde(default)]
+    /// Absent and explicit `null` stay distinct, as for [`ParameterSpec::value`].
+    #[serde(
+        default,
+        deserialize_with = "explicit_value",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub default: Option<Value>,
+}
+
+/// Deserializes a field whose JSON value may itself be `null`.
+///
+/// For `Option<Value>` serde reads a present `null` as `None`, which makes an
+/// explicit `null` indistinguishable from an absent field. Where `null` is a
+/// value the caller can mean — a parameter value, a transform argument, a
+/// mapping default — that would silently drop it, so a present field is always
+/// `Some`, `null` included. Absence is still `None` through `#[serde(default)]`,
+/// which does not call this function.
+fn explicit_value<'de, D>(deserializer: D) -> Result<Option<Value>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Value::deserialize(deserializer).map(Some)
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -533,19 +569,106 @@ pub enum IdempotencyLocation {
     Body,
 }
 
-#[derive(Clone, Debug, Deserialize, Hash, Serialize)]
+/// Cookie handling for one request.
+///
+/// Cookies are kept only inside a session the caller opened with
+/// [`Engine::open_cookie_session`](crate::Engine::open_cookie_session). Without
+/// a session the request carries no engine-held cookies.
+#[derive(Clone, Debug, Default, Deserialize, Hash, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct CookiePolicy {
-    pub enabled: bool,
-    pub jar_id: String,
+    pub session: Option<CookieSession>,
 }
 
-impl Default for CookiePolicy {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            jar_id: "default".to_owned(),
+impl CookiePolicy {
+    /// True when the request uses an engine-held cookie session.
+    pub fn is_enabled(&self) -> bool {
+        self.session.is_some()
+    }
+}
+
+/// Handle of a cookie session opened by an [`Engine`](crate::Engine).
+///
+/// The engine issues it and only the engine interprets it. It names a slot
+/// and the generation of that slot, so a handle outlives its session only as
+/// a value that is refused: once the session is closed or evicted the slot's
+/// generation moves on and the handle fails explicitly, before any network
+/// activity, instead of reaching an empty session. It also carries the
+/// issuing engine's random identifier and a random per-session value, so a
+/// handle from another engine, or one assembled by hand, is refused too.
+///
+/// On the wire it is an opaque string. `Debug` does not print it: the handle
+/// grants the use of the session's cookies.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct CookieSession {
+    pub(crate) engine: u64,
+    pub(crate) slot: u32,
+    pub(crate) generation: u64,
+    pub(crate) nonce: u128,
+}
+
+const COOKIE_SESSION_PREFIX: &str = "rcs1";
+
+impl CookieSession {
+    /// The opaque token, as it travels in JSON.
+    pub fn to_token(&self) -> String {
+        format!(
+            "{COOKIE_SESSION_PREFIX}.{:016x}.{}.{}.{:032x}",
+            self.engine, self.slot, self.generation, self.nonce
+        )
+    }
+
+    /// Parses a token issued by [`CookieSession::to_token`].
+    ///
+    /// Only the exact spelling the engine produces is accepted, so a token has
+    /// a single textual form.
+    pub fn from_token(token: &str) -> Option<Self> {
+        let mut parts = token.split('.');
+        if parts.next()? != COOKIE_SESSION_PREFIX {
+            return None;
         }
+        let engine = parts.next()?;
+        let slot = parts.next()?;
+        let generation = parts.next()?;
+        let nonce = parts.next()?;
+        if parts.next().is_some() || engine.len() != 16 || nonce.len() != 32 {
+            return None;
+        }
+        let lowercase_hex = |text: &str| {
+            text.bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        };
+        if !lowercase_hex(engine) || !lowercase_hex(nonce) {
+            return None;
+        }
+        let session = Self {
+            engine: u64::from_str_radix(engine, 16).ok()?,
+            slot: slot.parse().ok()?,
+            generation: generation.parse().ok()?,
+            nonce: u128::from_str_radix(nonce, 16).ok()?,
+        };
+        // Rejects leading zeros, signs and other spellings `parse` tolerates.
+        (session.to_token() == token).then_some(session)
+    }
+}
+
+impl fmt::Debug for CookieSession {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("CookieSession(<redacted>)")
+    }
+}
+
+impl Serialize for CookieSession {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.to_token())
+    }
+}
+
+impl<'de> Deserialize<'de> for CookieSession {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let token = String::deserialize(deserializer)?;
+        Self::from_token(&token)
+            .ok_or_else(|| D::Error::custom("cookie session handle is not well formed"))
     }
 }
 
@@ -1036,4 +1159,91 @@ fn default_arcgis_client() -> String {
 }
 fn default_arcgis_expiration() -> u32 {
     60
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{Value, json};
+
+    use super::{OutputMapping, ParameterSpec, ResponseTransform};
+
+    #[test]
+    fn an_explicit_null_is_kept_apart_from_an_absent_value() {
+        let explicit: ParameterSpec =
+            serde_json::from_value(json!({"name": "p", "mode": "fixed", "value": null})).unwrap();
+        assert_eq!(explicit.value, Some(Value::Null));
+        let absent: ParameterSpec =
+            serde_json::from_value(json!({"name": "p", "mode": "fixed"})).unwrap();
+        assert_eq!(absent.value, None);
+
+        let transform: ResponseTransform = serde_json::from_value(
+            json!({"column": "c", "source": "s", "operation": "default_if_null", "value": null}),
+        )
+        .unwrap();
+        assert_eq!(transform.value, Some(Value::Null));
+
+        let mapping: OutputMapping =
+            serde_json::from_value(json!({"path": "a", "column": "c", "default": null})).unwrap();
+        assert_eq!(mapping.default, Some(Value::Null));
+    }
+
+    #[test]
+    fn null_means_absent_for_typed_optional_fields() {
+        let request: super::RequestConfig =
+            serde_json::from_value(json!({"timeout_ms": null})).unwrap();
+        assert_eq!(request.timeout_ms, None);
+        let response: super::ResponseConfig = serde_json::from_value(json!({
+            "records_path": null,
+            "error_path": null,
+            "success_when": null
+        }))
+        .unwrap();
+        assert_eq!(response.records_path, None);
+        assert_eq!(response.error_path, None);
+        assert_eq!(response.success_when, None);
+    }
+
+    #[test]
+    fn serialization_round_trips_absent_and_null() {
+        for document in [
+            json!({"name": "p", "mode": "fixed", "value": null}),
+            json!({"name": "p", "mode": "fixed"}),
+        ] {
+            let spec: ParameterSpec = serde_json::from_value(document.clone()).unwrap();
+            let again: ParameterSpec =
+                serde_json::from_value(serde_json::to_value(&spec).unwrap()).unwrap();
+            assert_eq!(again.value, spec.value, "{document}");
+        }
+    }
+
+    #[test]
+    fn a_cookie_session_token_has_one_canonical_128_bit_spelling() {
+        let session = super::CookieSession {
+            engine: 0x0123_4567_89ab_cdef,
+            slot: 7,
+            generation: 42,
+            nonce: u128::MAX - 1,
+        };
+        let token = session.to_token();
+        assert_eq!(
+            token,
+            "rcs1.0123456789abcdef.7.42.fffffffffffffffffffffffffffffffe"
+        );
+        assert_eq!(super::CookieSession::from_token(&token), Some(session));
+        for malformed in [
+            // A 64-bit nonce, the earlier format.
+            "rcs1.0123456789abcdef.7.42.fffffffffffffffe",
+            // Uppercase, a sign, leading zeros, extra parts.
+            "rcs1.0123456789ABCDEF.7.42.fffffffffffffffffffffffffffffffe",
+            "rcs1.0123456789abcdef.+7.42.fffffffffffffffffffffffffffffffe",
+            "rcs1.0123456789abcdef.07.42.fffffffffffffffffffffffffffffffe",
+            "rcs1.0123456789abcdef.7.42.fffffffffffffffffffffffffffffffe.0",
+        ] {
+            assert_eq!(
+                super::CookieSession::from_token(malformed),
+                None,
+                "{malformed}"
+            );
+        }
+    }
 }

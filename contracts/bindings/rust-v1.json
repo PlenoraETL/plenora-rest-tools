@@ -8,7 +8,9 @@
   "capability_entrypoint": "plenora_rest_core::capabilities",
   "lifecycle_entrypoints": [
     "plenora_rest_core::Engine::close",
-    "plenora_rest_core::Engine::is_closed"
+    "plenora_rest_core::Engine::is_closed",
+    "plenora_rest_core::Engine::open_cookie_session",
+    "plenora_rest_core::Engine::close_cookie_session"
   ],
   "operations": [
     {

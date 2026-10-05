@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashMap},
     hash::{Hash, Hasher},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     path::{Path, PathBuf},
@@ -8,6 +8,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use crate::error::ErrorDetail;
 use futures_util::StreamExt;
 use reqwest::{
     Body, Certificate, Client, Identity, Method, Proxy, Url,
@@ -33,8 +34,8 @@ use tokio_util::io::ReaderStream;
 use url::Host;
 
 use crate::{
-    ApiKeyLocation, AuthConfig, CachePolicy, CircuitBreakerPolicy, CookiePolicy, EngineConfig,
-    EngineError, HttpMethod, OAuthClientAuth, ProxyConfig, RetryPolicy, TlsConfig,
+    ApiKeyLocation, AuthConfig, CachePolicy, CircuitBreakerPolicy, CookiePolicy, CookieSession,
+    EngineConfig, EngineError, HttpMethod, OAuthClientAuth, ProxyConfig, RetryPolicy, TlsConfig,
 };
 
 static DOWNLOAD_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -47,11 +48,6 @@ const MAX_CACHED_TOKENS: usize = 256;
 /// cookie; anything larger is a remote service pushing bulk data into
 /// engine-held state.
 const MAX_SET_COOKIE_BYTES: usize = 8 * 1024;
-
-/// Upper bound for cookie jars, so a caller cycling through `jar_id` values
-/// cannot grow engine state without limit. Reaching it evicts an idle jar; a
-/// jar still held by a client or an in-flight request is never taken away.
-const MAX_COOKIE_JARS: usize = 256;
 
 /// SHA-256 fingerprint used by the client, token, and cache isolation keys.
 type Fingerprint = [u8; 32];
@@ -109,6 +105,14 @@ pub(crate) struct PreparedRequest {
     pub max_redirects: usize,
     pub retry: RetryPolicy,
     pub cookies: CookiePolicy,
+    /// Jar of the cookie session, resolved once when the operation is admitted
+    /// and used for its whole duration.
+    pub admitted_jar: Option<CookieJar>,
+    /// Session named by the caller's request. Kept when a credential scope
+    /// removes the cookies from a cross-origin follow-up, so that a request of
+    /// an operation whose session has ended is still refused before it reaches
+    /// the network.
+    pub caller_session: Option<CookieSession>,
     pub cache: CachePolicy,
     pub circuit_breaker: CircuitBreakerPolicy,
     pub requests_per_second: Option<f64>,
@@ -197,15 +201,122 @@ pub(crate) struct Transport {
     concurrency: Arc<Semaphore>,
     rate_state: Arc<Mutex<RateState>>,
     sequence: Arc<AtomicU64>,
-    /// Cookie jars owned by the engine rather than by a pooled client.
+    /// Cookie sessions, owned by the engine rather than by a pooled client.
     ///
     /// A jar living inside a client would vanish when that client is evicted,
     /// so a later request would silently start from an empty session. Owning
-    /// them keeps a session tied to its `jar_id` for as long as the engine
-    /// lives, independently of how the connection pool churns.
-    jars: Arc<Mutex<HashMap<String, CookieJar>>>,
+    /// them keeps a session alive for as long as its handle is valid,
+    /// independently of how the connection pool churns.
+    sessions: Arc<Mutex<SessionRegistry>>,
 }
 
+/// Fixed set of cookie session slots.
+///
+/// Memory is bounded by the slot count alone: nothing is remembered about
+/// sessions that ended. A handle stays recognisable as stale because the slot
+/// it names has moved to a later generation, not because the engine keeps a
+/// list of what it evicted.
+struct SessionRegistry {
+    /// Random per engine, so a handle issued by another engine is refused.
+    /// `None` when the system random source failed at construction: every
+    /// session operation is then refused rather than run with a guessable id.
+    engine: Option<u64>,
+    capacity: usize,
+    slots: Vec<SessionSlot>,
+}
+
+struct SessionSlot {
+    /// Generation a handle must carry to use this slot. It moves forward every
+    /// time a session in the slot ends, so no handle outlives its session.
+    generation: u64,
+    state: SlotState,
+}
+
+enum SlotState {
+    Free,
+    Open(OpenSession),
+    /// Closed while operations still held it. The handle is already refused
+    /// for new requests; the slot is freed, and its generation advanced, only
+    /// once the last of those operations has released its lease.
+    Closing(CookieJar),
+    /// The generation counter is exhausted. The slot is never used again rather
+    /// than restarting from a generation an old handle might still carry.
+    Retired,
+}
+
+struct OpenSession {
+    /// Random per session, 128 bits: a handle cannot be assembled from a slot
+    /// number and a guessed generation.
+    nonce: u128,
+    jar: CookieJar,
+    /// Order of last use, for evicting the least recently used session.
+    last_used: u64,
+}
+
+/// Why a cookie session handle was not honoured.
+#[derive(Debug, PartialEq, Eq)]
+enum SessionRefusal {
+    /// Issued by another engine.
+    ForeignEngine,
+    /// Closed, evicted, or never issued by this engine.
+    Stale,
+}
+
+/// 128 random bits from the operating system's generator.
+fn random_u128() -> Result<u128, EngineError> {
+    let mut bytes = [0_u8; 16];
+    getrandom::fill(&mut bytes).map_err(|_| random_source_error())?;
+    Ok(u128::from_le_bytes(bytes))
+}
+
+fn random_source_error() -> EngineError {
+    EngineError::Runtime(ErrorDetail::from("the system random source failed"))
+}
+
+impl SessionRegistry {
+    fn new(capacity: usize) -> Self {
+        Self {
+            engine: getrandom::u64().ok(),
+            capacity,
+            slots: Vec::new(),
+        }
+    }
+
+    /// The open session `handle` names, if the handle is current.
+    fn resolve(&mut self, handle: &CookieSession) -> Result<&mut OpenSession, SessionRefusal> {
+        if Some(handle.engine) != self.engine {
+            return Err(SessionRefusal::ForeignEngine);
+        }
+        let slot = usize::try_from(handle.slot)
+            .ok()
+            .and_then(|index| self.slots.get_mut(index))
+            .ok_or(SessionRefusal::Stale)?;
+        match &mut slot.state {
+            SlotState::Open(session)
+                if slot.generation == handle.generation && session.nonce == handle.nonce =>
+            {
+                Ok(session)
+            }
+            _ => Err(SessionRefusal::Stale),
+        }
+    }
+
+    /// Ends the session in `index`, moving the slot to its next generation or
+    /// retiring it when the generation cannot advance.
+    fn end(&mut self, index: usize) -> Option<u64> {
+        let slot = &mut self.slots[index];
+        let incarnation = match std::mem::replace(&mut slot.state, SlotState::Free) {
+            SlotState::Open(session) => Some(session.jar.incarnation),
+            SlotState::Closing(jar) => Some(jar.incarnation),
+            SlotState::Free | SlotState::Retired => None,
+        };
+        match slot.generation.checked_add(1) {
+            Some(next) => slot.generation = next,
+            None => slot.state = SlotState::Retired,
+        }
+        incarnation
+    }
+}
 /// Cookie store that drops implausibly long `Set-Cookie` headers.
 ///
 /// A resource bound, not a vulnerability mitigation: a remote service should not
@@ -234,7 +345,7 @@ impl CookieStore for BoundedJar {
 }
 
 #[derive(Clone)]
-struct CookieJar {
+pub(crate) struct CookieJar {
     jar: Arc<BoundedJar>,
     /// Operations currently holding this jar, counted by this crate rather than
     /// inferred from `Arc::strong_count`.
@@ -243,10 +354,9 @@ struct CookieJar {
     /// implementation detail of that client; counting reservations here is
     /// independent of it, and a pooled client alone never makes a jar look busy.
     leases: Arc<AtomicUsize>,
-    /// Identifies this jar instance. Never reused, so a client built against a
-    /// previous instance of the same `jar_id` is not mistaken for a current one.
+    /// Identifies this jar instance. Never reused, so a pooled client built for
+    /// an earlier session in the same slot is never handed to a later one.
     incarnation: u64,
-    sequence: u64,
 }
 
 /// Keeps a jar reserved for as long as an operation needs it.
@@ -275,7 +385,7 @@ struct ClientKey {
     /// Jar instance, not just its id: a pooled client owns the `Arc<Jar>` it was
     /// built with, so a client created before the jar was evicted and recreated
     /// would keep sending the previous session's cookies.
-    cookie_jar: Option<(String, u64)>,
+    cookie_jar: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -375,6 +485,7 @@ struct RequestStats {
 
 impl Transport {
     pub fn new(config: EngineConfig) -> Self {
+        let config_sessions = config.max_cookie_sessions;
         Self {
             concurrency: Arc::new(Semaphore::new(config.max_concurrent_requests.max(1))),
             config,
@@ -387,105 +498,222 @@ impl Transport {
                 next_allowed: Instant::now(),
             })),
             sequence: Arc::new(AtomicU64::new(1)),
-            jars: Arc::new(Mutex::new(HashMap::new())),
+            sessions: Arc::new(Mutex::new(SessionRegistry::new(config_sessions))),
         }
     }
 
-    /// Reserves the jar this request needs, before any step that can reach the
-    /// network.
+    /// Opens a cookie session and returns its handle.
     ///
-    /// Doing this up front is what keeps the error honest: refusing later, from
-    /// `client_for`, would report a policy violation with no remote effect after
-    /// an OAuth token had already been fetched.
-    /// The returned value is a lease: holding it keeps a strong reference to the
-    /// jar, so no concurrent request can evict it while this one authenticates
-    /// and resolves DNS. Dropping it early would let the admission succeed and
-    /// the later lookup fail, after the remote effect had already happened.
-    async fn admit_cookie_jar(
-        &self,
-        cookies: &CookiePolicy,
-    ) -> Result<Option<JarLease>, EngineError> {
-        if !cookies.enabled {
-            return Ok(None);
+    /// Uses a free slot when there is one. Otherwise the least recently used
+    /// session that no operation is holding is evicted: its slot moves to the
+    /// next generation, so the evicted handle fails from then on instead of
+    /// reaching the new, empty session. When every session is held by a
+    /// running operation the call is refused.
+    pub async fn open_cookie_session(&self) -> Result<CookieSession, EngineError> {
+        if !self.config.allow_cookie_store {
+            return Err(EngineError::PolicyViolation(ErrorDetail::from(
+                "cookie storage is not enabled for this engine",
+            )));
         }
-        self.cookie_jar(cookies)
-            .await
-            .map(|(_, lease)| Some(lease))
-            .ok_or_else(|| {
-                EngineError::PolicyViolation(
-                    "the engine is holding the maximum number of cookie jars".to_owned(),
-                )
-            })
-    }
-
-    /// The jar backing `jar_id`, creating it on first use, together with a lease
-    /// that keeps it alive for as long as the caller holds it.
-    ///
-    /// Returns `None` when cookies are disabled, and also when the registry is
-    /// full, which the caller turns into a policy violation.
-    async fn cookie_jar(&self, cookies: &CookiePolicy) -> Option<(CookieJar, JarLease)> {
-        if !cookies.enabled {
-            return None;
-        }
-        let (incarnation, sequence) = (self.next_sequence(), self.next_sequence());
-        let mut jars = self.jars.lock().await;
-        if !jars.contains_key(&cookies.jar_id) && jars.len() >= MAX_COOKIE_JARS {
-            // Only an unreserved jar may go. Evicting one that an operation is
-            // still holding would let two requests sharing a `jar_id` run
-            // against different sessions. Reservations are taken and read under
-            // this lock, so a zero count here cannot be stale.
-            //
-            // A pooled client is not a reservation: it holds the jar so that a
-            // live connection keeps its session, but nothing is running on it.
-            // Such a jar may go, at the cost of a reconnection, so it is only
-            // the second choice — a jar nothing has connected to is cheaper to
-            // lose. Either way only the victim's own entries are touched.
-            //
-            // Locks are taken jars then clients, the same order as `client_for`,
-            // so the two cannot cross.
-            let mut clients = self.clients.lock().await;
-            let connected = clients
-                .keys()
-                .filter_map(|key| key.cookie_jar.as_ref().map(|(id, _)| id.clone()))
-                .collect::<HashSet<_>>();
-            let unreserved = |jar: &&CookieJar| jar.leases.load(Ordering::Acquire) == 0;
-            let victim = jars
+        let incarnation = self.next_sequence();
+        let last_used = self.next_sequence();
+        let nonce = random_u128()?;
+        let mut registry = self.sessions.lock().await;
+        let engine = registry.engine.ok_or_else(random_source_error)?;
+        let index = loop {
+            if let Some(index) = registry
+                .slots
                 .iter()
-                .filter(|(id, jar)| unreserved(jar) && !connected.contains(*id))
-                .min_by_key(|(_, jar)| jar.sequence)
-                .or_else(|| {
-                    jars.iter()
-                        .filter(|(_, jar)| unreserved(jar))
-                        .min_by_key(|(_, jar)| jar.sequence)
-                })
-                .map(|(id, _)| id.clone());
-            match victim {
-                Some(victim) => {
-                    clients.retain(|key, _| {
-                        !key.cookie_jar.as_ref().is_some_and(|(id, _)| *id == victim)
-                    });
-                    drop(clients);
-                    jars.remove(&victim);
-                }
-                // Every jar is reserved by an active operation. Refusing is the
-                // honest answer; the caller can retry.
-                None => return None,
+                .position(|slot| matches!(slot.state, SlotState::Free))
+            {
+                break index;
             }
-        }
-        let jar = jars
-            .entry(cookies.jar_id.clone())
-            .or_insert_with(|| CookieJar {
+            // A closed session whose last operation has finished: its slot can
+            // move to the next generation now. Leases are released without this
+            // lock, so the count is read here rather than acted on at release.
+            if let Some(index) = registry.slots.iter().position(|slot| {
+                matches!(&slot.state, SlotState::Closing(jar) if jar.leases.load(Ordering::Acquire) == 0)
+            }) {
+                if let Some(incarnation) = registry.end(index) {
+                    self.drop_session_clients(incarnation).await;
+                }
+                continue;
+            }
+            if registry.slots.len() < registry.capacity {
+                registry.slots.push(SessionSlot {
+                    generation: 0,
+                    state: SlotState::Free,
+                });
+                break registry.slots.len() - 1;
+            }
+            // Only a session no operation holds may go: evicting one in use
+            // would split it between the running request and the next one.
+            // Leases are taken and read under this lock, so a zero count here
+            // cannot be stale.
+            let victim = registry
+                .slots
+                .iter()
+                .enumerate()
+                .filter_map(|(index, slot)| match &slot.state {
+                    SlotState::Open(session) if session.jar.leases.load(Ordering::Acquire) == 0 => {
+                        Some((index, session.last_used))
+                    }
+                    _ => None,
+                })
+                .min_by_key(|(_, last_used)| *last_used)
+                .map(|(index, _)| index);
+            let Some(victim) = victim else {
+                return Err(EngineError::PolicyViolation(ErrorDetail::from(
+                    "every cookie session is held by a running operation",
+                )));
+            };
+            if let Some(incarnation) = registry.end(victim) {
+                self.drop_session_clients(incarnation).await;
+            }
+            // A retired slot is skipped by the next iteration; the loop ends
+            // because every iteration either returns, or frees or retires one
+            // of finitely many slots.
+        };
+        let slot = &mut registry.slots[index];
+        slot.state = SlotState::Open(OpenSession {
+            nonce,
+            jar: CookieJar {
                 jar: Arc::new(BoundedJar::default()),
                 leases: Arc::new(AtomicUsize::new(0)),
                 incarnation,
-                sequence,
-            })
-            .clone();
+            },
+            last_used,
+        });
+        Ok(CookieSession {
+            engine,
+            slot: u32::try_from(index).map_err(|_| {
+                EngineError::Runtime(ErrorDetail::from("cookie session slot index overflowed"))
+            })?,
+            generation: slot.generation,
+            nonce,
+        })
+    }
+
+    /// Closes the session `handle` names.
+    ///
+    /// The handle, and every copy of it, is refused for new requests from now
+    /// on. Operations already admitted keep the jar they were admitted with
+    /// until they finish; the slot is freed and moves to its next generation
+    /// only after the last of them has released it, so a closed session is
+    /// never handed to a new one while still in use. Closing a handle that is
+    /// already stale is an error rather than a no-op, so a caller that lost
+    /// track of a session finds out.
+    pub async fn close_cookie_session(&self, handle: &CookieSession) -> Result<(), EngineError> {
+        let mut registry = self.sessions.lock().await;
+        let session = registry.resolve(handle).map_err(session_refusal_error)?;
+        let held = session.jar.leases.load(Ordering::Acquire) > 0;
+        let incarnation = session.jar.incarnation;
+        let index = usize::try_from(handle.slot).map_err(|_| {
+            EngineError::Runtime(ErrorDetail::from("cookie session slot index overflowed"))
+        })?;
+        if held {
+            let slot = &mut registry.slots[index];
+            slot.state = match std::mem::replace(&mut slot.state, SlotState::Free) {
+                SlotState::Open(session) => SlotState::Closing(session.jar),
+                other => other,
+            };
+            // Idle pooled clients go now; one built by an operation still in
+            // flight is removed when the slot is reclaimed.
+            self.drop_session_clients(incarnation).await;
+        } else if let Some(incarnation) = registry.end(index) {
+            self.drop_session_clients(incarnation).await;
+        }
+        Ok(())
+    }
+
+    /// Removes the pooled clients built on a session that ended.
+    ///
+    /// Called with the session registry locked; locks are always taken
+    /// sessions then clients, as in `client_for`, so the two cannot cross.
+    async fn drop_session_clients(&self, incarnation: u64) {
+        self.clients
+            .lock()
+            .await
+            .retain(|key, _| key.cookie_jar != Some(incarnation));
+    }
+
+    /// Reserves the session this request needs, before any step that can reach
+    /// the network.
+    ///
+    /// Doing this up front is what keeps the error honest: refusing later, from
+    /// `client_for`, would report a policy violation with no remote effect after
+    /// an OAuth token had already been fetched. The returned lease keeps the
+    /// session from being evicted while this operation authenticates and
+    /// resolves DNS.
+    ///
+    /// The jar resolved here is the one the whole operation uses: it is stored
+    /// in the request and `client_for` never resolves the handle again, so a
+    /// session closed while the operation is in flight cannot turn into a
+    /// refusal after network activity has already happened.
+    async fn admit_cookie_jar(
+        &self,
+        request: &mut PreparedRequest,
+    ) -> Result<Option<JarLease>, EngineError> {
+        // A follow-up whose cookies were stripped still belongs to the caller's
+        // session: it must not run once that session has ended.
+        if request.cookies.session.is_none() {
+            self.check_cookie_session(request.caller_session.as_ref())
+                .await?;
+        }
+        Ok(match self.cookie_jar(&request.cookies).await? {
+            Some((jar, lease)) => {
+                request.admitted_jar = Some(jar);
+                Some(lease)
+            }
+            None => None,
+        })
+    }
+
+    /// The jar of the session `cookies` names, with a lease that keeps the
+    /// session from being evicted while the caller holds it.
+    ///
+    /// `Ok(None)` when the request uses no session. A stale handle, or one from
+    /// another engine, fails: the session it named is gone, and an empty one in
+    /// its place would quietly log the caller out.
+    async fn cookie_jar(
+        &self,
+        cookies: &CookiePolicy,
+    ) -> Result<Option<(CookieJar, JarLease)>, EngineError> {
+        let Some(handle) = &cookies.session else {
+            return Ok(None);
+        };
+        let last_used = self.next_sequence();
+        let mut registry = self.sessions.lock().await;
+        let session = registry.resolve(handle).map_err(session_refusal_error)?;
+        session.last_used = last_used;
+        let jar = session.jar.clone();
         jar.leases.fetch_add(1, Ordering::Acquire);
         let lease = JarLease {
             leases: jar.leases.clone(),
         };
-        Some((jar, lease))
+        Ok(Some((jar, lease)))
+    }
+
+    /// Refuses a handle that is stale, foreign, or used on an engine without a
+    /// cookie store. `None` is accepted: the request names no session.
+    pub async fn check_cookie_session(
+        &self,
+        session: Option<&CookieSession>,
+    ) -> Result<(), EngineError> {
+        let Some(handle) = session else {
+            return Ok(());
+        };
+        if !self.config.allow_cookie_store {
+            return Err(EngineError::PolicyViolation(ErrorDetail::from(
+                "cookie storage is not enabled for this engine",
+            )));
+        }
+        self.sessions
+            .lock()
+            .await
+            .resolve(handle)
+            .map(|_| ())
+            .map_err(session_refusal_error)
     }
 
     /// Monotonic counter that gives every pooled entry a deterministic
@@ -496,7 +724,7 @@ impl Transport {
 
     pub async fn execute(&self, mut request: PreparedRequest) -> Result<ResponseData, EngineError> {
         self.validate_request(&request)?;
-        let _jar_lease = self.admit_cookie_jar(&request.cookies).await?;
+        let _jar_lease = self.admit_cookie_jar(&mut request).await?;
         let auth_stats = self.resolve_auth(&mut request).await?;
 
         let mut response = self.execute_cached(&request).await?;
@@ -518,12 +746,12 @@ impl Transport {
         success_statuses: &[u16],
     ) -> Result<DownloadData, EngineError> {
         self.validate_request(&request)?;
-        let _jar_lease = self.admit_cookie_jar(&request.cookies).await?;
+        let _jar_lease = self.admit_cookie_jar(&mut request).await?;
         if target.resume {
             if request.method != HttpMethod::Get {
-                return Err(EngineError::InvalidInput(
-                    "resumable downloads require the GET method".to_owned(),
-                ));
+                return Err(EngineError::InvalidInput(ErrorDetail::from(
+                    "resumable downloads require the GET method",
+                )));
             }
             if request
                 .headers
@@ -534,9 +762,9 @@ impl Transport {
                     .keys()
                     .any(|name| name.eq_ignore_ascii_case(IF_RANGE.as_str()))
             {
-                return Err(EngineError::InvalidInput(
-                    "managed resume cannot be combined with Range or If-Range headers".to_owned(),
-                ));
+                return Err(EngineError::InvalidInput(ErrorDetail::from(
+                    "managed resume cannot be combined with Range or If-Range headers",
+                )));
             }
             set_request_header(
                 &mut request.headers,
@@ -567,9 +795,8 @@ impl Transport {
                 .iter()
                 .any(|allowed| allowed == request.method.as_str())
         {
-            return Err(EngineError::PolicyViolation(format!(
-                "custom HTTP method '{}' is not in allowed_custom_methods",
-                request.method.as_str()
+            return Err(EngineError::PolicyViolation(ErrorDetail::from(
+                "custom HTTP method is not in allowed_custom_methods",
             )));
         }
         // Refused rather than approximated, and refused here so that a request
@@ -582,22 +809,15 @@ impl Transport {
         // computed, and cookies expire on their own with nothing to observe.
         // Keying the cache on a snapshot of the jar would therefore describe a
         // session that may not be the one that answered.
-        if request.cookies.enabled && request.cache.enabled {
-            return Err(EngineError::PolicyViolation(
-                "the HTTP cache cannot be combined with the cookie store".to_owned(),
-            ));
+        if request.cookies.is_enabled() && request.cache.enabled {
+            return Err(EngineError::PolicyViolation(ErrorDetail::from(
+                "the HTTP cache cannot be combined with the cookie store",
+            )));
         }
-        if request.cookies.enabled {
-            if !self.config.allow_cookie_store {
-                return Err(EngineError::PolicyViolation(
-                    "cookie storage is not enabled for this engine".to_owned(),
-                ));
-            }
-            if request.cookies.jar_id.trim().is_empty() {
-                return Err(EngineError::InvalidInput(
-                    "cookie jar_id cannot be empty".to_owned(),
-                ));
-            }
+        if request.cookies.is_enabled() && !self.config.allow_cookie_store {
+            return Err(EngineError::PolicyViolation(ErrorDetail::from(
+                "cookie storage is not enabled for this engine",
+            )));
         }
         Ok(())
     }
@@ -625,21 +845,21 @@ impl Transport {
             return self.execute_with_circuit(request).await;
         }
         if !matches!(request.method, HttpMethod::Get | HttpMethod::Head) {
-            return Err(EngineError::InvalidInput(
-                "HTTP cache is supported only for GET and HEAD".to_owned(),
-            ));
+            return Err(EngineError::InvalidInput(ErrorDetail::from(
+                "HTTP cache is supported only for GET and HEAD",
+            )));
         }
         if self.config.max_cache_entries == 0 || self.config.max_cache_bytes == 0 {
-            return Err(EngineError::PolicyViolation(
-                "HTTP cache capacity is disabled by this engine".to_owned(),
-            ));
+            return Err(EngineError::PolicyViolation(ErrorDetail::from(
+                "HTTP cache capacity is disabled by this engine",
+            )));
         }
         // Defensive: `validate_request` already refused this combination before
         // anything reached the network.
-        if request.cookies.enabled {
-            return Err(EngineError::PolicyViolation(
-                "the HTTP cache cannot be combined with the cookie store".to_owned(),
-            ));
+        if request.cookies.is_enabled() {
+            return Err(EngineError::PolicyViolation(ErrorDetail::from(
+                "the HTTP cache cannot be combined with the cookie store",
+            )));
         }
         // A client certificate authenticates the request just as much as a
         // bearer token does, so caching it needs the same explicit opt-in.
@@ -648,12 +868,12 @@ impl Transport {
                 .headers
                 .keys()
                 .any(|name| name.eq_ignore_ascii_case("authorization"))
-            || request.cookies.enabled
+            || request.cookies.is_enabled()
             || request.tls.client_identity_pem.is_some();
         if authenticated && !request.cache.allow_authenticated {
-            return Err(EngineError::PolicyViolation(
-                "authenticated HTTP caching requires allow_authenticated".to_owned(),
-            ));
+            return Err(EngineError::PolicyViolation(ErrorDetail::from(
+                "authenticated HTTP caching requires allow_authenticated",
+            )));
         }
 
         let key = cache_key(request)?;
@@ -786,19 +1006,19 @@ impl Transport {
             return Ok(None);
         }
         if policy.failure_threshold == 0 {
-            return Err(EngineError::InvalidInput(
-                "circuit breaker failure_threshold must be greater than zero".to_owned(),
-            ));
+            return Err(EngineError::InvalidInput(ErrorDetail::from(
+                "circuit breaker failure_threshold must be greater than zero",
+            )));
         }
         if policy.group.trim().is_empty() {
-            return Err(EngineError::InvalidInput(
-                "circuit breaker group cannot be empty".to_owned(),
-            ));
+            return Err(EngineError::InvalidInput(ErrorDetail::from(
+                "circuit breaker group cannot be empty",
+            )));
         }
         if self.config.max_circuit_origins == 0 {
-            return Err(EngineError::PolicyViolation(
-                "circuit breaker state is disabled by this engine".to_owned(),
-            ));
+            return Err(EngineError::PolicyViolation(ErrorDetail::from(
+                "circuit breaker state is disabled by this engine",
+            )));
         }
         let key = CircuitKey {
             origin: request.url.origin().ascii_serialization(),
@@ -853,7 +1073,7 @@ impl Transport {
                 .half_open_probe
                 .is_some_and(|(_, started)| started.elapsed() < probe_lease);
             if opened_at.elapsed() < recovery || probing {
-                return Err(EngineError::CircuitOpen { origin: key.origin });
+                return Err(EngineError::CircuitOpen);
             }
             let generation = self.next_sequence();
             state.half_open_probe = Some((generation, Instant::now()));
@@ -951,9 +1171,9 @@ impl Transport {
             }
         }
 
-        Err(EngineError::Runtime(
-            "retry loop terminated unexpectedly".to_owned(),
-        ))
+        Err(EngineError::Runtime(ErrorDetail::from(
+            "retry loop terminated unexpectedly",
+        )))
     }
 
     async fn download_with_circuit(
@@ -990,9 +1210,8 @@ impl Transport {
         success_statuses: &[u16],
     ) -> Result<DownloadData, EngineError> {
         if !target.overwrite && fs::try_exists(&target.path).await.map_err(file_io)? {
-            return Err(EngineError::FileIo(format!(
-                "destination '{}' already exists",
-                target.path.display()
+            return Err(EngineError::FileIo(ErrorDetail::from(
+                "destination already exists",
             )));
         }
         let mut state = create_download_state(&target.path).await?;
@@ -1084,9 +1303,9 @@ impl Transport {
             }
         }
 
-        Err(EngineError::Runtime(
-            "download retry loop terminated unexpectedly".to_owned(),
-        ))
+        Err(EngineError::Runtime(ErrorDetail::from(
+            "download retry loop terminated unexpectedly",
+        )))
     }
 
     async fn oauth_token(
@@ -1122,8 +1341,9 @@ impl Transport {
             return Ok((token, RequestStats::default()));
         }
 
-        let url = Url::parse(&token_url)
-            .map_err(|error| EngineError::InvalidUrl(format!("OAuth token URL: {error}")))?;
+        let url = Url::parse(&token_url).map_err(|_| {
+            EngineError::InvalidUrl(ErrorDetail::from("OAuth token URL is invalid"))
+        })?;
         let token_request = PreparedRequest {
             url,
             method: HttpMethod::Post,
@@ -1139,6 +1359,8 @@ impl Transport {
                 ..RetryPolicy::default()
             },
             cookies: CookiePolicy::default(),
+            admitted_jar: None,
+            caller_session: None,
             cache: CachePolicy::default(),
             circuit_breaker: CircuitBreakerPolicy::default(),
             requests_per_second: original.requests_per_second,
@@ -1152,19 +1374,18 @@ impl Transport {
             rate_limit_wait_ms: response.rate_limit_wait_ms,
         };
         if !(200..300).contains(&response.status) {
-            return Err(EngineError::Authentication(format!(
-                "token endpoint returned HTTP {}",
-                response.status
+            return Err(EngineError::Authentication(ErrorDetail::from(
+                "token endpoint returned an unsuccessful HTTP status",
             )));
         }
 
         let payload: Value = serde_json::from_slice(&response.body).map_err(|_| {
-            EngineError::Authentication("token endpoint returned invalid JSON".to_owned())
+            EngineError::Authentication(ErrorDetail::from("token endpoint returned invalid JSON"))
         })?;
         if is_arcgis && payload.get("error").is_some() {
-            return Err(EngineError::Authentication(
-                "ArcGIS token endpoint returned an error".to_owned(),
-            ));
+            return Err(EngineError::Authentication(ErrorDetail::from(
+                "ArcGIS token endpoint returned an error",
+            )));
         }
         let token_field = if is_arcgis { "token" } else { "access_token" };
         let token = payload
@@ -1172,7 +1393,7 @@ impl Transport {
             .and_then(Value::as_str)
             .filter(|token| !token.is_empty())
             .ok_or_else(|| {
-                EngineError::Authentication(format!("token response has no {token_field}"))
+                EngineError::Authentication(ErrorDetail::from("token response has no token field"))
             })?
             .to_owned();
         if !is_arcgis
@@ -1181,9 +1402,9 @@ impl Transport {
                 .and_then(Value::as_str)
                 .is_some_and(|token_type| !token_type.eq_ignore_ascii_case("bearer"))
         {
-            return Err(EngineError::Authentication(
-                "only bearer OAuth tokens are supported".to_owned(),
-            ));
+            return Err(EngineError::Authentication(ErrorDetail::from(
+                "only bearer OAuth tokens are supported",
+            )));
         }
         let expires_in = if is_arcgis {
             payload
@@ -1248,7 +1469,7 @@ impl Transport {
 
         for redirects in 0..=request.max_redirects {
             let client = self
-                .client_for(&url, &request.tls, request.proxy.as_ref(), &request.cookies)
+                .client_for(&url, &request.tls, request.proxy.as_ref(), request)
                 .await?;
             let headers = request_headers(request)?;
             let mut request_url = url.clone();
@@ -1267,9 +1488,9 @@ impl Transport {
                 AuthConfig::OAuth2ClientCredentials { .. }
                 | AuthConfig::OAuth2Password { .. }
                 | AuthConfig::ArcgisToken { .. } => {
-                    return Err(EngineError::Runtime(
-                        "OAuth authentication was not resolved".to_owned(),
-                    ));
+                    return Err(EngineError::Runtime(ErrorDetail::from(
+                        "OAuth authentication was not resolved",
+                    )));
                 }
             };
             builder = match &request.body {
@@ -1289,32 +1510,31 @@ impl Transport {
             let response = builder.send().await.map_err(map_reqwest_error)?;
             if response.status().is_redirection() && request.allow_redirects {
                 if redirects == request.max_redirects {
-                    return Err(EngineError::InvalidResponse(format!(
-                        "redirect limit ({}) exceeded",
-                        request.max_redirects
+                    return Err(EngineError::InvalidResponse(ErrorDetail::from(
+                        "redirect limit exceeded",
                     )));
                 }
                 let location = response
                     .headers()
                     .get(LOCATION)
                     .ok_or_else(|| {
-                        EngineError::InvalidResponse(
-                            "redirect response has no Location header".to_owned(),
-                        )
+                        EngineError::InvalidResponse(ErrorDetail::from(
+                            "redirect response has no Location header",
+                        ))
                     })?
                     .to_str()
                     .map_err(|_| {
-                        EngineError::InvalidResponse(
-                            "redirect Location is not valid text".to_owned(),
-                        )
+                        EngineError::InvalidResponse(ErrorDetail::from(
+                            "redirect Location is not valid text",
+                        ))
                     })?;
-                let next = url.join(location).map_err(|error| {
-                    EngineError::InvalidUrl(format!("invalid redirect target: {error}"))
+                let next = url.join(location).map_err(|_| {
+                    EngineError::InvalidUrl(ErrorDetail::from("invalid redirect target"))
                 })?;
                 if !same_origin(&origin, &next) {
-                    return Err(EngineError::UnsafeAddress(
-                        "cross-origin redirects are blocked".to_owned(),
-                    ));
+                    return Err(EngineError::UnsafeAddress(ErrorDetail::from(
+                        "cross-origin redirects are blocked",
+                    )));
                 }
                 url = next;
                 continue;
@@ -1329,9 +1549,9 @@ impl Transport {
             });
         }
 
-        Err(EngineError::Runtime(
-            "redirect loop terminated unexpectedly".to_owned(),
-        ))
+        Err(EngineError::Runtime(ErrorDetail::from(
+            "redirect loop terminated unexpectedly",
+        )))
     }
 
     async fn read_response(&self, pending: PendingResponse) -> Result<ResponseData, EngineError> {
@@ -1406,8 +1626,8 @@ impl Transport {
             return Err(EngineError::HttpStatus { status });
         }
         if resumed && !matches!(status, 200 | 206) {
-            return Err(EngineError::InvalidResponse(format!(
-                "resumed download returned HTTP {status}; expected 200 or 206"
+            return Err(EngineError::InvalidResponse(ErrorDetail::from(
+                "resumed download returned a status other than 200 or 206",
             )));
         }
         let content_length = response_content_length(&response);
@@ -1420,39 +1640,38 @@ impl Transport {
                 .checked_sub(content_range.start)
                 .and_then(|length| length.checked_add(1))
                 .ok_or_else(|| {
-                    EngineError::InvalidResponse(
-                        "download Content-Range has invalid bounds".to_owned(),
-                    )
+                    EngineError::InvalidResponse(ErrorDetail::from(
+                        "download Content-Range has invalid bounds",
+                    ))
                 })?;
             if content_length.is_some_and(|length| length != segment_length) {
-                return Err(EngineError::InvalidResponse(
-                    "download Content-Length does not match Content-Range".to_owned(),
-                ));
+                return Err(EngineError::InvalidResponse(ErrorDetail::from(
+                    "download Content-Length does not match Content-Range",
+                )));
             }
             if resumed {
                 if content_range.start != state.bytes_written {
-                    return Err(EngineError::InvalidResponse(format!(
-                        "resumed download started at byte {}, expected {}",
-                        content_range.start, state.bytes_written
+                    return Err(EngineError::InvalidResponse(ErrorDetail::from(
+                        "resumed download started at an unexpected byte",
                     )));
                 }
                 if response_etag.as_deref() != state.etag.as_deref() {
-                    return Err(EngineError::InvalidResponse(
-                        "resumed download returned a missing or different strong ETag".to_owned(),
-                    ));
+                    return Err(EngineError::InvalidResponse(ErrorDetail::from(
+                        "resumed download returned a missing or different strong ETag",
+                    )));
                 }
                 if state
                     .expected_total
                     .is_some_and(|expected| expected != total)
                 {
-                    return Err(EngineError::InvalidResponse(
-                        "resumed download changed the complete representation length".to_owned(),
-                    ));
+                    return Err(EngineError::InvalidResponse(ErrorDetail::from(
+                        "resumed download changed the complete representation length",
+                    )));
                 }
             } else if content_range.start != 0 || content_range.end.checked_add(1) != Some(total) {
-                return Err(EngineError::InvalidResponse(
-                    "partial response cannot be promoted as a complete download".to_owned(),
-                ));
+                return Err(EngineError::InvalidResponse(ErrorDetail::from(
+                    "partial response cannot be promoted as a complete download",
+                )));
             } else {
                 state.etag = response_etag;
             }
@@ -1477,7 +1696,7 @@ impl Transport {
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(map_reqwest_error)?;
             let chunk_length = u64::try_from(chunk.len()).map_err(|_| {
-                EngineError::Runtime("download chunk length overflowed u64".to_owned())
+                EngineError::Runtime(ErrorDetail::from("download chunk length overflowed u64"))
             })?;
             if state.bytes_written.saturating_add(chunk_length) > target.max_bytes {
                 return Err(EngineError::FileTooLarge {
@@ -1487,7 +1706,9 @@ impl Transport {
             state
                 .file
                 .as_mut()
-                .ok_or_else(|| EngineError::Runtime("download staging file is closed".to_owned()))?
+                .ok_or_else(|| {
+                    EngineError::Runtime(ErrorDetail::from("download staging file is closed"))
+                })?
                 .write_all(&chunk)
                 .await
                 .map_err(file_io)?;
@@ -1497,19 +1718,18 @@ impl Transport {
         }
         let attempt_bytes = state.bytes_written.saturating_sub(attempt_start);
         if content_length.is_some_and(|length| length != attempt_bytes) {
-            return Err(EngineError::InvalidResponse(
-                "download body length does not match Content-Length".to_owned(),
-            ));
+            return Err(EngineError::InvalidResponse(ErrorDetail::from(
+                "download body length does not match Content-Length",
+            )));
         }
         if expected_total.is_some_and(|total| state.bytes_written != total) {
-            return Err(EngineError::InvalidResponse(
-                "download body length does not match the complete representation".to_owned(),
-            ));
+            return Err(EngineError::InvalidResponse(ErrorDetail::from(
+                "download body length does not match the complete representation",
+            )));
         }
-        let file = state
-            .file
-            .as_mut()
-            .ok_or_else(|| EngineError::Runtime("download staging file is closed".to_owned()))?;
+        let file = state.file.as_mut().ok_or_else(|| {
+            EngineError::Runtime(ErrorDetail::from("download staging file is closed"))
+        })?;
         file.flush().await.map_err(file_io)?;
         file.sync_all().await.map_err(file_io)?;
         drop(state.file.take());
@@ -1517,10 +1737,7 @@ impl Transport {
         let sha256 = format!("{:x}", state.digest.clone().finalize());
         if let Some(expected) = &target.expected_sha256 {
             if !sha256.eq_ignore_ascii_case(expected) {
-                return Err(EngineError::ChecksumMismatch {
-                    expected: expected.clone(),
-                    actual: sha256,
-                });
+                return Err(EngineError::ChecksumMismatch);
             }
         }
         persist_download(&state.temporary, &target.path, target.overwrite).await?;
@@ -1567,7 +1784,7 @@ impl Transport {
             .clone()
             .acquire_owned()
             .await
-            .map_err(|_| EngineError::Runtime("request limiter is closed".to_owned()))?;
+            .map_err(|_| EngineError::Runtime(ErrorDetail::from("request limiter is closed")))?;
         Ok((permit, wait.as_millis().min(u128::from(u64::MAX)) as u64))
     }
 
@@ -1576,44 +1793,48 @@ impl Transport {
         url: &Url,
         tls: &TlsConfig,
         proxy: Option<&ProxyConfig>,
-        cookies: &CookiePolicy,
+        request: &PreparedRequest,
     ) -> Result<Client, EngineError> {
         if !tls.verify && !self.config.allow_insecure_tls {
-            return Err(EngineError::PolicyViolation(
-                "TLS verification cannot be disabled by this engine".to_owned(),
-            ));
+            return Err(EngineError::PolicyViolation(ErrorDetail::from(
+                "TLS verification cannot be disabled by this engine",
+            )));
         }
         if proxy.is_some() && !self.config.allow_proxies {
-            return Err(EngineError::PolicyViolation(
-                "proxies are not enabled for this engine".to_owned(),
-            ));
+            return Err(EngineError::PolicyViolation(ErrorDetail::from(
+                "proxies are not enabled for this engine",
+            )));
         }
 
         let (host, address, should_pin, port) = self.resolve_endpoint(url).await?;
         let proxy_endpoint = match proxy {
             Some(proxy) => {
-                let url = Url::parse(&proxy.url)
-                    .map_err(|_| EngineError::InvalidInput("invalid proxy URL".to_owned()))?;
+                let url = Url::parse(&proxy.url).map_err(|_| {
+                    EngineError::InvalidInput(ErrorDetail::from("invalid proxy URL"))
+                })?;
                 Some((proxy, url.clone(), self.resolve_endpoint(&url).await?))
             }
             None => None,
         };
-        // The lease is redundant here — the operation that asked for this client
-        // already holds one for the same `jar_id` — but holding it costs nothing
-        // and keeps this lookup correct on its own.
-        let leased = self.cookie_jar(cookies).await;
-        let jar = leased.as_ref().map(|(jar, _)| jar);
-        if cookies.enabled && jar.is_none() {
-            return Err(EngineError::PolicyViolation(
-                "the engine is holding the maximum number of cookie jars".to_owned(),
-            ));
-        }
+        // The jar admitted with the operation, never a fresh resolution of the
+        // handle: the operation's lease keeps it alive, and resolving again
+        // here could refuse a session closed in the meantime after an OAuth
+        // token had already been fetched.
+        let jar = match (&request.cookies.session, &request.admitted_jar) {
+            (None, _) => None,
+            (Some(_), Some(jar)) => Some(jar),
+            (Some(_), None) => {
+                return Err(EngineError::Runtime(ErrorDetail::from(
+                    "a cookie session was used without being admitted",
+                )));
+            }
+        };
         let key = ClientKey {
             host: host.clone(),
             port,
             address,
             policy_fingerprint: fingerprint(&(tls, proxy)),
-            cookie_jar: jar.map(|jar| (cookies.jar_id.clone(), jar.incarnation)),
+            cookie_jar: jar.map(|jar| jar.incarnation),
         };
         if let Some(pooled) = self.clients.lock().await.get(&key) {
             return Ok(pooled.client.clone());
@@ -1636,13 +1857,14 @@ impl Transport {
             builder = builder.danger_accept_invalid_certs(true);
         }
         if let Some(pem) = &tls.ca_bundle_pem {
-            let certificate = Certificate::from_pem(pem.as_bytes())
-                .map_err(|_| EngineError::InvalidInput("invalid TLS CA bundle PEM".to_owned()))?;
+            let certificate = Certificate::from_pem(pem.as_bytes()).map_err(|_| {
+                EngineError::InvalidInput(ErrorDetail::from("invalid TLS CA bundle PEM"))
+            })?;
             builder = builder.add_root_certificate(certificate);
         }
         if let Some(pem) = &tls.client_identity_pem {
             let identity = Identity::from_pem(pem.as_bytes()).map_err(|_| {
-                EngineError::InvalidInput("invalid TLS client identity PEM".to_owned())
+                EngineError::InvalidInput(ErrorDetail::from("invalid TLS client identity PEM"))
             })?;
             builder = builder.identity(identity);
         }
@@ -1653,15 +1875,15 @@ impl Transport {
             proxy_endpoint
         {
             let mut configured = Proxy::all(&config.url)
-                .map_err(|_| EngineError::InvalidInput("invalid proxy URL".to_owned()))?;
+                .map_err(|_| EngineError::InvalidInput(ErrorDetail::from("invalid proxy URL")))?;
             match (&config.username, &config.password) {
                 (Some(username), password) => {
                     configured = configured.basic_auth(username, password.as_deref().unwrap_or(""));
                 }
                 (None, Some(_)) => {
-                    return Err(EngineError::InvalidInput(
-                        "proxy password requires a username".to_owned(),
-                    ));
+                    return Err(EngineError::InvalidInput(ErrorDetail::from(
+                        "proxy password requires a username",
+                    )));
                 }
                 (None, None) => {}
             }
@@ -1670,9 +1892,9 @@ impl Transport {
                 builder = builder.resolve(&proxy_host, SocketAddr::new(proxy_address, proxy_port));
             }
         }
-        let client = builder
-            .build()
-            .map_err(|error| EngineError::Runtime(error.to_string()))?;
+        let client = builder.build().map_err(|_| {
+            EngineError::Runtime(ErrorDetail::from("HTTP client could not be built"))
+        })?;
         if self.config.max_pooled_origins > 0 {
             let sequence = self.next_sequence();
             let mut clients = self.clients.lock().await;
@@ -1703,10 +1925,10 @@ impl Transport {
         validate_url(url)?;
         let port = url
             .port_or_known_default()
-            .ok_or_else(|| EngineError::InvalidUrl("URL has no usable port".to_owned()))?;
+            .ok_or_else(|| EngineError::InvalidUrl(ErrorDetail::from("URL has no usable port")))?;
         let (host, address, should_pin) = match url
             .host()
-            .ok_or_else(|| EngineError::InvalidUrl("URL must include a host".to_owned()))?
+            .ok_or_else(|| EngineError::InvalidUrl(ErrorDetail::from("URL must include a host")))?
         {
             Host::Ipv4(address) => {
                 let address = IpAddr::V4(address);
@@ -1721,12 +1943,14 @@ impl Transport {
             Host::Domain(domain) => {
                 let addresses: Vec<IpAddr> = lookup_host((domain, port))
                     .await
-                    .map_err(|error| EngineError::DnsResolution(format!("{domain}: {error}")))?
+                    .map_err(|_| {
+                        EngineError::DnsResolution(ErrorDetail::from("DNS resolution failed"))
+                    })?
                     .map(|socket| socket.ip())
                     .collect();
                 if addresses.is_empty() {
-                    return Err(EngineError::DnsResolution(format!(
-                        "{domain}: no addresses returned"
+                    return Err(EngineError::DnsResolution(ErrorDetail::from(
+                        "no addresses returned",
                     )));
                 }
                 for address in &addresses {
@@ -1742,20 +1966,22 @@ impl Transport {
         if self.config.allow_private_networks || is_public_address(address) {
             return Ok(());
         }
-        Err(EngineError::UnsafeAddress(address.to_string()))
+        Err(EngineError::UnsafeAddress(ErrorDetail::from(
+            "the resolved address is private, loopback, or otherwise not public",
+        )))
     }
 }
 
 fn validate_url(url: &Url) -> Result<(), EngineError> {
     if !matches!(url.scheme(), "http" | "https") {
-        return Err(EngineError::InvalidUrl(
-            "only http and https URLs are supported".to_owned(),
-        ));
+        return Err(EngineError::InvalidUrl(ErrorDetail::from(
+            "only http and https URLs are supported",
+        )));
     }
     if !url.username().is_empty() || url.password().is_some() {
-        return Err(EngineError::InvalidUrl(
-            "credentials embedded in URLs are not allowed".to_owned(),
-        ));
+        return Err(EngineError::InvalidUrl(ErrorDetail::from(
+            "credentials embedded in URLs are not allowed",
+        )));
     }
     Ok(())
 }
@@ -1769,9 +1995,10 @@ fn request_headers(request: &PreparedRequest) -> Result<HeaderMap, EngineError> 
     let mut headers = HeaderMap::new();
     for (name, value) in &request.headers {
         let name = HeaderName::from_bytes(name.as_bytes())
-            .map_err(|_| EngineError::InvalidHeader(name.clone()))?;
-        let value = HeaderValue::from_str(value)
-            .map_err(|_| EngineError::InvalidHeader(name.to_string()))?;
+            .map_err(|_| EngineError::InvalidHeader(ErrorDetail::from("header name is invalid")))?;
+        let value = HeaderValue::from_str(value).map_err(|_| {
+            EngineError::InvalidHeader(ErrorDetail::from("header value is invalid"))
+        })?;
         headers.insert(name, value);
     }
 
@@ -1781,27 +2008,29 @@ fn request_headers(request: &PreparedRequest) -> Result<HeaderMap, EngineError> 
         location: ApiKeyLocation::Header,
     } = &request.auth
     {
-        let name = HeaderName::from_bytes(key_name.as_bytes())
-            .map_err(|_| EngineError::InvalidHeader(key_name.clone()))?;
-        let value = HeaderValue::from_str(key_value)
-            .map_err(|_| EngineError::InvalidHeader(key_name.clone()))?;
+        let name = HeaderName::from_bytes(key_name.as_bytes()).map_err(|_| {
+            EngineError::InvalidHeader(ErrorDetail::from("API key header name is invalid"))
+        })?;
+        let value = HeaderValue::from_str(key_value).map_err(|_| {
+            EngineError::InvalidHeader(ErrorDetail::from("API key header value is invalid"))
+        })?;
         headers.insert(name, value);
     }
 
     if matches!(request.body, PreparedBody::Multipart { .. }) && headers.contains_key(CONTENT_TYPE)
     {
-        return Err(EngineError::InvalidHeader(
-            "Content-Type must be generated by the multipart encoder".to_owned(),
-        ));
+        return Err(EngineError::InvalidHeader(ErrorDetail::from(
+            "Content-Type must be generated by the multipart encoder",
+        )));
     }
     if matches!(
         request.body,
         PreparedBody::Multipart { .. } | PreparedBody::Stream(_)
     ) && headers.contains_key(CONTENT_LENGTH)
     {
-        return Err(EngineError::InvalidHeader(
-            "Content-Length must be generated by the streaming encoder".to_owned(),
-        ));
+        return Err(EngineError::InvalidHeader(ErrorDetail::from(
+            "Content-Length must be generated by the streaming encoder",
+        )));
     }
     if !headers.contains_key(CONTENT_TYPE) {
         let content_type = match &request.body {
@@ -1813,7 +2042,7 @@ fn request_headers(request: &PreparedRequest) -> Result<HeaderMap, EngineError> 
         };
         if let Some(content_type) = content_type {
             let content_type = HeaderValue::from_str(content_type)
-                .map_err(|_| EngineError::InvalidHeader("content-type".to_owned()))?;
+                .map_err(|_| EngineError::InvalidHeader(ErrorDetail::from("content-type")))?;
             headers.insert(CONTENT_TYPE, content_type);
         }
     }
@@ -1851,10 +2080,7 @@ async fn multipart_form(
         let mut part = part.file_name(file.filename.clone());
         if let Some(content_type) = &file.content_type {
             part = part.mime_str(content_type).map_err(|_| {
-                EngineError::InvalidInput(format!(
-                    "invalid multipart content type for '{}'",
-                    file.field_name
-                ))
+                EngineError::InvalidInput(ErrorDetail::from("invalid multipart content type"))
             })?;
         }
         form = form.part(file.field_name.clone(), part);
@@ -1928,43 +2154,54 @@ fn satisfied_content_range(response: &reqwest::Response) -> Result<ContentRange,
         .headers()
         .get(CONTENT_RANGE)
         .ok_or_else(|| {
-            EngineError::InvalidResponse("206 response has no Content-Range header".to_owned())
+            EngineError::InvalidResponse(ErrorDetail::from(
+                "206 response has no Content-Range header",
+            ))
         })?
         .to_str()
         .map_err(|_| {
-            EngineError::InvalidResponse("download Content-Range is not valid text".to_owned())
+            EngineError::InvalidResponse(ErrorDetail::from(
+                "download Content-Range is not valid text",
+            ))
         })?;
     let (unit, range_and_total) = value.trim().split_once(' ').ok_or_else(|| {
-        EngineError::InvalidResponse("download Content-Range is malformed".to_owned())
+        EngineError::InvalidResponse(ErrorDetail::from("download Content-Range is malformed"))
     })?;
     if !unit.eq_ignore_ascii_case("bytes") {
-        return Err(EngineError::InvalidResponse(
-            "download Content-Range must use byte units".to_owned(),
-        ));
+        return Err(EngineError::InvalidResponse(ErrorDetail::from(
+            "download Content-Range must use byte units",
+        )));
     }
     let (range, total) = range_and_total.split_once('/').ok_or_else(|| {
-        EngineError::InvalidResponse("download Content-Range is malformed".to_owned())
+        EngineError::InvalidResponse(ErrorDetail::from("download Content-Range is malformed"))
     })?;
     let (start, end) = range.split_once('-').ok_or_else(|| {
-        EngineError::InvalidResponse(
-            "download Content-Range does not describe a satisfied range".to_owned(),
-        )
+        EngineError::InvalidResponse(ErrorDetail::from(
+            "download Content-Range does not describe a satisfied range",
+        ))
     })?;
     let start = start.parse::<u64>().map_err(|_| {
-        EngineError::InvalidResponse("download Content-Range start is invalid".to_owned())
+        EngineError::InvalidResponse(ErrorDetail::from("download Content-Range start is invalid"))
     })?;
     let end = end.parse::<u64>().map_err(|_| {
-        EngineError::InvalidResponse("download Content-Range end is invalid".to_owned())
+        EngineError::InvalidResponse(ErrorDetail::from("download Content-Range end is invalid"))
     })?;
     let total = total.parse::<u64>().map_err(|_| {
-        EngineError::InvalidResponse("download Content-Range total is invalid".to_owned())
+        EngineError::InvalidResponse(ErrorDetail::from("download Content-Range total is invalid"))
     })?;
     if start > end || end >= total {
-        return Err(EngineError::InvalidResponse(
-            "download Content-Range bounds are invalid".to_owned(),
-        ));
+        return Err(EngineError::InvalidResponse(ErrorDetail::from(
+            "download Content-Range bounds are invalid",
+        )));
     }
     Ok(ContentRange { start, end, total })
+}
+
+fn session_refusal_error(refusal: SessionRefusal) -> EngineError {
+    EngineError::PolicyViolation(ErrorDetail::from(match refusal {
+        SessionRefusal::ForeignEngine => "the cookie session handle was issued by another engine",
+        SessionRefusal::Stale => "the cookie session was closed or evicted; open a new session",
+    }))
 }
 
 fn download_temporary_path(target: &Path) -> PathBuf {
@@ -1980,7 +2217,10 @@ fn download_temporary_path(target: &Path) -> PathBuf {
 }
 
 async fn create_download_state(target: &Path) -> Result<DownloadState, EngineError> {
-    let (temporary, file) = create_download_file(target).await?;
+    // No `.await` between creating the staging file and arming its Drop guard:
+    // a cancellation can only drop this future before the file exists or after
+    // the guard owns it.
+    let (temporary, file) = create_download_file(target)?;
     Ok(DownloadState {
         temporary,
         file: Some(file),
@@ -2018,23 +2258,29 @@ async fn discard_download_state(state: &mut DownloadState) {
     }
 }
 
-async fn create_download_file(target: &Path) -> Result<(PathBuf, fs::File), EngineError> {
+/// Creates the staging file synchronously.
+///
+/// `tokio::fs` runs the open on a blocking thread, and that thread finishes the
+/// call even when the awaiting future is dropped: a download cancelled during
+/// the open left a `.part` file that no guard owned. Creating an empty file is a
+/// single short system call, so it is done inline instead, and the caller arms
+/// the cleanup guard before yielding.
+fn create_download_file(target: &Path) -> Result<(PathBuf, fs::File), EngineError> {
     for _ in 0..16 {
         let temporary = download_temporary_path(target);
-        match OpenOptions::new()
+        match std::fs::OpenOptions::new()
             .create_new(true)
             .write(true)
             .open(&temporary)
-            .await
         {
-            Ok(file) => return Ok((temporary, file)),
+            Ok(file) => return Ok((temporary, fs::File::from_std(file))),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(file_io(error)),
         }
     }
-    Err(EngineError::FileIo(
-        "could not allocate a unique temporary download file".to_owned(),
-    ))
+    Err(EngineError::FileIo(ErrorDetail::from(
+        "could not allocate a unique temporary download file",
+    )))
 }
 
 async fn persist_download(
@@ -2063,7 +2309,7 @@ async fn persist_download(
 }
 
 fn file_io(error: std::io::Error) -> EngineError {
-    EngineError::FileIo(error.to_string())
+    EngineError::FileIo(crate::error::io_detail(&error))
 }
 
 type TokenRequestParts = (String, BTreeMap<String, String>, AuthConfig, bool, u64);
@@ -2134,9 +2380,9 @@ fn token_request_parts(auth: &AuthConfig) -> Result<TokenRequestParts, EngineErr
             expiration,
         } => {
             if !matches!(client.as_str(), "requestip" | "referer" | "ip") {
-                return Err(EngineError::InvalidInput(
-                    "ArcGIS client must be requestip, referer, or ip".to_owned(),
-                ));
+                return Err(EngineError::InvalidInput(ErrorDetail::from(
+                    "ArcGIS client must be requestip, referer, or ip",
+                )));
             }
             let mut form = BTreeMap::from([
                 ("username".to_owned(), username.clone()),
@@ -2149,16 +2395,16 @@ fn token_request_parts(auth: &AuthConfig) -> Result<TokenRequestParts, EngineErr
                 form.insert(
                     "referer".to_owned(),
                     referer.clone().ok_or_else(|| {
-                        EngineError::InvalidInput(
-                            "ArcGIS referer client requires referer".to_owned(),
-                        )
+                        EngineError::InvalidInput(ErrorDetail::from(
+                            "ArcGIS referer client requires referer",
+                        ))
                     })?,
                 );
             } else if client == "ip" {
                 form.insert(
                     "ip".to_owned(),
                     ip.clone().ok_or_else(|| {
-                        EngineError::InvalidInput("ArcGIS ip client requires ip".to_owned())
+                        EngineError::InvalidInput(ErrorDetail::from("ArcGIS ip client requires ip"))
                     })?,
                 );
             }
@@ -2170,9 +2416,9 @@ fn token_request_parts(auth: &AuthConfig) -> Result<TokenRequestParts, EngineErr
                 u64::from(*expiration).saturating_mul(60),
             ))
         }
-        _ => Err(EngineError::Runtime(
-            "token requested for non-token authentication".to_owned(),
-        )),
+        _ => Err(EngineError::Runtime(ErrorDetail::from(
+            "token requested for non-token authentication",
+        ))),
     }
 }
 
@@ -2240,7 +2486,11 @@ fn cache_key(request: &PreparedRequest) -> Result<CacheKey, EngineError> {
         PreparedBody::Json(value) => {
             1_u8.hash(&mut hasher);
             serde_json::to_vec(value)
-                .map_err(|error| EngineError::InvalidInput(error.to_string()))?
+                .map_err(|_| {
+                    EngineError::InvalidInput(ErrorDetail::from(
+                        "JSON body could not be serialized for the cache key",
+                    ))
+                })?
                 .hash(&mut hasher);
         }
         PreparedBody::Form(values) => {
@@ -2257,9 +2507,9 @@ fn cache_key(request: &PreparedRequest) -> Result<CacheKey, EngineError> {
                 match &file.source {
                     PreparedFileSource::Bytes(data) => data.hash(&mut hasher),
                     PreparedFileSource::Path { .. } => {
-                        return Err(EngineError::InvalidInput(
-                            "HTTP cache cannot fingerprint streaming multipart files".to_owned(),
-                        ));
+                        return Err(EngineError::InvalidInput(ErrorDetail::from(
+                            "HTTP cache cannot fingerprint streaming multipart files",
+                        )));
                     }
                 }
             }
@@ -2269,9 +2519,9 @@ fn cache_key(request: &PreparedRequest) -> Result<CacheKey, EngineError> {
             value.hash(&mut hasher);
         }
         PreparedBody::Stream(_) => {
-            return Err(EngineError::InvalidInput(
-                "HTTP cache cannot fingerprint streaming request bodies".to_owned(),
-            ));
+            return Err(EngineError::InvalidInput(ErrorDetail::from(
+                "HTTP cache cannot fingerprint streaming request bodies",
+            )));
         }
     }
     Ok(CacheKey {
@@ -2389,8 +2639,9 @@ fn method(method: &HttpMethod) -> Result<Method, EngineError> {
         HttpMethod::Patch => Ok(Method::PATCH),
         HttpMethod::Delete => Ok(Method::DELETE),
         HttpMethod::Options => Ok(Method::OPTIONS),
-        HttpMethod::Custom(value) => Method::from_bytes(value.as_bytes())
-            .map_err(|_| EngineError::InvalidInput("invalid custom HTTP method".to_owned())),
+        HttpMethod::Custom(value) => Method::from_bytes(value.as_bytes()).map_err(|_| {
+            EngineError::InvalidInput(ErrorDetail::from("invalid custom HTTP method"))
+        }),
     }
 }
 
@@ -2398,11 +2649,11 @@ fn map_reqwest_error(error: reqwest::Error) -> EngineError {
     if error.is_timeout() {
         EngineError::Timeout
     } else if error.is_connect() {
-        EngineError::Transport("connection failed".to_owned())
+        EngineError::Transport(ErrorDetail::from("connection failed"))
     } else if error.is_body() || error.is_decode() {
-        EngineError::Transport("response transfer failed".to_owned())
+        EngineError::Transport(ErrorDetail::from("response transfer failed"))
     } else {
-        EngineError::Transport("request failed".to_owned())
+        EngineError::Transport(ErrorDetail::from("request failed"))
     }
 }
 
@@ -2526,5 +2777,99 @@ mod tests {
             parse_retry_after(&httpdate::fmt_http_date(now - Duration::from_secs(1)), now),
             Some(0)
         );
+    }
+
+    #[tokio::test]
+    async fn an_exhausted_generation_retires_the_slot_instead_of_wrapping() {
+        let transport = super::Transport::new(crate::EngineConfig {
+            allow_cookie_store: true,
+            max_cookie_sessions: 1,
+            ..crate::EngineConfig::default()
+        });
+        let first = transport.open_cookie_session().await.unwrap();
+        transport.close_cookie_session(&first).await.unwrap();
+        // Jump the only slot to the last generation it can represent.
+        transport.sessions.lock().await.slots[0].generation = u64::MAX;
+        let last = transport.open_cookie_session().await.unwrap();
+        assert_eq!(last.generation, u64::MAX);
+        transport.close_cookie_session(&last).await.unwrap();
+
+        // Wrapping to generation 0 would make `first` look current again.
+        assert!(matches!(
+            transport.sessions.lock().await.slots[0].state,
+            super::SlotState::Retired
+        ));
+        assert!(transport.close_cookie_session(&first).await.is_err());
+        assert!(transport.close_cookie_session(&last).await.is_err());
+        // With its only slot retired the engine refuses, explicitly.
+        assert!(transport.open_cookie_session().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_reused_slot_refuses_every_earlier_generation() {
+        let transport = super::Transport::new(crate::EngineConfig {
+            allow_cookie_store: true,
+            max_cookie_sessions: 1,
+            ..crate::EngineConfig::default()
+        });
+        let first = transport.open_cookie_session().await.unwrap();
+        transport.close_cookie_session(&first).await.unwrap();
+        let second = transport.open_cookie_session().await.unwrap();
+        assert_eq!(second.slot, first.slot);
+        assert!(second.generation > first.generation);
+        // The generation alone refuses the old session, even with the current
+        // random part: it does not rely on the nonce being different.
+        let earlier = crate::CookieSession {
+            generation: first.generation,
+            ..second.clone()
+        };
+        let mut registry = transport.sessions.lock().await;
+        assert_eq!(
+            registry.resolve(&earlier).err(),
+            Some(super::SessionRefusal::Stale)
+        );
+        assert!(registry.resolve(&second).is_ok());
+    }
+
+    #[tokio::test]
+    async fn eviction_moves_the_slot_to_a_new_generation() {
+        let transport = super::Transport::new(crate::EngineConfig {
+            allow_cookie_store: true,
+            max_cookie_sessions: 1,
+            ..crate::EngineConfig::default()
+        });
+        let evicted = transport.open_cookie_session().await.unwrap();
+        // The only slot is taken and idle, so opening evicts it.
+        let current = transport.open_cookie_session().await.unwrap();
+        assert_eq!(current.slot, evicted.slot);
+        assert!(current.generation > evicted.generation);
+        let earlier = crate::CookieSession {
+            generation: evicted.generation,
+            ..current.clone()
+        };
+        assert_eq!(
+            transport.sessions.lock().await.resolve(&earlier).err(),
+            Some(super::SessionRefusal::Stale)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_handle_naming_another_engine_is_refused_as_foreign() {
+        let transport = super::Transport::new(crate::EngineConfig {
+            allow_cookie_store: true,
+            ..crate::EngineConfig::default()
+        });
+        let current = transport.open_cookie_session().await.unwrap();
+        // Everything matches but the engine identifier.
+        let foreign = crate::CookieSession {
+            engine: current.engine.wrapping_add(1),
+            ..current.clone()
+        };
+        let mut registry = transport.sessions.lock().await;
+        assert_eq!(
+            registry.resolve(&foreign).err(),
+            Some(super::SessionRefusal::ForeignEngine)
+        );
+        assert!(registry.resolve(&current).is_ok());
     }
 }

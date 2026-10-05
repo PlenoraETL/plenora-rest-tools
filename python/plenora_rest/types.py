@@ -23,6 +23,7 @@ class EngineConfig(TypedDict, total=False):
     automatic_decompression: bool
     allowed_custom_methods: List[str]
     allow_cookie_store: bool
+    max_cookie_sessions: int
     max_cache_entries: int
     max_cache_bytes: int
     max_circuit_origins: int
@@ -49,8 +50,7 @@ class ParameterSpec(_ParameterSpecRequired, total=False):
 
 
 class CookiePolicy(TypedDict, total=False):
-    enabled: bool
-    jar_id: str
+    session: str
 
 
 class CachePolicy(TypedDict, total=False):
