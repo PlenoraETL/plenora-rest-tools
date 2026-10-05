@@ -360,6 +360,34 @@ mod tests {
     }
 
     #[test]
+    fn json_numbers_are_read_with_correct_rounding() {
+        // Found by the response_body fuzz target: without float_roundtrip,
+        // serde_json reads some decimal numbers one unit in the last place
+        // off, so the value differs from the number the service sent and
+        // does not survive being written and read again. The standard
+        // library parser is correctly rounded and is the oracle here.
+        let text = format!("-{}", "8".repeat(78));
+        let expected = text.parse::<f64>().unwrap();
+        for format in [ResponseFormat::Json, ResponseFormat::Ndjson] {
+            let config = ResponseConfig {
+                format,
+                ..ResponseConfig::default()
+            };
+            let value = parse(format!("[{text}]").as_bytes(), &config).unwrap();
+            let number = match format {
+                ResponseFormat::Json => &value[0],
+                _ => &value[0][0],
+            };
+            assert_eq!(number.as_f64().map(f64::to_bits), Some(expected.to_bits()));
+            let written = serde_json::to_string(&value).unwrap();
+            assert_eq!(
+                parse(written.as_bytes(), &ResponseConfig::default()).ok(),
+                Some(value)
+            );
+        }
+    }
+
+    #[test]
     fn parses_csv_with_a_custom_delimiter() {
         let value = parse_csv(b"city;pop\nRoma;2873000\n", ";").unwrap();
         assert_eq!(value, json!([{"city": "Roma", "pop": "2873000"}]));
