@@ -83,6 +83,18 @@ del contratto delle richieste, raccolte in un'unica rottura.
   servissero, andrebbero consegnati come dato remoto in un campo dichiarato del
   risultato, non nell'errore.
 
+### Parametri numerici senza significato rifiutati (incompatibile)
+
+- Erano sostituiti in silenzio e ora sono INVALID_INPUT prima di ogni
+  richiesta: `requests_per_second` non finito o non positivo (ricadeva sul
+  rate dell'Engine), `request.timeout_ms` zero, `retry.max_attempts` zero
+  (diventava uno), `retry.backoff_factor` non finito o minore di uno
+  (diventava uno), `max_rows` o `max_pages` zero nella paginazione (successo
+  vuoto). Per l'Engine, `connect_timeout_ms`, `request_timeout_ms` e
+  `max_concurrent_requests` a zero (la concorrenza diventava uno) e
+  `requests_per_second` a zero (attesa di secoli) fanno fallire ogni
+  esecuzione con INVALID_INPUT: `Engine::new` non può fallire.
+
 ### Dipendenze
 
 - thiserror non è più una dipendenza diretta: Display di EngineError è scritto

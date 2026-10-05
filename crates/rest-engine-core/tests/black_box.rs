@@ -4570,3 +4570,81 @@ async fn a_stale_session_is_refused_before_the_idempotency_key_is_recorded() {
     server.await.unwrap();
     assert_eq!(retried["status"], "success", "{retried}");
 }
+
+#[tokio::test]
+async fn numeric_settings_without_a_meaning_are_refused_not_replaced() {
+    // Each of these used to be replaced silently (a rate falling back to the
+    // engine rate, zero attempts becoming one, zero pages paginating nothing
+    // with a success). Port 9 is never contacted: validation fails first.
+    let connections = [
+        json!({"requests_per_second": 0.0}),
+        json!({"requests_per_second": -5.0}),
+        json!({"request": {"timeout_ms": 0}}),
+        json!({"retry": {"max_attempts": 0}}),
+        json!({"retry": {"backoff_factor": 0.5}}),
+        json!({"pagination": {"type": "page", "max_rows": 0}}),
+        json!({"pagination": {"type": "cursor", "max_pages": 0}}),
+        json!({"pagination": {"type": "link", "max_rows": 0}}),
+    ];
+    for extra in connections {
+        let mut connection = json!({"url": "http://127.0.0.1:9/", "method": "GET"});
+        for (key, value) in extra.as_object().unwrap() {
+            connection[key] = value.clone();
+        }
+        let result = execute(
+            &local_engine(),
+            json!({"schema_version": 1, "operation": "generate", "connection": connection}),
+        )
+        .await;
+        assert_eq!(
+            result["errors"][0]["code"], "INVALID_INPUT",
+            "{extra}: {result}"
+        );
+        assert_eq!(result["metrics"]["requests"], 0, "{extra}");
+    }
+
+    // A non-finite rate cannot be written in JSON; through the Rust API it
+    // is refused the same way.
+    let mut request: ExecutionRequest = serde_json::from_value(json!({
+        "schema_version": 1,
+        "operation": "test",
+        "connection": {"url": "http://127.0.0.1:9/", "method": "GET"}
+    }))
+    .unwrap();
+    request.connection.requests_per_second = Some(f64::NAN);
+    let result = serde_json::to_value(local_engine().execute(request.clone()).await).unwrap();
+    assert_eq!(result["errors"][0]["code"], "INVALID_INPUT", "{result}");
+    request.connection.retry.backoff_factor = f64::INFINITY;
+    request.connection.requests_per_second = None;
+    let result = serde_json::to_value(local_engine().execute(request.clone()).await).unwrap();
+    assert_eq!(result["errors"][0]["code"], "INVALID_INPUT", "{result}");
+
+    // Engine settings: refused by every execution instead of being replaced.
+    request.connection.retry.backoff_factor = 2.0;
+    for config in [
+        EngineConfig {
+            max_concurrent_requests: 0,
+            ..EngineConfig::default()
+        },
+        EngineConfig {
+            requests_per_second: Some(0),
+            ..EngineConfig::default()
+        },
+        EngineConfig {
+            connect_timeout_ms: 0,
+            ..EngineConfig::default()
+        },
+        EngineConfig {
+            request_timeout_ms: 0,
+            ..EngineConfig::default()
+        },
+    ] {
+        let engine = Engine::new(EngineConfig {
+            allow_private_networks: true,
+            ..config
+        });
+        let result = serde_json::to_value(engine.execute(request.clone()).await).unwrap();
+        assert_eq!(result["errors"][0]["code"], "INVALID_INPUT", "{result}");
+        assert_eq!(result["metrics"]["requests"], 0);
+    }
+}

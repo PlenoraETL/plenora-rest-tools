@@ -137,6 +137,9 @@ impl Engine {
         if self.is_closed() {
             return failed_result(EngineError::EngineClosed);
         }
+        if let Err(error) = validate_engine_configuration(&self.config) {
+            return failed_result(error);
+        }
         if let Err(error) = validate_execution_configuration(&request) {
             return failed_result(error);
         }
@@ -4281,8 +4284,85 @@ fn validate_idempotency_key(key: &str) -> Result<(), EngineError> {
     Ok(())
 }
 
+/// Numeric settings of the engine that have no meaningful value at zero.
+///
+/// `Engine::new` cannot fail, so an unusable configuration is refused by
+/// every execution instead of being quietly replaced: a zero concurrency used
+/// to become one, and a zero rate became a wait of centuries.
+fn validate_engine_configuration(config: &EngineConfig) -> Result<(), EngineError> {
+    let invalid = |reason: &'static str| Err(EngineError::InvalidInput(ErrorDetail::from(reason)));
+    if config.connect_timeout_ms == 0 {
+        return invalid("engine connect_timeout_ms must be greater than zero");
+    }
+    if config.request_timeout_ms == 0 {
+        return invalid("engine request_timeout_ms must be greater than zero");
+    }
+    if config.max_concurrent_requests == 0 {
+        return invalid("engine max_concurrent_requests must be greater than zero");
+    }
+    if config.requests_per_second == Some(0) {
+        return invalid("engine requests_per_second must be greater than zero");
+    }
+    Ok(())
+}
+
+/// Numeric settings of a request that the engine used to replace silently:
+/// a rate that is not finite or not positive fell back to the engine rate,
+/// zero retry attempts became one, a backoff factor below one or not finite
+/// became one, and zero rows or pages paginated nothing while reporting
+/// success. Each is now refused before any request.
+fn validate_numeric_settings(connection: &ConnectionConfig) -> Result<(), EngineError> {
+    let invalid = |reason: &'static str| Err(EngineError::InvalidInput(ErrorDetail::from(reason)));
+    if connection
+        .requests_per_second
+        .is_some_and(|rate| !rate.is_finite() || rate <= 0.0)
+    {
+        return invalid("requests_per_second must be a finite number greater than zero");
+    }
+    if connection.request.timeout_ms == Some(0) {
+        return invalid("request timeout_ms must be greater than zero");
+    }
+    if connection.retry.max_attempts == 0 {
+        return invalid("retry max_attempts must be greater than zero");
+    }
+    if !connection.retry.backoff_factor.is_finite() || connection.retry.backoff_factor < 1.0 {
+        return invalid("retry backoff_factor must be finite and at least one");
+    }
+    let (max_rows, max_pages) = match connection.pagination.as_ref() {
+        Some(
+            PaginationConfig::Offset { max_rows, .. } | PaginationConfig::Page { max_rows, .. },
+        ) => (Some(*max_rows), None),
+        Some(
+            PaginationConfig::Cursor {
+                max_rows,
+                max_pages,
+                ..
+            }
+            | PaginationConfig::Link {
+                max_rows,
+                max_pages,
+                ..
+            }
+            | PaginationConfig::HeaderLink {
+                max_rows,
+                max_pages,
+                ..
+            },
+        ) => (Some(*max_rows), Some(*max_pages)),
+        None => (None, None),
+    };
+    if max_rows == Some(0) {
+        return invalid("pagination max_rows must be greater than zero");
+    }
+    if max_pages == Some(0) {
+        return invalid("pagination max_pages must be greater than zero");
+    }
+    Ok(())
+}
+
 fn validate_execution_configuration(request: &ExecutionRequest) -> Result<(), EngineError> {
     validate_transforms(&request.connection.response)?;
+    validate_numeric_settings(&request.connection)?;
     let Some(polling) = request.connection.polling.as_ref() else {
         return Ok(());
     };
