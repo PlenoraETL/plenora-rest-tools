@@ -115,11 +115,13 @@ fuzz_target!(|dati: &[u8]| {
                 .and_then(|details| details.get("async_jobs"))
                 .is_none()
         );
+        // Solo l'envelope d'errore: il payload di un successo è il
+        // risultato, che contiene legittimamente dati e nomi di campo.
+        esiti::senza_dati(
+            &message.payload.to_string(),
+            &esiti::stringhe_distintive(&serde_json::to_value(&richiesta).expect("richiesta")),
+        );
     }
-    esiti::senza_dati(
-        &message.payload.to_string(),
-        &esiti::stringhe_distintive(&serde_json::to_value(&richiesta).expect("richiesta")),
-    );
     for chiave in [
         "plenora.trace.correlation_id",
         "plenora.capability.operation",

@@ -61,6 +61,24 @@ autenticazione e rifiutano ogni artifact.
 - I template di URL e di `raw_body` non hanno un parser: sono sostituzioni
   `{nome}`; sono esercitati dentro `execution_request`.
 
+## Limiti noti, non corretti qui
+
+Comportamenti dei parser che le proprietà dei target accettano, perché
+correggerli cambia il contratto e non è una correzione locale:
+
+- JSON: una chiave ripetuta nello stesso oggetto tiene l'ultimo valore
+  (serde_json); un intero oltre i 64 bit diventa un f64 e perde precisione
+  (serde_json senza `arbitrary_precision`). I float sono letti con
+  arrotondamento corretto (`float_roundtrip`).
+- XML: il parser rifiuta struttura malformata, DTD, entità non predefinite,
+  nomi fuori dalla grammatica e contenuto fuori dalla radice, ma non è un
+  validatore lessicale completo di XML 1.0: caratteri di controllo nel testo
+  e una dichiarazione XML fuori posto sono accettati. I figli con lo stesso
+  nome locale e prefissi diversi finiscono nello stesso array.
+- CSV: il delimitatore di default di `ResponseConfig` è la stringa vuota,
+  rifiutata come `INVALID_INPUT` solo quando arriva la risposta, non prima
+  della richiesta.
+
 ## Corpus
 
 I semi iniziali sono in `corpus/<target>/`, pochi file piccoli, uno per

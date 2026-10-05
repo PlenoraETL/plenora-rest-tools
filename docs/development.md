@@ -34,6 +34,7 @@ contracts/schemas             schemi JSON component-owned
 contracts/bindings            mapping degli entrypoint Rust
 contracts/compatibility-v1.json baseline immutabile v1
 examples                      esempi provider-neutral
+fuzz                          target cargo-fuzz e corpus iniziale (workspace separato)
 scripts                       verifica, contratti e release
 ~~~
 
@@ -50,6 +51,39 @@ cargo test --workspace
 
 Il controllo con la toolchain locale non sostituisce il gate Docker che
 verifica la MSRV fissata.
+
+## Fuzz e test di proprietà
+
+I parser dell'input remoto non fidato (corpo della risposta JSON, NDJSON,
+CSV, XML, testo e binario; percorsi JSON; header Link, Retry-After,
+Content-Range, ETag, Cache-Control, Set-Cookie) e dell'input di richiesta
+(ExecutionRequest, RuntimeMessage) hanno due livelli di prova.
+
+I test di proprietà stanno nel crate core
+(`crates/rest-engine-core/src/property_tests.rs`) e girano con
+`cargo test --workspace`, quindi in ogni gate. Ogni proprietà ha un oracolo
+scritto nel test: un interprete di riferimento per i percorsi JSON, scrittori
+CSV, NDJSON e XML che conoscono già il valore atteso, la grammatica di RFC 8288
+e RFC 9110 per gli header, la regola documentata dei riferimenti runtime.
+L'input rifiutato porta un canarino che nessun errore deve riportare. Il seme
+e il numero di casi sono fissati nel codice e la prova non scrive file: la
+suite è deterministica e dura meno di un secondo. Un controesempio trovato
+diventa un test unitario accanto al parser che corregge.
+
+I target di fuzz stanno in `fuzz/`, crate `cargo-fuzz` con workspace e
+Cargo.lock propri, fuori dalla MSRV: target, proprietà, formato degli input,
+cosa non è raggiungibile e comandi sono in [fuzz/README.md](../fuzz/README.md).
+Raggiungono i parser privati con la feature `fuzzing` del crate core, che
+abilita un modulo `doc(hidden)` non pubblico e fuori dal contratto v1. I due
+target che eseguono il motore riscrivono ogni URL in un loopback letterale
+che la configurazione di default rifiuta: nessuna connessione, nessun DNS.
+
+Il workflow Fuzz controlla formattazione e compilazione dei target e
+l'allineamento del corpus iniziale su ogni pull request e push a main; la
+campagna gira ogni lunedì e a mano per 600 secondi a target, sulle pull
+request che toccano `fuzz/` per 60 secondi. Un crash o un timeout rendono rosso
+il job e i reperti restano come artefatto. libFuzzer non gira su Windows MSVC:
+in locale le campagne si lanciano su Linux.
 
 ## Gate completo
 
@@ -106,9 +140,12 @@ senza un innalzamento esplicito della MSRV.
 ## Audit delle dipendenze
 
 Il workflow Audit esegue cargo-deny secondo la policy in deny.toml (advisory,
-licenze, sorgenti, wildcard) e pip-audit sulla toolchain Python fissata dai
-gate. Gira su pull request, push a main, una volta al giorno e su avvio
-manuale.
+licenze, sorgenti, wildcard), sul Cargo.lock del workspace e su quello di
+`fuzz/`, e pip-audit sulla toolchain Python fissata dai gate. Gira su pull
+request, push a main, una volta al giorno e su avvio manuale. L'unica
+eccezione di licenza è NCSA per libfuzzer-sys, che esiste solo nel lock di
+`fuzz/`; sul workspace cargo-deny la segnala come eccezione non usata, un
+avviso e non un errore.
 
 Ogni advisory accettata in deny.toml lo è soltanto perché nessuna versione
 corretta della dipendenza compila sulla MSRV pubblicata. Il workflow esegue

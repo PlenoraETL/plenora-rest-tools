@@ -181,7 +181,9 @@ pwsh ./scripts/verify.ps1
 
 Il comando valida contratti e compatibilità v1, MSRV, formato, Clippy, test
 Rust, wheel installata e matrice ABI3 CPython 3.10-3.14. Le release aggiungono
-doppia build riproducibile, checksum, SBOM e attestazioni.
+doppia build riproducibile, checksum, SBOM e attestazioni. I test Rust
+comprendono i test di proprietà dei parser dell'input remoto; i target di fuzz
+degli stessi parser stanno in [fuzz/](fuzz/README.md), con un workflow proprio.
 
 ## Licenza
 
