@@ -25,19 +25,19 @@ struct EmptyResources;
 impl RuntimeResources for EmptyResources {
     fn resolve_credentials(&self, _reference: &str) -> Result<AuthConfig, EngineError> {
         Err(EngineError::InvalidInput(
-            "credential reference was not configured".to_owned(),
+            "credential reference was not configured".into(),
         ))
     }
 
     fn resolve_artifact_source(&self, _reference: &str) -> Result<PathBuf, EngineError> {
         Err(EngineError::InvalidInput(
-            "artifact source was not configured".to_owned(),
+            "artifact source was not configured".into(),
         ))
     }
 
     fn resolve_artifact_sink(&self, _reference: &str) -> Result<PathBuf, EngineError> {
         Err(EngineError::InvalidInput(
-            "artifact sink was not configured".to_owned(),
+            "artifact sink was not configured".into(),
         ))
     }
 }
