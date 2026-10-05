@@ -1,64 +1,111 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, fmt};
 
 use serde::Serialize;
 use serde_json::{Value, json};
-use thiserror::Error;
 
 use crate::ExecutionError;
 
-#[derive(Debug, Error)]
-pub enum EngineError {
-    #[error("invalid input: {0}")]
-    InvalidInput(String),
-    #[error("unsupported schema version {received}; supported version is {supported}")]
-    UnsupportedSchema { received: u32, supported: u32 },
-    #[error("invalid URL: {0}")]
-    InvalidUrl(String),
-    #[error("outbound address is not allowed: {0}")]
-    UnsafeAddress(String),
-    #[error("security policy denied the request: {0}")]
-    PolicyViolation(String),
-    #[error("DNS resolution failed: {0}")]
-    DnsResolution(String),
-    #[error("invalid HTTP header: {0}")]
-    InvalidHeader(String),
-    #[error("request timed out")]
-    Timeout,
-    #[error("request was cancelled")]
-    Cancelled,
-    #[error("engine is closed")]
-    EngineClosed,
-    #[error("circuit breaker is open for origin {origin}")]
-    CircuitOpen { origin: String },
-    #[error("HTTP transport failed: {0}")]
-    Transport(String),
-    #[error("response exceeds the {limit_bytes} byte limit")]
-    ResponseTooLarge { limit_bytes: usize },
-    #[error("request body exceeds the {limit_bytes} byte limit")]
-    RequestTooLarge { limit_bytes: usize },
-    #[error("file transfer exceeds the {limit_bytes} byte limit")]
-    FileTooLarge { limit_bytes: u64 },
-    #[error("file operation failed: {0}")]
-    FileIo(String),
-    #[error("SHA-256 checksum mismatch: expected {expected}, received {actual}")]
-    ChecksumMismatch { expected: String, actual: String },
-    #[error("HTTP request failed with status {status}")]
-    HttpStatus { status: u16 },
-    #[error("invalid response: {0}")]
-    InvalidResponse(String),
-    #[error("application-level response failure: {0}")]
-    Application(String),
-    #[error("required parameter is missing: {0}")]
-    MissingParameter(String),
-    #[error("authentication failed: {0}")]
-    Authentication(String),
-    #[error("idempotency key was reused with different input")]
-    IdempotencyConflict,
-    #[error("asynchronous operation did not complete after {attempts} polls")]
-    PollingTimeout { attempts: u32 },
-    #[error("engine runtime failed: {0}")]
-    Runtime(String),
+/// Diagnostic text carried by an [`EngineError`] variant.
+///
+/// The text routinely contains what a remote party or the environment said:
+/// a response body excerpt, a remote error message, an address, a domain, an
+/// `io::Error`, a checksum of the caller's data. None of it may leave the
+/// engine, so the type is opaque: it can be built from a string (`.into()`),
+/// it is never displayed, its `Debug` is redacted, and no accessor returns
+/// it. Errors are described to callers only by [`EngineError::payload`] and by
+/// the static `Display`.
+pub struct ErrorDetail(
+    // Kept for in-crate diagnostics in tests; never formatted or returned.
+    #[cfg_attr(not(test), allow(dead_code))] String,
+);
+
+impl ErrorDetail {
+    #[cfg(test)]
+    pub(crate) fn text(&self) -> &str {
+        &self.0
+    }
 }
+
+impl From<String> for ErrorDetail {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+
+impl From<&str> for ErrorDetail {
+    fn from(value: &str) -> Self {
+        Self(value.to_owned())
+    }
+}
+
+impl fmt::Debug for ErrorDetail {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("<redacted>")
+    }
+}
+
+/// Every failure the engine reports.
+///
+/// Variants that describe a failure in words carry an opaque [`ErrorDetail`];
+/// variants that carry numbers chosen by the engine or the protocol (a byte
+/// limit, an HTTP status, a poll count, a contract version) keep them public.
+/// `Display` is the static public message of the variant, the same text as
+/// `payload().message`, so formatting an error never prints remote or local
+/// data.
+#[derive(Debug)]
+pub enum EngineError {
+    InvalidInput(ErrorDetail),
+    UnsupportedSchema {
+        received: u32,
+        supported: u32,
+    },
+    InvalidUrl(ErrorDetail),
+    UnsafeAddress(ErrorDetail),
+    PolicyViolation(ErrorDetail),
+    DnsResolution(ErrorDetail),
+    InvalidHeader(ErrorDetail),
+    Timeout,
+    Cancelled,
+    EngineClosed,
+    CircuitOpen {
+        origin: ErrorDetail,
+    },
+    Transport(ErrorDetail),
+    ResponseTooLarge {
+        limit_bytes: usize,
+    },
+    RequestTooLarge {
+        limit_bytes: usize,
+    },
+    FileTooLarge {
+        limit_bytes: u64,
+    },
+    FileIo(ErrorDetail),
+    ChecksumMismatch {
+        expected: ErrorDetail,
+        actual: ErrorDetail,
+    },
+    HttpStatus {
+        status: u16,
+    },
+    InvalidResponse(ErrorDetail),
+    Application(ErrorDetail),
+    MissingParameter(ErrorDetail),
+    Authentication(ErrorDetail),
+    IdempotencyConflict,
+    PollingTimeout {
+        attempts: u32,
+    },
+    Runtime(ErrorDetail),
+}
+
+impl fmt::Display for EngineError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.public_message())
+    }
+}
+
+impl std::error::Error for EngineError {}
 
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -333,5 +380,43 @@ impl EngineError {
             }
             _ => BTreeMap::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{EngineError, ErrorDetail};
+
+    #[test]
+    fn formatting_an_error_never_prints_its_detail() {
+        let secret = "remote said: token=abc123 from 10.0.0.7";
+        let errors = [
+            EngineError::Transport(ErrorDetail::from(secret)),
+            EngineError::Application(ErrorDetail::from(secret)),
+            EngineError::FileIo(ErrorDetail::from(secret)),
+            EngineError::CircuitOpen {
+                origin: ErrorDetail::from(secret),
+            },
+            EngineError::ChecksumMismatch {
+                expected: ErrorDetail::from(secret),
+                actual: ErrorDetail::from(secret),
+            },
+        ];
+        for error in errors {
+            let display = error.to_string();
+            let debug = format!("{error:?}");
+            let alternate = format!("{error:#?}");
+            for rendered in [&display, &debug, &alternate] {
+                assert!(!rendered.contains("abc123"), "{rendered}");
+                assert!(!rendered.contains("10.0.0.7"), "{rendered}");
+            }
+            assert_eq!(display, error.payload().message);
+        }
+    }
+
+    #[test]
+    fn the_detail_stays_available_inside_the_crate() {
+        let detail = ErrorDetail::from(String::from("diagnostic"));
+        assert_eq!(detail.text(), "diagnostic");
     }
 }

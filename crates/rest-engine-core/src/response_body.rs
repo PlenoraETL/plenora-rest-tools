@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 
+use crate::error::ErrorDetail;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use quick_xml::{Reader, XmlVersion, escape::resolve_predefined_entity, events::Event};
 use serde_json::{Map, Value, json};
@@ -9,7 +10,9 @@ use crate::{EngineError, ResponseConfig, ResponseFormat};
 pub(crate) fn parse(body: &[u8], config: &ResponseConfig) -> Result<Value, EngineError> {
     match config.format {
         ResponseFormat::Json => serde_json::from_slice(body).map_err(|error| {
-            EngineError::InvalidResponse(format!("response body is not valid JSON: {error}"))
+            EngineError::InvalidResponse(ErrorDetail::from(format!(
+                "response body is not valid JSON: {error}"
+            )))
         }),
         ResponseFormat::Csv => parse_csv(body, &config.delimiter),
         ResponseFormat::Xml => parse_xml(body),
@@ -17,7 +20,9 @@ pub(crate) fn parse(body: &[u8], config: &ResponseConfig) -> Result<Value, Engin
         ResponseFormat::Text => String::from_utf8(body.to_vec())
             .map(Value::String)
             .map_err(|_| {
-                EngineError::InvalidResponse("response body is not valid UTF-8".to_owned())
+                EngineError::InvalidResponse(ErrorDetail::from(
+                    "response body is not valid UTF-8".to_owned(),
+                ))
             }),
         ResponseFormat::Binary => Ok(json!({
             "data_base64": STANDARD.encode(body),
@@ -28,7 +33,9 @@ pub(crate) fn parse(body: &[u8], config: &ResponseConfig) -> Result<Value, Engin
 
 fn parse_ndjson(body: &[u8]) -> Result<Value, EngineError> {
     let text = std::str::from_utf8(body).map_err(|_| {
-        EngineError::InvalidResponse("NDJSON response is not valid UTF-8".to_owned())
+        EngineError::InvalidResponse(ErrorDetail::from(
+            "NDJSON response is not valid UTF-8".to_owned(),
+        ))
     })?;
     let mut values = Vec::new();
     for (index, line) in text.lines().enumerate() {
@@ -37,10 +44,10 @@ fn parse_ndjson(body: &[u8]) -> Result<Value, EngineError> {
             continue;
         }
         let value = serde_json::from_str(line).map_err(|error| {
-            EngineError::InvalidResponse(format!(
+            EngineError::InvalidResponse(ErrorDetail::from(format!(
                 "NDJSON line {} is not valid JSON: {error}",
                 index + 1
-            ))
+            )))
         })?;
         values.push(value);
     }
@@ -50,32 +57,35 @@ fn parse_ndjson(body: &[u8]) -> Result<Value, EngineError> {
 fn parse_csv(body: &[u8], delimiter: &str) -> Result<Value, EngineError> {
     let delimiter = delimiter.as_bytes();
     if delimiter.len() != 1 {
-        return Err(EngineError::InvalidInput(
+        return Err(EngineError::InvalidInput(ErrorDetail::from(
             "CSV delimiter must be one ASCII byte".to_owned(),
-        ));
+        )));
     }
     let mut reader = csv::ReaderBuilder::new()
         .delimiter(delimiter[0])
         .from_reader(body);
     let headers = reader
         .headers()
-        .map_err(|error| EngineError::InvalidResponse(format!("invalid CSV header: {error}")))?
+        .map_err(|error| {
+            EngineError::InvalidResponse(ErrorDetail::from(format!("invalid CSV header: {error}")))
+        })?
         .clone();
     if headers.iter().any(str::is_empty)
         || headers.iter().collect::<BTreeSet<_>>().len() != headers.len()
     {
-        return Err(EngineError::InvalidResponse(
+        return Err(EngineError::InvalidResponse(ErrorDetail::from(
             "CSV response has missing or duplicate headers".to_owned(),
-        ));
+        )));
     }
     let mut rows = Vec::new();
     for record in reader.records() {
-        let record = record
-            .map_err(|error| EngineError::InvalidResponse(format!("invalid CSV row: {error}")))?;
+        let record = record.map_err(|error| {
+            EngineError::InvalidResponse(ErrorDetail::from(format!("invalid CSV row: {error}")))
+        })?;
         if record.len() != headers.len() {
-            return Err(EngineError::InvalidResponse(
+            return Err(EngineError::InvalidResponse(ErrorDetail::from(
                 "CSV row has a different width than its header".to_owned(),
-            ));
+            )));
         }
         rows.push(Value::Object(
             headers
@@ -104,9 +114,9 @@ fn parse_xml(body: &[u8]) -> Result<Value, EngineError> {
         match reader.read_event() {
             Ok(Event::Start(event)) => {
                 if stack.len() >= 128 {
-                    return Err(EngineError::InvalidResponse(
+                    return Err(EngineError::InvalidResponse(ErrorDetail::from(
                         "XML nesting exceeds the supported limit".to_owned(),
-                    ));
+                    )));
                 }
                 stack.push(xml_node(&reader, &event)?);
             }
@@ -117,7 +127,9 @@ fn parse_xml(body: &[u8]) -> Result<Value, EngineError> {
             Ok(Event::Text(event)) => {
                 if let Some(node) = stack.last_mut() {
                     let text = event.decode().map_err(|_| {
-                        EngineError::InvalidResponse("XML contains invalid text".to_owned())
+                        EngineError::InvalidResponse(ErrorDetail::from(
+                            "XML contains invalid text".to_owned(),
+                        ))
                     })?;
                     node.text.push_str(&text);
                 }
@@ -125,19 +137,23 @@ fn parse_xml(body: &[u8]) -> Result<Value, EngineError> {
             Ok(Event::CData(event)) => {
                 if let Some(node) = stack.last_mut() {
                     let text = event.decode().map_err(|_| {
-                        EngineError::InvalidResponse("XML contains invalid CDATA".to_owned())
+                        EngineError::InvalidResponse(ErrorDetail::from(
+                            "XML contains invalid CDATA".to_owned(),
+                        ))
                     })?;
                     node.text.push_str(&text);
                 }
             }
             Ok(Event::End(event)) => {
                 let node = stack.pop().ok_or_else(|| {
-                    EngineError::InvalidResponse("XML has an unexpected closing tag".to_owned())
+                    EngineError::InvalidResponse(ErrorDetail::from(
+                        "XML has an unexpected closing tag".to_owned(),
+                    ))
                 })?;
                 if xml_name(event.name().as_ref()) != node.name {
-                    return Err(EngineError::InvalidResponse(
+                    return Err(EngineError::InvalidResponse(ErrorDetail::from(
                         "XML closing tag does not match".to_owned(),
-                    ));
+                    )));
                 }
                 attach_xml_node(&mut stack, &mut root, node)?;
             }
@@ -151,22 +167,22 @@ fn parse_xml(body: &[u8]) -> Result<Value, EngineError> {
                     Ok(Some(character)) => String::from(character),
                     Ok(None) => {
                         let name = event.decode().map_err(|_| {
-                            EngineError::InvalidResponse(
+                            EngineError::InvalidResponse(ErrorDetail::from(
                                 "XML contains an invalid entity reference".to_owned(),
-                            )
+                            ))
                         })?;
                         resolve_predefined_entity(&name)
                             .ok_or_else(|| {
-                                EngineError::InvalidResponse(
+                                EngineError::InvalidResponse(ErrorDetail::from(
                                     "XML DTDs and entity references are not allowed".to_owned(),
-                                )
+                                ))
                             })?
                             .to_owned()
                     }
                     Err(_) => {
-                        return Err(EngineError::InvalidResponse(
+                        return Err(EngineError::InvalidResponse(ErrorDetail::from(
                             "XML contains an invalid character reference".to_owned(),
-                        ));
+                        )));
                     }
                 };
                 if let Some(node) = stack.last_mut() {
@@ -174,26 +190,27 @@ fn parse_xml(body: &[u8]) -> Result<Value, EngineError> {
                 }
             }
             Ok(Event::DocType(_)) => {
-                return Err(EngineError::InvalidResponse(
+                return Err(EngineError::InvalidResponse(ErrorDetail::from(
                     "XML DTDs and entity references are not allowed".to_owned(),
-                ));
+                )));
             }
             Ok(Event::Eof) => break,
             Ok(Event::Decl(_) | Event::PI(_) | Event::Comment(_)) => {}
             Err(_) => {
-                return Err(EngineError::InvalidResponse(
+                return Err(EngineError::InvalidResponse(ErrorDetail::from(
                     "response body is not valid XML".to_owned(),
-                ));
+                )));
             }
         }
     }
     if !stack.is_empty() {
-        return Err(EngineError::InvalidResponse(
+        return Err(EngineError::InvalidResponse(ErrorDetail::from(
             "XML contains unclosed elements".to_owned(),
-        ));
+        )));
     }
-    let (name, value) =
-        root.ok_or_else(|| EngineError::InvalidResponse("XML response is empty".to_owned()))?;
+    let (name, value) = root.ok_or_else(|| {
+        EngineError::InvalidResponse(ErrorDetail::from("XML response is empty".to_owned()))
+    })?;
     Ok(Value::Object(Map::from_iter([(name, value)])))
 }
 
@@ -204,7 +221,9 @@ fn xml_node(
     let mut content = Map::new();
     for attribute in event.attributes().with_checks(true) {
         let attribute = attribute.map_err(|_| {
-            EngineError::InvalidResponse("XML contains an invalid attribute".to_owned())
+            EngineError::InvalidResponse(ErrorDetail::from(
+                "XML contains an invalid attribute".to_owned(),
+            ))
         })?;
         let key = format!("@{}", xml_name(attribute.key.as_ref()));
         // Attribute values are normalized as XML 1.0 requires. Absent an XML
@@ -213,7 +232,9 @@ fn xml_node(
         let value = attribute
             .decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
             .map_err(|_| {
-                EngineError::InvalidResponse("XML contains an invalid attribute value".to_owned())
+                EngineError::InvalidResponse(ErrorDetail::from(
+                    "XML contains an invalid attribute value".to_owned(),
+                ))
             })?;
         content.insert(key, Value::String(value.into_owned()));
     }
@@ -255,9 +276,9 @@ fn attach_xml_node(
         *root = Some((node.name, value));
         Ok(())
     } else {
-        Err(EngineError::InvalidResponse(
+        Err(EngineError::InvalidResponse(ErrorDetail::from(
             "XML response contains multiple root elements".to_owned(),
-        ))
+        )))
     }
 }
 

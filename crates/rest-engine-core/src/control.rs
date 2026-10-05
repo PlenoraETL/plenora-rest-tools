@@ -1,5 +1,6 @@
 use std::time::{Duration, Instant};
 
+use crate::error::ErrorDetail;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::EngineError;
@@ -56,16 +57,18 @@ impl ExecutionControl {
 }
 
 fn parse_deadline(value: &str) -> Result<Instant, EngineError> {
-    let deadline = OffsetDateTime::parse(value, &Rfc3339)
-        .map_err(|_| EngineError::InvalidInput("deadline must be RFC 3339".to_owned()))?;
+    let deadline = OffsetDateTime::parse(value, &Rfc3339).map_err(|_| {
+        EngineError::InvalidInput(ErrorDetail::from("deadline must be RFC 3339".to_owned()))
+    })?;
     let now = OffsetDateTime::now_utc();
     let remaining = deadline - now;
     if remaining.is_negative() || remaining.is_zero() {
         return Ok(Instant::now());
     }
-    let duration = Duration::try_from(remaining)
-        .map_err(|_| EngineError::InvalidInput("deadline is out of range".to_owned()))?;
-    Instant::now()
-        .checked_add(duration)
-        .ok_or_else(|| EngineError::InvalidInput("deadline is out of range".to_owned()))
+    let duration = Duration::try_from(remaining).map_err(|_| {
+        EngineError::InvalidInput(ErrorDetail::from("deadline is out of range".to_owned()))
+    })?;
+    Instant::now().checked_add(duration).ok_or_else(|| {
+        EngineError::InvalidInput(ErrorDetail::from("deadline is out of range".to_owned()))
+    })
 }

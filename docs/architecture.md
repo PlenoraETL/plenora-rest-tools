@@ -397,6 +397,24 @@ ripetizione. Quando una richiesta potrebbe essere stata inviata ma l'esito non
 è noto, l'effetto remoto è unknown e il retry può richiedere quarantena o
 recovery.
 
+Anche il tipo Rust EngineError non porta testo di terzi fuori dal motore. Le
+varianti che descrivono un fallimento a parole contengono un ErrorDetail opaco:
+si costruisce da una stringa con `.into()`, ma non viene mai formattato, il suo
+Debug è redatto e nessun metodo lo restituisce. Display di EngineError è il
+messaggio pubblico statico della variante, lo stesso di payload().message. Le
+varianti con numeri scelti dal motore o dal protocollo (limite in byte, status
+HTTP, tentativi di polling, versione del contratto) li mantengono pubblici.
+Così né un log del chiamante né un `{:?}` possono riportare body remoti,
+messaggi del servizio, indirizzi, domini, errori di I/O o checksum dei dati.
+
+Deviazione dichiarata dal congelamento della superficie Rust v1: i nomi
+esportati non cambiano, ma i campi testuali delle varianti passano da String a
+ErrorDetail e il testo di Display cambia. Un'implementazione di
+RuntimeResources che costruiva `EngineError::InvalidInput(String)` scrive
+`EngineError::InvalidInput("...".into())`; chi leggeva il testo delle varianti
+non può più farlo, per scelta. Il wire contract (plenora-error-v1, schemi v1)
+non cambia.
+
 ## Confini intenzionali
 
 Non fanno parte dell'architettura attuale:

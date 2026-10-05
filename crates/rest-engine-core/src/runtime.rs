@@ -1,5 +1,6 @@
 use std::{collections::BTreeMap, fmt, path::PathBuf};
 
+use crate::error::ErrorDetail;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use url::Url;
@@ -102,8 +103,10 @@ where
                         .first()
                         .map(execution_error_payload)
                         .unwrap_or_else(|| {
-                            EngineError::Runtime("execution failed without an error".to_owned())
-                                .payload()
+                            EngineError::Runtime(ErrorDetail::from(
+                                "execution failed without an error".to_owned(),
+                            ))
+                            .payload()
                         });
                     if !result.recoveries.is_empty() {
                         error.details.insert(
@@ -127,9 +130,10 @@ where
         cancellation: CancellationToken,
     ) -> Result<String, EngineError> {
         let request = serde_json::from_str::<RuntimeMessage>(request_json)
-            .map_err(|error| EngineError::InvalidInput(error.to_string()))?;
+            .map_err(|error| EngineError::InvalidInput(ErrorDetail::from(error.to_string())))?;
         let response = self.invoke(request, cancellation).await;
-        serde_json::to_string(&response).map_err(|error| EngineError::Runtime(error.to_string()))
+        serde_json::to_string(&response)
+            .map_err(|error| EngineError::Runtime(ErrorDetail::from(error.to_string())))
     }
 
     fn prepare_request(
@@ -140,25 +144,25 @@ where
         let operation_id = required_metadata(message, "plenora.capability.operation")?;
         let (operation, input_contract, output_contract) = operation_contracts(operation_id)?;
         if required_metadata(message, "plenora.input.contract")? != input_contract {
-            return Err(EngineError::InvalidInput(
+            return Err(EngineError::InvalidInput(ErrorDetail::from(
                 "runtime input contract does not match the operation".to_owned(),
-            ));
+            )));
         }
         let mut execution = serde_json::from_value::<ExecutionRequest>(message.payload.clone())
-            .map_err(|error| EngineError::InvalidInput(error.to_string()))?;
+            .map_err(|error| EngineError::InvalidInput(ErrorDetail::from(error.to_string())))?;
         if execution.options.idempotency_key.is_some() {
-            return Err(EngineError::InvalidInput(
+            return Err(EngineError::InvalidInput(ErrorDetail::from(
                 "runtime idempotency key must use plenora.execution.idempotency_key metadata"
                     .to_owned(),
-            ));
+            )));
         }
         if let Some(key) = message.metadata.get("plenora.execution.idempotency_key") {
             execution.options.idempotency_key = Some(key.clone());
         }
         if execution.operation != operation {
-            return Err(EngineError::InvalidInput(
+            return Err(EngineError::InvalidInput(ErrorDetail::from(
                 "runtime selector and payload operation differ".to_owned(),
-            ));
+            )));
         }
         Ok((execution, operation, output_contract))
     }
@@ -173,19 +177,19 @@ fn validate_envelope(message: &RuntimeMessage) -> Result<(), EngineError> {
     }
     if message.contract != RUNTIME_INTERFACE_CONTRACT && message.contract != RUNTIME_VECTOR_CONTRACT
     {
-        return Err(EngineError::InvalidInput(
+        return Err(EngineError::InvalidInput(ErrorDetail::from(
             "runtime envelope contract is unsupported".to_owned(),
-        ));
+        )));
     }
     if message.kind != RuntimeMessageKind::Request {
-        return Err(EngineError::InvalidInput(
+        return Err(EngineError::InvalidInput(ErrorDetail::from(
             "runtime invocation requires a request envelope".to_owned(),
-        ));
+        )));
     }
     if message.content_type != JSON_CONTENT_TYPE || !message.payload.is_object() {
-        return Err(EngineError::InvalidInput(
+        return Err(EngineError::InvalidInput(ErrorDetail::from(
             "runtime request payload must be a JSON object".to_owned(),
-        ));
+        )));
     }
     validate_uuid_metadata(message, "plenora.message.id")?;
     validate_uuid_metadata(message, "plenora.trace.correlation_id")?;
@@ -196,21 +200,21 @@ fn validate_envelope(message: &RuntimeMessage) -> Result<(), EngineError> {
         validate_uuid_metadata(message, "plenora.message.causation_id")?;
     }
     if required_metadata(message, "plenora.capability.name")? != CAPABILITY_NAME {
-        return Err(EngineError::InvalidInput(
+        return Err(EngineError::InvalidInput(ErrorDetail::from(
             "runtime capability name is not plenora.rest-tools".to_owned(),
-        ));
+        )));
     }
     if required_metadata(message, "plenora.capability.version")?
         != RUNTIME_BINDING_VERSION.to_string()
     {
-        return Err(EngineError::InvalidInput(
+        return Err(EngineError::InvalidInput(ErrorDetail::from(
             "runtime capability version is unsupported".to_owned(),
-        ));
+        )));
     }
     if required_metadata(message, "plenora.operation.version")? != "1" {
-        return Err(EngineError::InvalidInput(
+        return Err(EngineError::InvalidInput(ErrorDetail::from(
             "runtime operation version is unsupported".to_owned(),
-        ));
+        )));
     }
     Ok(())
 }
@@ -220,17 +224,20 @@ fn required_metadata<'a>(message: &'a RuntimeMessage, key: &str) -> Result<&'a s
         .metadata
         .get(key)
         .map(String::as_str)
-        .ok_or_else(|| EngineError::InvalidInput(format!("runtime metadata lacks {key}")))
+        .ok_or_else(|| {
+            EngineError::InvalidInput(ErrorDetail::from(format!("runtime metadata lacks {key}")))
+        })
 }
 
 fn validate_uuid_metadata(message: &RuntimeMessage, key: &str) -> Result<(), EngineError> {
     let value = required_metadata(message, key)?;
-    let parsed = Uuid::parse_str(value)
-        .map_err(|_| EngineError::InvalidInput(format!("{key} must be a canonical UUID")))?;
+    let parsed = Uuid::parse_str(value).map_err(|_| {
+        EngineError::InvalidInput(ErrorDetail::from(format!("{key} must be a canonical UUID")))
+    })?;
     if parsed.hyphenated().to_string() != value {
-        return Err(EngineError::InvalidInput(format!(
+        return Err(EngineError::InvalidInput(ErrorDetail::from(format!(
             "{key} must be a lowercase hyphenated UUID"
-        )));
+        ))));
     }
     Ok(())
 }
@@ -264,9 +271,9 @@ fn operation_contracts(
             FILE_TRANSFER_INPUT_CONTRACT,
             FILE_TRANSFER_RESULT_CONTRACT,
         )),
-        _ => Err(EngineError::InvalidInput(
+        _ => Err(EngineError::InvalidInput(ErrorDetail::from(
             "runtime operation is unknown".to_owned(),
-        )),
+        ))),
     }
 }
 
@@ -284,23 +291,27 @@ fn resolve_runtime_inputs<Resources: RuntimeResources>(
     match operation {
         ExecutionOperation::Download => {
             let file = request.input.file.as_mut().ok_or_else(|| {
-                EngineError::InvalidInput("REST download requires file input".to_owned())
+                EngineError::InvalidInput(ErrorDetail::from(
+                    "REST download requires file input".to_owned(),
+                ))
             })?;
             if !file.path.is_empty() {
-                return Err(EngineError::InvalidInput(
+                return Err(EngineError::InvalidInput(ErrorDetail::from(
                     "runtime download cannot contain a local path".to_owned(),
-                ));
+                )));
             }
             if file.artifact_source.is_some() {
-                return Err(EngineError::InvalidInput(
+                return Err(EngineError::InvalidInput(ErrorDetail::from(
                     "REST download forbids artifact_source".to_owned(),
-                ));
+                )));
             }
             let reference = file
                 .artifact_sink
                 .as_ref()
                 .ok_or_else(|| {
-                    EngineError::InvalidInput("REST download requires artifact_sink".to_owned())
+                    EngineError::InvalidInput(ErrorDetail::from(
+                        "REST download requires artifact_sink".to_owned(),
+                    ))
                 })?
                 .reference
                 .clone();
@@ -312,23 +323,27 @@ fn resolve_runtime_inputs<Resources: RuntimeResources>(
         }
         ExecutionOperation::Upload => {
             let file = request.input.file.as_mut().ok_or_else(|| {
-                EngineError::InvalidInput("REST upload requires file input".to_owned())
+                EngineError::InvalidInput(ErrorDetail::from(
+                    "REST upload requires file input".to_owned(),
+                ))
             })?;
             if !file.path.is_empty() {
-                return Err(EngineError::InvalidInput(
+                return Err(EngineError::InvalidInput(ErrorDetail::from(
                     "runtime upload cannot contain a local path".to_owned(),
-                ));
+                )));
             }
             if file.artifact_sink.is_some() {
-                return Err(EngineError::InvalidInput(
+                return Err(EngineError::InvalidInput(ErrorDetail::from(
                     "REST upload forbids artifact_sink".to_owned(),
-                ));
+                )));
             }
             let reference = file
                 .artifact_source
                 .as_ref()
                 .ok_or_else(|| {
-                    EngineError::InvalidInput("REST upload requires artifact_source".to_owned())
+                    EngineError::InvalidInput(ErrorDetail::from(
+                        "REST upload requires artifact_source".to_owned(),
+                    ))
                 })?
                 .reference
                 .clone();
@@ -339,9 +354,9 @@ fn resolve_runtime_inputs<Resources: RuntimeResources>(
                 .into_owned();
         }
         _ if request.input.file.is_some() => {
-            return Err(EngineError::InvalidInput(
+            return Err(EngineError::InvalidInput(ErrorDetail::from(
                 "execution operation cannot carry a file transfer".to_owned(),
-            ));
+            )));
         }
         _ => {}
     }
@@ -350,9 +365,9 @@ fn resolve_runtime_inputs<Resources: RuntimeResources>(
 
 fn reject_inline_secrets(request: &ExecutionRequest) -> Result<(), EngineError> {
     if !matches!(&request.connection.auth, AuthConfig::None) {
-        return Err(EngineError::InvalidInput(
+        return Err(EngineError::InvalidInput(ErrorDetail::from(
             "runtime request must use credential_ref instead of inline authentication".to_owned(),
-        ));
+        )));
     }
     if request
         .connection
@@ -360,9 +375,9 @@ fn reject_inline_secrets(request: &ExecutionRequest) -> Result<(), EngineError> 
         .keys()
         .any(|name| is_sensitive_header_name(name))
     {
-        return Err(EngineError::InvalidInput(
+        return Err(EngineError::InvalidInput(ErrorDetail::from(
             "runtime request contains a sensitive HTTP header".to_owned(),
-        ));
+        )));
     }
     // Blocking only `connection.headers` leaves the same channel open through
     // the parameter list: a fixed or mapped parameter with `location: "header"`
@@ -379,9 +394,9 @@ fn reject_inline_secrets(request: &ExecutionRequest) -> Result<(), EngineError> 
             _ => false,
         })
     {
-        return Err(EngineError::InvalidInput(
+        return Err(EngineError::InvalidInput(ErrorDetail::from(
             "runtime request contains a sensitive parameter; use credential_ref".to_owned(),
-        ));
+        )));
     }
     // The idempotency header name is caller configured and the engine inserts a
     // header with it, so it is the same channel again: naming it `Authorization`
@@ -391,26 +406,27 @@ fn reject_inline_secrets(request: &ExecutionRequest) -> Result<(), EngineError> 
     if request.connection.idempotency.location == IdempotencyLocation::Header
         && is_disallowed_idempotency_header(&request.connection.idempotency.name)
     {
-        return Err(EngineError::InvalidInput(
+        return Err(EngineError::InvalidInput(ErrorDetail::from(
             "runtime idempotency header name must not read as a credential".to_owned(),
-        ));
+        )));
     }
     if request.connection.tls.client_identity_pem.is_some() {
-        return Err(EngineError::InvalidInput(
+        return Err(EngineError::InvalidInput(ErrorDetail::from(
             "runtime request contains inline private key material".to_owned(),
-        ));
+        )));
     }
     if let Some(proxy) = &request.connection.proxy {
-        let url = Url::parse(&proxy.url)
-            .map_err(|_| EngineError::InvalidInput("proxy URL is invalid".to_owned()))?;
+        let url = Url::parse(&proxy.url).map_err(|_| {
+            EngineError::InvalidInput(ErrorDetail::from("proxy URL is invalid".to_owned()))
+        })?;
         if proxy.username.is_some()
             || proxy.password.is_some()
             || !url.username().is_empty()
             || url.password().is_some()
         {
-            return Err(EngineError::InvalidInput(
+            return Err(EngineError::InvalidInput(ErrorDetail::from(
                 "runtime proxy credentials must use a secret reference".to_owned(),
-            ));
+            )));
         }
     }
     Ok(())
@@ -428,9 +444,9 @@ fn validate_reference(reference: &str, field: &str) -> Result<(), EngineError> {
             .is_some_and(|value| *value == b':')
         || normalized.split('/').any(|segment| segment == "..")
     {
-        return Err(EngineError::InvalidInput(format!(
+        return Err(EngineError::InvalidInput(ErrorDetail::from(format!(
             "{field} must be an opaque authorized reference"
-        )));
+        ))));
     }
     Ok(())
 }
@@ -514,6 +530,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{RuntimeResources, validate_reference};
+    use crate::error::ErrorDetail;
     use crate::{AuthConfig, EngineError};
 
     struct EmptyResources;
@@ -524,11 +541,15 @@ mod tests {
         }
 
         fn resolve_artifact_source(&self, _reference: &str) -> Result<PathBuf, EngineError> {
-            Err(EngineError::InvalidInput("missing source".to_owned()))
+            Err(EngineError::InvalidInput(ErrorDetail::from(
+                "missing source".to_owned(),
+            )))
         }
 
         fn resolve_artifact_sink(&self, _reference: &str) -> Result<PathBuf, EngineError> {
-            Err(EngineError::InvalidInput("missing sink".to_owned()))
+            Err(EngineError::InvalidInput(ErrorDetail::from(
+                "missing sink".to_owned(),
+            )))
         }
     }
 

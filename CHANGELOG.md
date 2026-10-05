@@ -29,3 +29,17 @@ release finché una release non viene preparata.
 - Una condition su una colonna assente o null non applica la trasformazione.
 - Un batch flat_array rifiuta i record che non si risolvono in esattamente un
   parametro non null.
+
+### API Rust (incompatibile)
+
+- EngineError non espone più testo di terzi: i campi testuali delle varianti
+  sono ErrorDetail opachi (costruibili con `.into()`, mai formattati, Debug
+  redatto) e Display restituisce il messaggio pubblico statico, uguale a
+  payload().message. I nomi esportati e il wire contract non cambiano. Per
+  semver 0.x la prossima versione deve essere 0.3.0. Vedi
+  [Errori ed effetti remoti](docs/architecture.md#errori-ed-effetti-remoti).
+
+### Dipendenze
+
+- thiserror non è più una dipendenza diretta: Display di EngineError è scritto
+  a mano.

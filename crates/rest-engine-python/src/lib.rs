@@ -38,14 +38,15 @@ impl NativeEngine {
     #[pyo3(signature = (config_json=None))]
     fn new(config_json: Option<&str>) -> PyResult<Self> {
         let config = match config_json {
-            Some(value) => serde_json::from_str::<EngineConfig>(value)
-                .map_err(|error| to_python_error(EngineError::InvalidInput(error.to_string())))?,
+            Some(value) => serde_json::from_str::<EngineConfig>(value).map_err(|error| {
+                to_python_error(EngineError::InvalidInput((error.to_string()).into()))
+            })?,
             None => EngineConfig::default(),
         };
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
-            .map_err(|error| to_python_error(EngineError::Runtime(error.to_string())))?;
+            .map_err(|error| to_python_error(EngineError::Runtime((error.to_string()).into())))?;
         Ok(Self {
             engine: Engine::new(config),
             runtime,
@@ -75,7 +76,7 @@ impl NativeEngine {
 
     fn capabilities(&self) -> PyResult<String> {
         serde_json::to_string(&capabilities())
-            .map_err(|error| to_python_error(EngineError::Runtime(error.to_string())))
+            .map_err(|error| to_python_error(EngineError::Runtime((error.to_string()).into())))
     }
 
     fn close(&self) {
