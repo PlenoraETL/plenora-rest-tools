@@ -197,9 +197,14 @@ git tag -a vX.Y.Z -m "plenora-rest-tools X.Y.Z"
 git push origin vX.Y.Z
 ~~~
 
+Prima del tag la sezione del CHANGELOG della versione va intestata con la
+data, `## X.Y.Z (AAAA-MM-GG)`: è il testo della release.
+
 Il workflow Release controlla che tag e cinque fonti di versione coincidano,
-riesegue il gate, ricostruisce gli artefatti, genera attestazioni di provenance
-e SBOM e pubblica una GitHub Release.
+estrae la sezione datata del CHANGELOG come note di rilascio (fallisce se
+manca, se non ha data o se è vuota), riesegue il gate, ricostruisce gli
+artefatti, genera attestazioni di provenance e SBOM e pubblica una GitHub
+Release.
 
 Il workflow non pubblica automaticamente su crates.io o PyPI.
 

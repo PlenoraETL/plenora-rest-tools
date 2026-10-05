@@ -85,6 +85,13 @@ albero; la data di pubblicazione si scrive qui insieme al tag v0.3.0.
   servissero, andrebbero consegnati come dato remoto in un campo dichiarato del
   risultato, non nell'errore.
 
+### Rilascio
+
+- Le note della GitHub Release sono la sezione datata di questa versione del
+  CHANGELOG (scripts/release.py release-notes), non più l'elenco generato dei
+  titoli delle pull request: senza sezione, senza data o vuota il workflow
+  Release fallisce.
+
 ### Dipendenze
 
 - thiserror non è più una dipendenza diretta: Display di EngineError è scritto

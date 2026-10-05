@@ -35,6 +35,13 @@ jobs:
           version="$(python3 scripts/release.py validate-version "${GITHUB_REF_NAME}")"
           echo "value=${version}" >> "${GITHUB_OUTPUT}"
 
+      # The notes are the CHANGELOG section of this version, dated: the
+      # incompatible changes it lists must reach the release page, which a
+      # list of pull request titles would not guarantee.
+      - name: Release notes from CHANGELOG.md
+        shell: bash
+        run: python3 scripts/release.py release-notes "${GITHUB_REF_NAME}" "${RUNNER_TEMP}/release-notes.md"
+
       - name: Run the complete verification gate
         shell: pwsh
         run: ./scripts/verify.ps1
@@ -77,4 +84,4 @@ jobs:
           gh release create "${GITHUB_REF_NAME}" dist/* \
             --verify-tag \
             --title "plenora-rest-tools ${{ steps.version.outputs.value }}" \
-            --generate-notes
+            --notes-file "${RUNNER_TEMP}/release-notes.md"
