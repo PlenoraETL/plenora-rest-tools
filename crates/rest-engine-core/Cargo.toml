@@ -11,6 +11,7 @@ description = "Self-contained REST execution engine with a stable black-box cont
 base64.workspace = true
 csv.workspace = true
 futures-util.workspace = true
+getrandom.workspace = true
 httpdate.workspace = true
 percent-encoding.workspace = true
 quick-xml.workspace = true

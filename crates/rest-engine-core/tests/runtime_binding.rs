@@ -533,3 +533,30 @@ async fn runtime_json_envelope_is_strict() {
         .unwrap_err();
     assert!(matches!(error, EngineError::InvalidInput(_)));
 }
+
+#[tokio::test]
+async fn runtime_requests_carry_cookie_session_handles_opened_by_the_host() {
+    // The host owns the engine and its sessions; the runtime payload only
+    // names a handle. A closed session is refused before any network activity.
+    let engine = Engine::new(EngineConfig {
+        allow_private_networks: true,
+        allow_cookie_store: true,
+        ..EngineConfig::default()
+    });
+    let resources = EmptyResources;
+    let binding = RuntimeBinding::new(&engine, &resources);
+    let session = engine.open_cookie_session().await.unwrap();
+    engine.close_cookie_session(&session).await.unwrap();
+
+    let mut request = runtime_request("http://127.0.0.1:9/");
+    request.payload["connection"]["cookies"] = json!({"session": session});
+    let response = invoke_serialized(&binding, request, CancellationToken::new()).await;
+    assert_eq!(response.kind, RuntimeMessageKind::Error);
+    assert_eq!(response.payload["code"], "POLICY_VIOLATION");
+
+    let mut malformed = runtime_request("http://127.0.0.1:9/");
+    malformed.payload["connection"]["cookies"] = json!({"enabled": true, "jar_id": "tenant"});
+    let response = invoke_serialized(&binding, malformed, CancellationToken::new()).await;
+    assert_eq!(response.kind, RuntimeMessageKind::Error);
+    assert_eq!(response.payload["code"], "INVALID_INPUT");
+}

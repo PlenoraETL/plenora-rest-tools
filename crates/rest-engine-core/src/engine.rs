@@ -20,7 +20,7 @@ use tokio::{fs, io::AsyncReadExt, time::sleep};
 use crate::{
     ASYNC_JOB_RECOVERY_CONTRACT, AsyncJobRecovery, AuthConfig, BatchConfig, BatchInputFormat,
     BodyType, CachePolicy, CancellationToken, CapabilityDocument, ConnectionConfig, CookiePolicy,
-    EngineConfig, EngineError, ExecutionControl, ExecutionError, ExecutionMetrics,
+    CookieSession, EngineConfig, EngineError, ExecutionControl, ExecutionError, ExecutionMetrics,
     ExecutionOperation, ExecutionOutput, ExecutionRequest, ExecutionResult, ExecutionStatus,
     FileTransferDirection, FileTransferInput, HttpMethod, HttpResponseMetadata,
     IdempotencyLocation, IntegrityMetadata, JsonObject, OutputMapping, PaginationConfig,
@@ -140,6 +140,17 @@ impl Engine {
         if let Err(error) = validate_execution_configuration(&request) {
             return failed_result(error);
         }
+        // Checked once for the whole operation, before any network activity
+        // and before a credential scope can strip the session from a
+        // follow-up: a stale handle must refuse the operation, not let parts
+        // of it run without cookies.
+        if let Err(error) = self
+            .transport
+            .check_cookie_session(request.connection.cookies.session.as_ref())
+            .await
+        {
+            return failed_result(error);
+        }
         if let Err(error) = self.admit_idempotency(&request) {
             return failed_result(error);
         }
@@ -191,6 +202,29 @@ impl Engine {
 
     pub fn capabilities(&self) -> CapabilityDocument {
         capabilities()
+    }
+
+    /// Opens a cookie session and returns its handle.
+    ///
+    /// A request uses the session by naming the handle in
+    /// `connection.cookies.session`. The engine keeps at most
+    /// `EngineConfig::max_cookie_sessions` sessions; opening one more evicts the
+    /// least recently used session no operation is holding, and its handle is
+    /// refused from then on.
+    pub async fn open_cookie_session(&self) -> Result<CookieSession, EngineError> {
+        if self.is_closed() {
+            return Err(EngineError::EngineClosed);
+        }
+        self.transport.open_cookie_session().await
+    }
+
+    /// Closes a cookie session. Its handle, and every copy of it, is refused
+    /// from now on; closing a stale handle is an error.
+    pub async fn close_cookie_session(&self, session: &CookieSession) -> Result<(), EngineError> {
+        if self.is_closed() {
+            return Err(EngineError::EngineClosed);
+        }
+        self.transport.close_cookie_session(session).await
     }
 
     pub fn close(&self) {
@@ -1785,6 +1819,8 @@ impl Engine {
             max_redirects: connection.request.max_redirects,
             retry: connection.retry.clone(),
             cookies: connection.cookies.clone(),
+            admitted_jar: None,
+            caller_session: connection.cookies.session.clone(),
             cache,
             circuit_breaker: connection.circuit_breaker.clone(),
             requests_per_second: connection.requests_per_second,
@@ -1864,6 +1900,8 @@ impl Engine {
             max_redirects: connection.request.max_redirects,
             retry: connection.retry.clone(),
             cookies: connection.cookies.clone(),
+            admitted_jar: None,
+            caller_session: connection.cookies.session.clone(),
             cache: connection.cache.clone(),
             circuit_breaker: connection.circuit_breaker.clone(),
             requests_per_second: connection.requests_per_second,
@@ -2132,6 +2170,8 @@ impl Engine {
             max_redirects: connection.request.max_redirects,
             retry,
             cookies: connection.cookies.clone(),
+            admitted_jar: None,
+            caller_session: connection.cookies.session.clone(),
             cache: connection.cache.clone(),
             circuit_breaker: connection.circuit_breaker.clone(),
             requests_per_second: connection.requests_per_second,
@@ -3890,6 +3930,9 @@ impl CredentialScope {
             is_transferable_cross_origin_header(name)
                 || preserved.is_some_and(|kept| kept.eq_ignore_ascii_case(name))
         });
+        // The session's cookies do not cross the origin, but the caller's
+        // handle stays in `caller_session`, so the transport still refuses the
+        // request if the session has ended.
         request.cookies = CookiePolicy::default();
         request.tls.client_identity_pem = None;
     }

@@ -1,4 +1,6 @@
-use plenora_rest_core::{CancellationToken, Engine, EngineConfig, EngineError, capabilities};
+use plenora_rest_core::{
+    CancellationToken, CookieSession, Engine, EngineConfig, EngineError, capabilities,
+};
 use pyo3::{create_exception, exceptions::PyException, prelude::*, types::PyModule};
 
 create_exception!(_native, NativePlenoraError, PyException);
@@ -83,6 +85,30 @@ impl NativeEngine {
             to_python_error(EngineError::Runtime(
                 "capabilities could not be serialized".into(),
             ))
+        })
+    }
+
+    /// Opens a cookie session and returns its opaque handle.
+    fn open_cookie_session(&self, py: Python<'_>) -> PyResult<String> {
+        py.detach(|| {
+            self.runtime
+                .block_on(self.engine.open_cookie_session())
+                .map(|session| session.to_token())
+                .map_err(to_python_error)
+        })
+    }
+
+    /// Closes the cookie session `handle` names.
+    fn close_cookie_session(&self, py: Python<'_>, handle: &str) -> PyResult<()> {
+        let session = CookieSession::from_token(handle).ok_or_else(|| {
+            to_python_error(EngineError::InvalidInput(
+                "cookie session handle is not well formed".into(),
+            ))
+        })?;
+        py.detach(|| {
+            self.runtime
+                .block_on(self.engine.close_cookie_session(&session))
+                .map_err(to_python_error)
         })
     }
 
