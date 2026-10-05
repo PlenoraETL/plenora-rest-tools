@@ -62,7 +62,8 @@ pwsh ./scripts/verify.ps1
 Il gate costruisce ambienti self-contained e verifica:
 
 1. cargo check dell'intero workspace con Rust 1.85.1 e Cargo.lock;
-2. JSON Schema Draft 2020-12 e compatibilità delle superfici v1;
+2. JSON Schema Draft 2020-12, un corpus di istanze valide e non valide per ogni
+   schema, e compatibilità delle superfici v1;
 3. rustfmt;
 4. Clippy con tutti i warning negati;
 5. test unitari e black-box Rust;
@@ -76,6 +77,22 @@ la campagna finale di staging descritta nella roadmap.
 
 Il workflow Verify esegue lo stesso script su pull request, push a main e
 avvio manuale.
+
+## Audit delle dipendenze
+
+Il workflow Audit esegue cargo-deny secondo la policy in deny.toml (advisory,
+licenze, sorgenti, wildcard) e pip-audit sulla toolchain Python fissata dai
+gate. Gira su pull request, push a main, una volta al giorno e su avvio
+manuale.
+
+Ogni advisory accettata in deny.toml lo è soltanto perché nessuna versione
+corretta della dipendenza compila sulla MSRV pubblicata. Il workflow esegue
+scripts/check_advisory_exemptions.py, che fallisce se una di quelle eccezioni
+sopravvive a un innalzamento della MSRV.
+
+È deliberatamente separato dal gate di verifica: interroga un database di
+advisory esterno, quindi il suo esito può cambiare a parità di commit. Tenerlo
+fuori da verify.ps1 mantiene riproducibile il gate di release.
 
 ## Modifiche ai contratti
 

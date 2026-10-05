@@ -15,6 +15,7 @@ from urllib.parse import unquote, urlsplit
 try:
     from jsonschema import Draft202012Validator
     from jsonschema.exceptions import SchemaError
+    from referencing import Registry, Resource
 except ImportError as error:  # pragma: no cover - exercised by the container gate
     raise SystemExit(
         "jsonschema is required; run the self-contained scripts/verify.ps1 gate"
@@ -192,6 +193,372 @@ def build_baseline() -> dict[str, Any]:
     }
 
 
+# Instances exercised against the published schemas. Metaschema validity and
+# digest stability say nothing about whether a schema actually accepts the
+# payloads the engine produces and rejects the ones it must refuse, so every
+# schema carries a small positive and negative corpus.
+#
+# `invalid` entries pair an instance with the substring expected in the
+# validation message, which keeps a negative fixture from passing for the wrong
+# reason.
+METRICS = {
+    "requests": 1,
+    "retries": 0,
+    "auth_requests": 0,
+    "poll_requests": 0,
+    "cache_hits": 0,
+    "cache_revalidations": 0,
+    "rate_limit_wait_ms": 0,
+    "input_records": 0,
+    "output_records": 1,
+    "bytes_downloaded": 0,
+    "bytes_uploaded": 0,
+    "elapsed_ms": 3,
+}
+
+RECOVERY = {
+    "contract": "plenora-rest-async-job-recovery-v1",
+    "job_id": "export/1",
+    "cancel_requested": False,
+}
+
+FILE_OUTPUT = {
+    "type": "file",
+    "direction": "download",
+    "artifact_reference": "artifact://tenant/item",
+    "bytes_transferred": 12,
+    "checksum": {"algorithm": "sha256", "value": "0" * 64},
+}
+
+CAPABILITY_ATTRIBUTES = {
+    "contract": "plenora-rest-capability-attributes-v1",
+    "http_methods": ["GET", "POST"],
+    "authentication": ["none", "bearer"],
+    "response_formats": ["json"],
+    "resilience": ["retry"],
+    "orchestration": ["pagination"],
+    "integrity": "sha256",
+}
+
+FIXTURES: dict[str, dict[str, list[Any]]] = {
+    "plenora-rest-async-job-recovery-v1.schema.json": {
+        "valid": [RECOVERY, {**RECOVERY, "cancel_accepted": True}],
+        "invalid": [
+            (
+                {"contract": "other", "job_id": "a", "cancel_requested": False},
+                "was expected",
+            ),
+            ({"contract": RECOVERY["contract"], "job_id": "a"}, "cancel_requested"),
+        ],
+    },
+    "plenora-rest-capability-attributes-v1.schema.json": {
+        "valid": [
+            CAPABILITY_ATTRIBUTES,
+            {
+                **CAPABILITY_ATTRIBUTES,
+                "direction": "upload",
+                "transfer": ["streaming", "runtime_artifact_reference"],
+            },
+        ],
+        "invalid": [
+            ({**CAPABILITY_ATTRIBUTES, "http_methods": []}, "non-empty"),
+            # `direction` and `transfer` are only meaningful together.
+            ({**CAPABILITY_ATTRIBUTES, "direction": "upload"}, "transfer"),
+        ],
+    },
+    "plenora-rest-execution-request-v1.schema.json": {
+        "valid": [
+            {
+                "schema_version": 1,
+                "operation": "test",
+                "connection": {"url": "https://api.example.com/items"},
+            },
+            {
+                "schema_version": 1,
+                "operation": "enrich",
+                "connection": {
+                    "url": "https://api.example.com/items/{id}",
+                    "method": "GET",
+                    "headers": {"Accept": "application/json"},
+                    "parameters": [
+                        {
+                            "name": "id",
+                            "mode": "mapped",
+                            "source": "identifier",
+                            "location": "path",
+                            "required": True,
+                        }
+                    ],
+                    "success_statuses": [200, 204],
+                    "requests_per_second": 5,
+                },
+                "input": {"params": {}, "records": [{"identifier": "a"}]},
+                "options": {
+                    "capture_response_metadata": True,
+                    "response_headers": ["etag"],
+                    "enrichment_concurrency": 4,
+                    "idempotency_key": "abc-123",
+                },
+            },
+        ],
+        "invalid": [
+            (
+                {"operation": "test", "connection": {"url": "https://a.test/"}},
+                "schema_version",
+            ),
+            (
+                {
+                    "schema_version": 1,
+                    "operation": "delete",
+                    "connection": {"url": "https://a.test/"},
+                },
+                "delete",
+            ),
+            ({"schema_version": 1, "operation": "test", "connection": {}}, "url"),
+            (
+                {
+                    "schema_version": 1,
+                    "operation": "test",
+                    "connection": {"url": "https://a.test/", "unexpected": True},
+                },
+                "unexpected",
+            ),
+            (
+                {
+                    "schema_version": 1,
+                    "operation": "test",
+                    "connection": {"url": "https://a.test/"},
+                    "options": {"enrichment_concurrency": 0},
+                },
+                "minimum",
+            ),
+        ],
+    },
+    "plenora-rest-execution-result-v1.schema.json": {
+        "valid": [
+            {
+                "schema_version": 1,
+                "status": "success",
+                "output": {"type": "json", "value": {"ok": True}},
+                "metrics": METRICS,
+                "responses": [
+                    {
+                        "status": 200,
+                        "final_url": "https://api.example.com",
+                        "attempts": 1,
+                        "headers": {"etag": "v1"},
+                    }
+                ],
+                "errors": [],
+                "recoveries": [RECOVERY],
+            }
+        ],
+        "invalid": [
+            # A cache hit used to report `attempts: 0`, which the contract forbids.
+            (
+                {
+                    "schema_version": 1,
+                    "status": "success",
+                    "output": {"type": "none"},
+                    "metrics": METRICS,
+                    "responses": [
+                        {
+                            "status": 200,
+                            "final_url": "https://api.example.com",
+                            "attempts": 0,
+                            "headers": {},
+                        }
+                    ],
+                    "errors": [],
+                },
+                "minimum",
+            ),
+            # More than 128 recovery handles must never reach a public result.
+            (
+                {
+                    "schema_version": 1,
+                    "status": "failed",
+                    "output": {"type": "none"},
+                    "metrics": METRICS,
+                    "responses": [],
+                    "errors": [],
+                    "recoveries": [
+                        {**RECOVERY, "job_id": f"job-{index}"} for index in range(129)
+                    ],
+                },
+                "128",
+            ),
+            (
+                {
+                    "schema_version": 1,
+                    "status": "success",
+                    "output": {"type": "none"},
+                    "metrics": METRICS,
+                    "responses": [],
+                    "errors": [{"category": "io"}],
+                },
+                "phase",
+            ),
+        ],
+    },
+    "plenora-rest-file-transfer-input-v1.schema.json": {
+        "valid": [
+            {
+                "schema_version": 1,
+                "operation": "download",
+                "connection": {"url": "https://api.example.com/artifact"},
+                "input": {
+                    "file": {"artifact_sink": {"reference": "artifact://tenant/item"}}
+                },
+            },
+            {
+                "schema_version": 1,
+                "operation": "upload",
+                "connection": {
+                    "url": "https://api.example.com/artifact",
+                    "method": "PUT",
+                },
+                "input": {"file": {"path": "payload.bin", "expected_sha256": "0" * 64}},
+            },
+        ],
+        "invalid": [
+            (
+                {
+                    "schema_version": 1,
+                    "operation": "test",
+                    "connection": {"url": "https://a.test/"},
+                    "input": {"file": {"path": "payload.bin"}},
+                },
+                "test",
+            ),
+            # A download must name exactly one destination.
+            (
+                {
+                    "schema_version": 1,
+                    "operation": "download",
+                    "connection": {"url": "https://a.test/"},
+                    "input": {
+                        "file": {
+                            "path": "payload.bin",
+                            "artifact_sink": {"reference": "artifact://tenant/item"},
+                        }
+                    },
+                },
+                "is not valid",
+            ),
+            (
+                {
+                    "schema_version": 1,
+                    "operation": "upload",
+                    "connection": {"url": "https://a.test/"},
+                    "input": {
+                        "file": {"path": "payload.bin", "expected_sha256": "nope"}
+                    },
+                },
+                "does not match",
+            ),
+        ],
+    },
+    "plenora-rest-file-transfer-result-v1.schema.json": {
+        "valid": [
+            {
+                "schema_version": 1,
+                "status": "success",
+                "output": FILE_OUTPUT,
+                "metrics": METRICS,
+                "responses": [],
+                "errors": [],
+            },
+            {
+                "schema_version": 1,
+                "status": "failed",
+                "output": {"type": "none"},
+                "metrics": METRICS,
+                "responses": [],
+                "errors": [],
+                "recoveries": [RECOVERY],
+            },
+        ],
+        "invalid": [
+            (
+                {
+                    "schema_version": 1,
+                    "status": "success",
+                    "output": {**FILE_OUTPUT, "direction": "sideways"},
+                    "metrics": METRICS,
+                    "responses": [],
+                    "errors": [],
+                },
+                "sideways",
+            ),
+            # A successful transfer must carry a file output, not `none`.
+            (
+                {
+                    "schema_version": 1,
+                    "status": "success",
+                    "output": {"type": "none"},
+                    "metrics": METRICS,
+                    "responses": [],
+                    "errors": [],
+                },
+                "required",
+            ),
+        ],
+    },
+}
+
+
+def schema_registry(documents: dict[Path, Any]) -> Registry:
+    """Registry of the component-owned schemas, addressable by absolute `$id`."""
+    resources = []
+    for document in documents.values():
+        identifier = document.get("$id")
+        if isinstance(identifier, str) and identifier:
+            resources.append((identifier, Resource.from_contents(document)))
+    return Registry().with_resources(resources)
+
+
+def validate_fixtures(documents: dict[Path, Any]) -> int:
+    """Runs every fixture through its schema; returns how many were checked."""
+    available = {path.name for path in schema_files()}
+    covered = set(FIXTURES)
+    if covered != available:
+        missing = sorted(available - covered)
+        unknown = sorted(covered - available)
+        fail(
+            "every published schema needs a fixture corpus"
+            + (f"; missing: {missing}" if missing else "")
+            + (f"; unknown: {unknown}" if unknown else "")
+        )
+
+    registry = schema_registry(documents)
+    checked = 0
+    for name, corpus in sorted(FIXTURES.items()):
+        document = documents[(SCHEMA_ROOT / name).resolve()]
+        validator = Draft202012Validator(document, registry=registry)
+
+        for instance in corpus["valid"]:
+            errors = sorted(validator.iter_errors(instance), key=str)
+            if errors:
+                fail(
+                    f"{name} rejects a payload the engine produces at "
+                    f"{errors[0].json_path}: {errors[0].message}"
+                )
+            checked += 1
+
+        for instance, expected in corpus["invalid"]:
+            messages = [error.message for error in validator.iter_errors(instance)]
+            if not messages:
+                fail(f"{name} accepts a payload the engine must refuse: {instance!r}")
+            if not any(expected in message for message in messages):
+                fail(
+                    f"{name} rejected a negative fixture for the wrong reason; "
+                    f"expected {expected!r} in {messages}"
+                )
+            checked += 1
+    return checked
+
+
 def validate() -> None:
     paths = schema_files()
     documents = {path.resolve(): load_json(path) for path in paths}
@@ -218,6 +585,8 @@ def validate() -> None:
             documents,
             documents_by_id,
         )
+
+    checked = validate_fixtures(documents)
 
     expected = load_json(BASELINE_PATH)
     actual = build_baseline()
@@ -247,7 +616,7 @@ def validate() -> None:
 
     print(
         f"validated {len(paths)} Draft 2020-12 schemas, local references, "
-        "and immutable v1 public surfaces"
+        f"{checked} schema fixtures, and immutable v1 public surfaces"
     )
 
 

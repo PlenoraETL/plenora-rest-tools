@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use quick_xml::{Reader, events::Event};
+use quick_xml::{Reader, XmlVersion, escape::resolve_predefined_entity, events::Event};
 use serde_json::{Map, Value, json};
 
 use crate::{EngineError, ResponseConfig, ResponseFormat};
@@ -141,7 +141,39 @@ fn parse_xml(body: &[u8]) -> Result<Value, EngineError> {
                 }
                 attach_xml_node(&mut stack, &mut root, node)?;
             }
-            Ok(Event::DocType(_) | Event::GeneralRef(_)) => {
+            // The reader reports every `&...;` in character data as its own
+            // event. The five predefined entities and numeric character
+            // references are part of well-formed XML and every real payload
+            // uses them, so they are resolved here; anything else would need a
+            // DTD, which stays refused.
+            Ok(Event::GeneralRef(event)) => {
+                let resolved = match event.resolve_char_ref() {
+                    Ok(Some(character)) => String::from(character),
+                    Ok(None) => {
+                        let name = event.decode().map_err(|_| {
+                            EngineError::InvalidResponse(
+                                "XML contains an invalid entity reference".to_owned(),
+                            )
+                        })?;
+                        resolve_predefined_entity(&name)
+                            .ok_or_else(|| {
+                                EngineError::InvalidResponse(
+                                    "XML DTDs and entity references are not allowed".to_owned(),
+                                )
+                            })?
+                            .to_owned()
+                    }
+                    Err(_) => {
+                        return Err(EngineError::InvalidResponse(
+                            "XML contains an invalid character reference".to_owned(),
+                        ));
+                    }
+                };
+                if let Some(node) = stack.last_mut() {
+                    node.text.push_str(&resolved);
+                }
+            }
+            Ok(Event::DocType(_)) => {
                 return Err(EngineError::InvalidResponse(
                     "XML DTDs and entity references are not allowed".to_owned(),
                 ));
@@ -175,8 +207,11 @@ fn xml_node(
             EngineError::InvalidResponse("XML contains an invalid attribute".to_owned())
         })?;
         let key = format!("@{}", xml_name(attribute.key.as_ref()));
+        // Attribute values are normalized as XML 1.0 requires. Absent an XML
+        // declaration the specification assumes 1.0, and the 1.1 specific
+        // newline forms are deliberately not honoured for remote payloads.
         let value = attribute
-            .decode_and_unescape_value(reader.decoder())
+            .decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
             .map_err(|_| {
                 EngineError::InvalidResponse("XML contains an invalid attribute value".to_owned())
             })?;

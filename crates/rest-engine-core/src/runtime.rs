@@ -8,11 +8,13 @@ use uuid::Uuid;
 use crate::{
     AuthConfig, CAPABILITY_NAME, CancellationToken, Engine, EngineError, ErrorPayload,
     ExecutionControl, ExecutionOperation, ExecutionRequest, ExecutionResult, ExecutionStatus,
-    FILE_TRANSFER_INPUT_CONTRACT, FILE_TRANSFER_RESULT_CONTRACT, REST_DOWNLOAD, REST_ENRICH,
-    REST_GENERATE, REST_TEST, REST_UPLOAD, RUNTIME_BINDING_VERSION,
+    FILE_TRANSFER_INPUT_CONTRACT, FILE_TRANSFER_RESULT_CONTRACT, IdempotencyLocation,
+    ParameterLocation, REST_DOWNLOAD, REST_ENRICH, REST_GENERATE, REST_TEST, REST_UPLOAD,
+    RUNTIME_BINDING_VERSION,
     capability::{
         EXECUTION_REQUEST_CONTRACT, EXECUTION_RESULT_CONTRACT, RUNTIME_INTERFACE_CONTRACT,
     },
+    engine::{is_disallowed_idempotency_header, is_sensitive_header_name},
 };
 
 pub const RUNTIME_VECTOR_CONTRACT: &str = "plenora-runtime-vector-v1";
@@ -352,14 +354,45 @@ fn reject_inline_secrets(request: &ExecutionRequest) -> Result<(), EngineError> 
             "runtime request must use credential_ref instead of inline authentication".to_owned(),
         ));
     }
-    if request.connection.headers.keys().any(|name| {
-        matches!(
-            name.to_ascii_lowercase().as_str(),
-            "authorization" | "proxy-authorization" | "cookie" | "x-api-key"
-        )
-    }) {
+    if request
+        .connection
+        .headers
+        .keys()
+        .any(|name| is_sensitive_header_name(name))
+    {
         return Err(EngineError::InvalidInput(
             "runtime request contains a sensitive HTTP header".to_owned(),
+        ));
+    }
+    // Blocking only `connection.headers` leaves the same channel open through
+    // the parameter list: a fixed or mapped parameter with `location: "header"`
+    // is turned into an HTTP header later on, and a `location: "cookie"`
+    // parameter is turned into a Cookie header. Both must go through
+    // `credential_ref` like every other secret.
+    if request
+        .connection
+        .parameters
+        .iter()
+        .any(|parameter| match parameter.location {
+            ParameterLocation::Header => is_sensitive_header_name(&parameter.name),
+            ParameterLocation::Cookie => true,
+            _ => false,
+        })
+    {
+        return Err(EngineError::InvalidInput(
+            "runtime request contains a sensitive parameter; use credential_ref".to_owned(),
+        ));
+    }
+    // The idempotency header name is caller configured and the engine inserts a
+    // header with it, so it is the same channel again: naming it `Authorization`
+    // would inject an auth header the runtime boundary otherwise refuses.
+    // `is_disallowed_idempotency_header` trims before classifying, matching what
+    // `apply_idempotency` does when it inserts the header.
+    if request.connection.idempotency.location == IdempotencyLocation::Header
+        && is_disallowed_idempotency_header(&request.connection.idempotency.name)
+    {
+        return Err(EngineError::InvalidInput(
+            "runtime idempotency header name must not read as a credential".to_owned(),
         ));
     }
     if request.connection.tls.client_identity_pem.is_some() {

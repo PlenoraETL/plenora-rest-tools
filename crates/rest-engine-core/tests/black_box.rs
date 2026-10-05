@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
     fs,
@@ -618,6 +618,1352 @@ async fn file_root_blocks_escape_and_downloads_do_not_clobber_by_default() {
     assert_eq!(existing["errors"][0]["code"], "FILE_IO");
     assert_eq!(fs::read(&destination).await.unwrap(), b"keep-me");
     fs::remove_dir_all(directory).await.unwrap();
+}
+
+#[tokio::test]
+async fn file_transfers_require_a_configured_file_root() {
+    let directory = transfer_directory("no-root");
+    let engine = Engine::new(EngineConfig {
+        allow_private_networks: true,
+        allow_file_transfers: true,
+        file_root: None,
+        ..EngineConfig::default()
+    });
+    let absolute = directory.join("escaped.bin");
+
+    for path in [
+        Value::String(absolute.to_string_lossy().into_owned()),
+        json!("relative.bin"),
+    ] {
+        let result = execute(
+            &engine,
+            json!({
+                "schema_version": 1,
+                "operation": "download",
+                "connection": {"url": "http://127.0.0.1:9/", "method": "GET"},
+                "input": {"file": {"path": path}}
+            }),
+        )
+        .await;
+        assert_eq!(result["status"], "failed");
+        assert_eq!(result["errors"][0]["code"], "POLICY_VIOLATION");
+    }
+
+    let upload = execute(
+        &engine,
+        json!({
+            "schema_version": 1,
+            "operation": "upload",
+            "connection": {"url": "http://127.0.0.1:9/", "method": "POST"},
+            "input": {"file": {"path": absolute.to_string_lossy()}}
+        }),
+    )
+    .await;
+    assert_eq!(upload["errors"][0]["code"], "POLICY_VIOLATION");
+    assert!(!absolute.exists());
+    fs::remove_dir_all(directory).await.unwrap();
+}
+
+#[tokio::test]
+async fn cross_origin_pagination_does_not_forward_credentials() {
+    // Two loopback listeners differ by port, so they are distinct origins.
+    let (second_url, second_server, second_observed) =
+        recorded_server(vec![(200, r#"{"items":[{"id":2}]}"#, vec![])]).await;
+    let first_body = format!(r#"{{"items":[{{"id":1}}],"next":"{second_url}"}}"#);
+    let (first_url, first_server, first_observed) = owned_recorded_server(vec![(
+        200,
+        first_body.into_bytes(),
+        vec![("Content-Type", "application/json")],
+    )])
+    .await;
+
+    let result = execute(
+        &local_engine(),
+        json!({
+            "schema_version": 1,
+            "operation": "generate",
+            "connection": {
+                "url": first_url,
+                "method": "GET",
+                "headers": {"X-Trace-Token": "trace-secret"},
+                "auth": {"type": "bearer", "token": "super-secret"},
+                "response": {"records_path": "items"},
+                "pagination": {
+                    "type": "link",
+                    "link_path": "next",
+                    "max_pages": 2,
+                    "allow_cross_origin": true
+                }
+            }
+        }),
+    )
+    .await;
+    first_server.await.unwrap();
+    second_server.await.unwrap();
+
+    assert_eq!(result["status"], "success");
+    assert_eq!(result["output"]["records"].as_array().unwrap().len(), 2);
+
+    let first_request = first_observed.lock().unwrap()[0].to_ascii_lowercase();
+    assert!(first_request.contains("authorization: bearer super-secret"));
+    assert!(first_request.contains("x-trace-token"));
+
+    let second_request = second_observed.lock().unwrap()[0].to_ascii_lowercase();
+    assert!(
+        !second_request.contains("authorization"),
+        "credentials must not follow a pagination link to another origin: {second_request}"
+    );
+    assert!(
+        !second_request.contains("super-secret") && !second_request.contains("trace-secret"),
+        "no credential material may reach another origin: {second_request}"
+    );
+}
+
+#[tokio::test]
+async fn cross_origin_pagination_keeps_polling_follow_ups_unauthenticated() {
+    // The second page is served by another origin and starts a polling flow.
+    // The poll must not re-acquire the credentials from the connection: the
+    // page that introduced it is not the origin that owns them.
+    let (second_url, second_server, second_observed) = recorded_server(vec![
+        (
+            200,
+            r#"{"status":"pending","poll":"/jobs/9"}"#,
+            vec![("Content-Type", "application/json")],
+        ),
+        (
+            200,
+            r#"{"status":"completed","items":[{"id":2}]}"#,
+            vec![("Content-Type", "application/json")],
+        ),
+    ])
+    .await;
+    let first_body =
+        format!(r#"{{"status":"completed","items":[{{"id":1}}],"next":"{second_url}"}}"#);
+    let (first_url, first_server, _) = owned_recorded_server(vec![(
+        200,
+        first_body.into_bytes(),
+        vec![("Content-Type", "application/json")],
+    )])
+    .await;
+
+    let result = execute(
+        &local_engine(),
+        json!({
+            "schema_version": 1,
+            "operation": "generate",
+            "connection": {
+                "url": first_url,
+                "method": "GET",
+                "auth": {"type": "bearer", "token": "super-secret"},
+                "response": {"records_path": "items"},
+                "polling": {
+                    "url_path": "poll",
+                    "status_path": "status",
+                    "interval_ms": 0,
+                    "max_attempts": 3,
+                    "allow_cross_origin": true
+                },
+                "pagination": {
+                    "type": "link",
+                    "link_path": "next",
+                    "max_pages": 2,
+                    "allow_cross_origin": true
+                }
+            }
+        }),
+    )
+    .await;
+    first_server.await.unwrap();
+    second_server.await.unwrap();
+
+    assert_eq!(result["status"], "success", "{result}");
+    let observed = second_observed.lock().unwrap();
+    assert_eq!(observed.len(), 2, "expected a page and a poll request");
+    for request in observed.iter() {
+        let request = request.to_ascii_lowercase();
+        assert!(
+            !request.contains("authorization") && !request.contains("super-secret"),
+            "credentials leaked to a cross-origin follow-up: {request}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn cursor_pagination_is_scoped_to_the_first_origin() {
+    // A cursor is remote input and placeholders are substituted anywhere in the
+    // URL, so cursor pagination must be scoped to the first origin exactly like
+    // an explicit link. Two loopback listeners differ by port, which makes them
+    // distinct origins without depending on name resolution.
+    let (second_url, second_server, second_observed) =
+        recorded_server(vec![(200, r#"{"items":[{"id":2}]}"#, vec![])]).await;
+    let port_of = |url: &str| {
+        url.trim_end_matches('/')
+            .rsplit(':')
+            .next()
+            .expect("a loopback URL always carries a port")
+            .to_owned()
+    };
+    let second_port = port_of(&second_url);
+    let first_body = format!(r#"{{"items":[{{"id":1}}],"cursor":"{second_port}"}}"#);
+    let (first_url, first_server, first_observed) = owned_recorded_server(vec![(
+        200,
+        first_body.into_bytes(),
+        vec![("Content-Type", "application/json")],
+    )])
+    .await;
+    let first_port = port_of(&first_url);
+
+    let result = execute(
+        &local_engine(),
+        json!({
+            "schema_version": 1,
+            "operation": "generate",
+            "connection": {
+                "url": "http://127.0.0.1:{port}/",
+                "method": "GET",
+                "auth": {"type": "bearer", "token": "super-secret"},
+                "static_parameters": {"port": first_port},
+                "response": {"records_path": "items"},
+                "pagination": {
+                    "type": "cursor",
+                    "cursor_param": "port",
+                    "cursor_path": "cursor",
+                    "max_pages": 2
+                }
+            }
+        }),
+    )
+    .await;
+    first_server.await.unwrap();
+    second_server.await.unwrap();
+
+    assert_eq!(result["status"], "success", "{result}");
+    assert_eq!(result["output"]["records"].as_array().unwrap().len(), 2);
+
+    let first_request = first_observed.lock().unwrap()[0].to_ascii_lowercase();
+    assert!(
+        first_request.contains("authorization: bearer super-secret"),
+        "the first page owns the credentials: {first_request}"
+    );
+    let second_request = second_observed.lock().unwrap()[0].to_ascii_lowercase();
+    assert!(
+        !second_request.contains("authorization") && !second_request.contains("super-secret"),
+        "a cursor must not carry credentials to another origin: {second_request}"
+    );
+}
+
+#[tokio::test]
+async fn returning_to_the_first_origin_does_not_restore_credentials() {
+    // A -> B -> A. The page on B is correctly anonymised, but the page after it
+    // is rebuilt from the connection, so without a monotone authorization it
+    // would reach A fully authenticated at a path B chose. B never sees the
+    // secret, yet it would be deciding which authenticated request A receives.
+    //
+    // The two bodies reference each other, so both listeners are bound before
+    // either starts answering.
+    let owner = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let detour = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let owner_url = format!("http://{}/", owner.local_addr().unwrap());
+    let detour_url = format!("http://{}/", detour.local_addr().unwrap());
+
+    let owner_requests = Arc::new(StdMutex::new(Vec::new()));
+    let detour_requests = Arc::new(StdMutex::new(Vec::new()));
+    let owner_bodies = vec![
+        format!(r#"{{"items":[{{"id":1}}],"next":"{detour_url}"}}"#),
+        r#"{"items":[{"id":3}]}"#.to_owned(),
+    ];
+    let detour_bodies = vec![format!(r#"{{"items":[{{"id":2}}],"next":"{owner_url}"}}"#)];
+
+    let owner_server = serve_json(owner, owner_bodies, owner_requests.clone());
+    let detour_server = serve_json(detour, detour_bodies, detour_requests.clone());
+
+    let result = execute(
+        &local_engine(),
+        json!({
+            "schema_version": 1,
+            "operation": "generate",
+            "connection": {
+                "url": owner_url,
+                "method": "GET",
+                "auth": {"type": "bearer", "token": "super-secret"},
+                "response": {"records_path": "items"},
+                "pagination": {
+                    "type": "link",
+                    "link_path": "next",
+                    "max_pages": 3,
+                    "allow_cross_origin": true
+                }
+            }
+        }),
+    )
+    .await;
+    owner_server.await.unwrap();
+    detour_server.await.unwrap();
+
+    assert_eq!(result["status"], "success", "{result}");
+    assert_eq!(result["output"]["records"].as_array().unwrap().len(), 3);
+
+    let owner_requests = owner_requests.lock().unwrap();
+    assert_eq!(
+        owner_requests.len(),
+        2,
+        "the owning origin served two pages"
+    );
+    assert!(
+        owner_requests[0]
+            .to_ascii_lowercase()
+            .contains("authorization: bearer super-secret"),
+        "the first page owns the credentials: {}",
+        owner_requests[0]
+    );
+    assert!(
+        !owner_requests[1]
+            .to_ascii_lowercase()
+            .contains("authorization"),
+        "returning to the owning origin must not restore the credentials: {}",
+        owner_requests[1]
+    );
+    let detour_requests = detour_requests.lock().unwrap();
+    assert!(
+        !detour_requests[0]
+            .to_ascii_lowercase()
+            .contains("super-secret"),
+        "the detour must never see the secret: {}",
+        detour_requests[0]
+    );
+}
+
+#[tokio::test]
+async fn cross_origin_pages_keep_the_idempotency_key() {
+    // The key is caller generated, not a credential, and it is what enables
+    // retrying a non-idempotent method. Dropping it while leaving retries on
+    // would silently remove the protection it exists to provide.
+    let (second_url, second_server, second_observed) =
+        recorded_server(vec![(200, r#"{"items":[{"id":2}]}"#, vec![])]).await;
+    let first_body = format!(r#"{{"items":[{{"id":1}}],"next":"{second_url}"}}"#);
+    let (first_url, first_server, first_observed) = owned_recorded_server(vec![(
+        200,
+        first_body.into_bytes(),
+        vec![("Content-Type", "application/json")],
+    )])
+    .await;
+
+    let result = execute(
+        &local_engine(),
+        json!({
+            "schema_version": 1,
+            "operation": "generate",
+            "connection": {
+                "url": first_url,
+                "method": "GET",
+                "auth": {"type": "bearer", "token": "super-secret"},
+                "response": {"records_path": "items"},
+                "pagination": {
+                    "type": "link",
+                    "link_path": "next",
+                    "max_pages": 2,
+                    "allow_cross_origin": true
+                }
+            },
+            "options": {"idempotency_key": "page-key-1"}
+        }),
+    )
+    .await;
+    first_server.await.unwrap();
+    second_server.await.unwrap();
+
+    assert_eq!(result["status"], "success", "{result}");
+    // Checked on the owning origin first: without this the test would also pass
+    // if the header were never emitted at all.
+    let first_request = first_observed.lock().unwrap()[0].to_ascii_lowercase();
+    assert!(
+        first_request.contains("idempotency-key: "),
+        "the owning origin must receive the idempotency header: {first_request}"
+    );
+    let second_request = second_observed.lock().unwrap()[0].to_ascii_lowercase();
+    // The engine derives a distinct key per page, so the header carries that
+    // derived value rather than the caller's key verbatim; what matters here is
+    // that the header survives the cross-origin hop at all.
+    assert!(
+        second_request.contains("idempotency-key: "),
+        "the idempotency key is not a credential and must survive: {second_request}"
+    );
+    assert!(
+        !second_request.contains("authorization"),
+        "credentials must still be stripped: {second_request}"
+    );
+}
+
+#[tokio::test]
+async fn a_result_url_back_on_the_first_origin_stays_unauthenticated() {
+    // Initial request on A, polling on B, result back on A. The result request
+    // is rebuilt from the connection, so without a scope that stays narrowed
+    // across both hops it would arrive at A fully authenticated at a URL B
+    // chose.
+    let owner = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let poller = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let owner_url = format!("http://{}/", owner.local_addr().unwrap());
+    let poller_url = format!("http://{}/", poller.local_addr().unwrap());
+
+    let owner_requests = Arc::new(StdMutex::new(Vec::new()));
+    let poller_requests = Arc::new(StdMutex::new(Vec::new()));
+    let owner_server = serve_json(
+        owner,
+        vec![
+            format!(r#"{{"status":"pending","poll":"{poller_url}"}}"#),
+            r#"{"value":{"done":true}}"#.to_owned(),
+        ],
+        owner_requests.clone(),
+    );
+    let poller_server = serve_json(
+        poller,
+        vec![format!(
+            r#"{{"status":"completed","result":"{owner_url}"}}"#
+        )],
+        poller_requests.clone(),
+    );
+
+    let result = execute(
+        &local_engine(),
+        json!({
+            "schema_version": 1,
+            "operation": "test",
+            "connection": {
+                "url": owner_url,
+                "method": "GET",
+                "auth": {"type": "bearer", "token": "super-secret"},
+                "polling": {
+                    "url_path": "poll",
+                    "status_path": "status",
+                    "result_url_path": "result",
+                    "interval_ms": 0,
+                    "max_attempts": 3,
+                    "allow_cross_origin": true
+                }
+            }
+        }),
+    )
+    .await;
+    owner_server.await.unwrap();
+    poller_server.await.unwrap();
+
+    assert_eq!(result["status"], "success", "{result}");
+    let owner_requests = owner_requests.lock().unwrap();
+    assert_eq!(
+        owner_requests.len(),
+        2,
+        "initial request and result request"
+    );
+    assert!(
+        owner_requests[0]
+            .to_ascii_lowercase()
+            .contains("authorization: bearer super-secret"),
+        "the initial request owns the credentials: {}",
+        owner_requests[0]
+    );
+    assert!(
+        !owner_requests[1]
+            .to_ascii_lowercase()
+            .contains("authorization"),
+        "a result URL chosen after a cross-origin poll must not be authenticated: {}",
+        owner_requests[1]
+    );
+}
+
+#[tokio::test]
+async fn pagination_keeps_restrictions_introduced_inside_polling() {
+    // Page 1 on A polls B, so the authorization is revoked while following that
+    // chain. Page 2 is served by A again: the revocation has to have flowed back
+    // to the pagination scope, otherwise the page is authenticated again.
+    let owner = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let poller = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let owner_url = format!("http://{}/", owner.local_addr().unwrap());
+    let poller_url = format!("http://{}/", poller.local_addr().unwrap());
+
+    let owner_requests = Arc::new(StdMutex::new(Vec::new()));
+    let poller_requests = Arc::new(StdMutex::new(Vec::new()));
+    let owner_server = serve_json(
+        owner,
+        vec![
+            format!(r#"{{"status":"pending","poll":"{poller_url}"}}"#),
+            format!(r#"{{"status":"completed","items":[{{"id":2}}]}}"#),
+        ],
+        owner_requests.clone(),
+    );
+    let poller_server = serve_json(
+        poller,
+        vec![format!(
+            r#"{{"status":"completed","items":[{{"id":1}}],"next":"{owner_url}"}}"#
+        )],
+        poller_requests.clone(),
+    );
+
+    let result = execute(
+        &local_engine(),
+        json!({
+            "schema_version": 1,
+            "operation": "generate",
+            "connection": {
+                "url": owner_url,
+                "method": "GET",
+                "auth": {"type": "bearer", "token": "super-secret"},
+                "response": {"records_path": "items"},
+                "polling": {
+                    "url_path": "poll",
+                    "status_path": "status",
+                    "interval_ms": 0,
+                    "max_attempts": 3,
+                    "allow_cross_origin": true
+                },
+                "pagination": {
+                    "type": "link",
+                    "link_path": "next",
+                    "max_pages": 2,
+                    "allow_cross_origin": true
+                }
+            }
+        }),
+    )
+    .await;
+    owner_server.await.unwrap();
+    poller_server.await.unwrap();
+
+    assert_eq!(result["status"], "success", "{result}");
+    let owner_requests = owner_requests.lock().unwrap();
+    assert_eq!(owner_requests.len(), 2, "first page and second page");
+    assert!(
+        owner_requests[0]
+            .to_ascii_lowercase()
+            .contains("authorization: bearer super-secret"),
+        "the first page owns the credentials: {}",
+        owner_requests[0]
+    );
+    assert!(
+        !owner_requests[1]
+            .to_ascii_lowercase()
+            .contains("authorization"),
+        "a page reached through a cross-origin poll must stay unauthenticated: {}",
+        owner_requests[1]
+    );
+}
+
+#[tokio::test]
+async fn a_credential_named_idempotency_header_is_not_forwarded() {
+    // The idempotency header name is caller configured; naming it
+    // `Authorization` must not turn the allowlist exception into a way of
+    // forwarding an auth header to another origin.
+    let (second_url, second_server, second_observed) =
+        recorded_server(vec![(200, r#"{"items":[{"id":2}]}"#, vec![])]).await;
+    let first_body = format!(r#"{{"items":[{{"id":1}}],"next":"{second_url}"}}"#);
+    let (first_url, first_server, _) = owned_recorded_server(vec![(
+        200,
+        first_body.into_bytes(),
+        vec![("Content-Type", "application/json")],
+    )])
+    .await;
+
+    let result = execute(
+        &local_engine(),
+        json!({
+            "schema_version": 1,
+            "operation": "generate",
+            "connection": {
+                "url": first_url,
+                "method": "GET",
+                "idempotency": {"name": "Authorization", "location": "header"},
+                "response": {"records_path": "items"},
+                "pagination": {
+                    "type": "link",
+                    "link_path": "next",
+                    "max_pages": 2,
+                    "allow_cross_origin": true
+                }
+            },
+            "options": {"idempotency_key": "page-key-1"}
+        }),
+    )
+    .await;
+    first_server.await.unwrap();
+    second_server.await.unwrap();
+
+    assert_eq!(result["status"], "success", "{result}");
+    let second_request = second_observed.lock().unwrap()[0].to_ascii_lowercase();
+    assert!(
+        !second_request.contains("authorization"),
+        "a credential-shaped idempotency header must not cross the origin: {second_request}"
+    );
+}
+
+#[tokio::test]
+async fn a_remote_cancellation_registered_before_a_revocation_is_not_authenticated() {
+    // The cancellation request is materialized when the job is registered, while
+    // the poll is still on the owning origin. The result URL then moves to
+    // another origin and revokes the authorization. The cancellation fires after
+    // that, so it must reflect the revocation and not the state it was built
+    // with.
+    let owner = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let elsewhere = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let owner_url = format!("http://{}/", owner.local_addr().unwrap());
+    let elsewhere_url = format!("http://{}/", elsewhere.local_addr().unwrap());
+
+    let owner_requests = Arc::new(StdMutex::new(Vec::new()));
+    let owner_server = serve_json(
+        owner,
+        vec![
+            // Submission and poll, both on the owning origin.
+            r#"{"id":"job-7","status":"pending","poll":"/jobs/job-7"}"#.to_owned(),
+            format!(r#"{{"status":"completed","result":"{elsewhere_url}"}}"#),
+            // The cancellation that cancelling the execution triggers.
+            r#"{"cancelled":true}"#.to_owned(),
+        ],
+        owner_requests.clone(),
+    );
+    // Accepts the result request and never answers, so the execution is still
+    // in flight — past the revocation — when it is cancelled. The channel makes
+    // that ordering explicit: sleeping instead would make the test depend on
+    // the machine being fast enough, and a slow runner would cancel before the
+    // revocation, where an authenticated cancellation is in fact correct.
+    let (revoked, revocation) = tokio::sync::oneshot::channel();
+    let stalled = tokio::spawn(async move {
+        let (stream, _) = elsewhere.accept().await.unwrap();
+        let _ = revoked.send(());
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        drop(stream);
+    });
+
+    let request: ExecutionRequest = serde_json::from_value(json!({
+        "schema_version": 1,
+        "operation": "test",
+        "connection": {
+            "url": owner_url,
+            "method": "GET",
+            "auth": {"type": "bearer", "token": "super-secret"},
+            "polling": {
+                "id_path": "id",
+                "url_path": "poll",
+                "status_path": "status",
+                "result_url_path": "result",
+                "interval_ms": 0,
+                "max_attempts": 3,
+                "allow_cross_origin": true,
+                "cancel": {"url_template": "/jobs/job-7/cancel", "method": "POST"}
+            }
+        }
+    }))
+    .unwrap();
+
+    let engine = Arc::new(local_engine());
+    let cancellation = CancellationToken::new();
+    let execution_engine = Arc::clone(&engine);
+    let execution_cancellation = cancellation.clone();
+    let execution = tokio::spawn(async move {
+        execution_engine
+            .execute_with_control(request, ExecutionControl::new(execution_cancellation))
+            .await
+    });
+    timeout(Duration::from_secs(5), revocation)
+        .await
+        .expect("the result request never reached the other origin")
+        .expect("the stalled server ended early");
+    cancellation.cancel();
+
+    let result = timeout(Duration::from_secs(5), execution)
+        .await
+        .expect("execution did not observe cancellation")
+        .unwrap();
+    timeout(Duration::from_secs(5), owner_server)
+        .await
+        .expect("the remote cancellation was not sent")
+        .unwrap();
+    stalled.abort();
+
+    assert_eq!(result.status, plenora_rest_core::ExecutionStatus::Failed);
+    let owner_requests = owner_requests.lock().unwrap();
+    assert!(
+        owner_requests[0]
+            .to_ascii_lowercase()
+            .contains("authorization: bearer super-secret"),
+        "the submission owns the credentials: {}",
+        owner_requests[0]
+    );
+    let cancellation_request = owner_requests
+        .iter()
+        .find(|request| request.starts_with("POST "))
+        .expect("the cancellation request should have reached the owning origin")
+        .to_ascii_lowercase();
+    assert!(
+        !cancellation_request.contains("authorization")
+            && !cancellation_request.contains("super-secret"),
+        "a cancellation sent after the revocation must not be authenticated: {cancellation_request}"
+    );
+}
+
+#[tokio::test]
+async fn the_cache_refuses_to_run_alongside_the_cookie_store() {
+    // A cached entry belongs to the session that produced it, but the jar
+    // changes while the operation runs: a retry or a redirect can pick up a new
+    // session after the key was computed, and cookies expire on their own. The
+    // engine therefore refuses the combination outright.
+    //
+    // OAuth is configured on purpose: the refusal has to happen before anything
+    // reaches the network, so the token endpoint must never be contacted. With
+    // the check left only in the cache layer — which runs after authentication
+    // — this listener would see a connection.
+    let token_endpoint = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let token_url = format!("http://{}/token", token_endpoint.local_addr().unwrap());
+    let contacted = Arc::new(StdMutex::new(false));
+    let watcher_flag = contacted.clone();
+    let watcher = tokio::spawn(async move {
+        if timeout(Duration::from_secs(2), token_endpoint.accept())
+            .await
+            .is_ok()
+        {
+            *watcher_flag.lock().unwrap() = true;
+        }
+    });
+
+    let engine = Engine::new(EngineConfig {
+        allow_private_networks: true,
+        allow_cookie_store: true,
+        ..EngineConfig::default()
+    });
+    let result = execute(
+        &engine,
+        json!({
+            "schema_version": 1,
+            "operation": "test",
+            "connection": {
+                "url": "http://127.0.0.1:9/",
+                "method": "GET",
+                "auth": {
+                    "type": "oauth2_client_credentials",
+                    "token_url": token_url,
+                    "client_id": "id",
+                    "client_secret": "secret"
+                },
+                "cookies": {"enabled": true, "jar_id": "session"},
+                "cache": {"enabled": true, "fresh_for_ms": 600_000, "allow_authenticated": true}
+            }
+        }),
+    )
+    .await;
+    watcher.await.unwrap();
+
+    assert_eq!(result["status"], "failed", "{result}");
+    assert_eq!(result["errors"][0]["code"], "POLICY_VIOLATION");
+    assert!(
+        !*contacted.lock().unwrap(),
+        "a refused request must not authenticate first"
+    );
+}
+
+#[tokio::test]
+async fn many_cookie_sessions_do_not_wedge_the_engine() {
+    // A pooled client counts as a user of its jar, so with the pool as large as
+    // the jar registry every jar can look busy at once. Releasing the clients of
+    // the oldest jar is what keeps new sessions possible; without it the engine
+    // would refuse every later `jar_id` for the rest of its life.
+    let engine = Engine::new(EngineConfig {
+        allow_private_networks: true,
+        allow_cookie_store: true,
+        max_pooled_origins: 300,
+        ..EngineConfig::default()
+    });
+    // Well past the 256 jar bound, each with its own session.
+    for index in 0..300 {
+        let (url, server, _) = recorded_server(vec![(
+            200,
+            r#"{"ok":true}"#,
+            vec![("Set-Cookie", "sid=x; Path=/")],
+        )])
+        .await;
+        let result = execute(
+            &engine,
+            json!({
+                "schema_version": 1,
+                "operation": "test",
+                "connection": {
+                    "url": url,
+                    "method": "GET",
+                    "cookies": {"enabled": true, "jar_id": format!("tenant-{index}")}
+                }
+            }),
+        )
+        .await;
+        server.await.unwrap();
+        assert_eq!(
+            result["status"], "success",
+            "session {index} must still be admitted: {result}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_busy_oldest_jar_does_not_block_new_sessions() {
+    // The oldest jar is the natural eviction candidate, but here it has a
+    // request in flight. A new session must still be admitted by freeing one of
+    // the others rather than giving up on the first candidate.
+    let engine = Arc::new(Engine::new(EngineConfig {
+        allow_private_networks: true,
+        allow_cookie_store: true,
+        max_pooled_origins: 300,
+        ..EngineConfig::default()
+    }));
+    let session = |url: &str, jar: &str| {
+        json!({
+            "schema_version": 1,
+            "operation": "test",
+            "connection": {
+                "url": url,
+                "method": "GET",
+                // Far longer than the loop below can take, so the stalled
+                // request cannot finish on its own and hand the test a pass it
+                // did not earn.
+                "request": {"timeout_ms": 600_000},
+                "cookies": {"enabled": true, "jar_id": jar}
+            }
+        })
+    };
+
+    // The oldest jar, left waiting on a server that never answers.
+    let stalled = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let stalled_url = format!("http://{}/", stalled.local_addr().unwrap());
+    let (accepted, arrival) = tokio::sync::oneshot::channel();
+    let stalled_server = tokio::spawn(async move {
+        let (stream, _) = stalled.accept().await.unwrap();
+        let _ = accepted.send(());
+        // Held until the test aborts this task, so the request stays in flight
+        // however long the loop below takes.
+        std::future::pending::<()>().await;
+        drop(stream);
+    });
+    let holder_engine = Arc::clone(&engine);
+    let holder = tokio::spawn(async move {
+        execute(&holder_engine, session(&stalled_url, "tenant-oldest")).await
+    });
+    timeout(Duration::from_secs(5), arrival)
+        .await
+        .expect("the long request never reached its server")
+        .expect("the stalled server ended early");
+
+    // Fill the registry behind it, then ask for one more.
+    for index in 0..MAX_COOKIE_JARS_IN_TEST {
+        assert!(
+            !holder.is_finished(),
+            "the oldest jar must still be busy at session {index}, \
+             or the eviction was never forced past its first candidate"
+        );
+        let (url, server, _) = recorded_server(vec![(200, r#"{"ok":true}"#, vec![])]).await;
+        let result = execute(&engine, session(&url, &format!("tenant-{index}"))).await;
+        assert_eq!(
+            result["status"], "success",
+            "session {index} must be admitted while the oldest jar is busy: {result}"
+        );
+        server.await.unwrap();
+    }
+
+    holder.abort();
+    stalled_server.abort();
+}
+
+/// One past the engine's jar bound, so the loop above forces an eviction.
+const MAX_COOKIE_JARS_IN_TEST: usize = 257;
+
+#[tokio::test]
+async fn a_jar_reserved_by_a_running_request_is_not_evicted() {
+    // Evicting a jar that a request is still using would split one session in
+    // two: the running request stores its cookies in the jar it is holding,
+    // while the next request naming the same `jar_id` is handed a fresh one.
+    // The registry is driven well past its bound while the first request is
+    // deliberately stuck, and the session has to survive it.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let held_url = format!("http://{}/", listener.local_addr().unwrap());
+    let (arrived, arrival) = tokio::sync::oneshot::channel();
+    let (release, released) = tokio::sync::oneshot::channel::<()>();
+    let observed = Arc::new(StdMutex::new(Vec::new()));
+    let server_observed = Arc::clone(&observed);
+    let server = tokio::spawn(async move {
+        let response = |set_cookie: bool| {
+            let body = r#"{"ok":true}"#;
+            let cookie = if set_cookie {
+                "Set-Cookie: sid=held; Path=/\r\n"
+            } else {
+                ""
+            };
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n{cookie}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+        };
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let request = read_request(&mut stream).await;
+        server_observed.lock().unwrap().push(request);
+        let _ = arrived.send(());
+        // Nothing is written until the test says so, so this request stays in
+        // flight — and its jar reserved — while the registry fills behind it.
+        released.await.unwrap();
+        stream.write_all(response(true).as_bytes()).await.unwrap();
+        stream.shutdown().await.unwrap();
+
+        let (mut stream, _) = timeout(Duration::from_secs(30), listener.accept())
+            .await
+            .expect("expected the follow-up request")
+            .unwrap();
+        let request = read_request(&mut stream).await;
+        server_observed.lock().unwrap().push(request);
+        stream.write_all(response(false).as_bytes()).await.unwrap();
+        stream.shutdown().await.unwrap();
+    });
+
+    let engine = Arc::new(Engine::new(EngineConfig {
+        allow_private_networks: true,
+        allow_cookie_store: true,
+        max_pooled_origins: 300,
+        ..EngineConfig::default()
+    }));
+    let session = |url: &str, jar: &str| {
+        json!({
+            "schema_version": 1,
+            "operation": "test",
+            "connection": {
+                "url": url,
+                "method": "GET",
+                // Far longer than the loop below can take, so the stuck request
+                // cannot time out and release its jar on its own.
+                "request": {"timeout_ms": 600_000},
+                "cookies": {"enabled": true, "jar_id": jar}
+            }
+        })
+    };
+
+    let held_engine = Arc::clone(&engine);
+    let held_target = held_url.clone();
+    let held =
+        tokio::spawn(async move { execute(&held_engine, session(&held_target, "held")).await });
+    timeout(Duration::from_secs(5), arrival)
+        .await
+        .expect("the held request never reached its server")
+        .expect("the server ended early");
+
+    for index in 0..MAX_COOKIE_JARS_IN_TEST {
+        assert!(
+            !held.is_finished(),
+            "the held jar must still be reserved at session {index}, \
+             or the eviction was never put to the test"
+        );
+        let (url, filler, _) = recorded_server(vec![(200, r#"{"ok":true}"#, vec![])]).await;
+        let result = execute(&engine, session(&url, &format!("tenant-{index}"))).await;
+        assert_eq!(
+            result["status"], "success",
+            "session {index} must be admitted: {result}"
+        );
+        filler.await.unwrap();
+    }
+
+    release.send(()).unwrap();
+    let first = held.await.unwrap();
+    assert_eq!(first["status"], "success", "{first}");
+    let second = execute(&engine, session(&held_url, "held")).await;
+    assert_eq!(second["status"], "success", "{second}");
+    server.await.unwrap();
+
+    let observed = observed.lock().unwrap();
+    assert_eq!(observed.len(), 2);
+    assert!(
+        observed[1]
+            .to_ascii_lowercase()
+            .contains("cookie: sid=held"),
+        "the reserved jar must survive the eviction pressure: {}",
+        observed[1]
+    );
+}
+
+#[tokio::test]
+async fn oversized_set_cookie_headers_are_dropped_at_the_documented_bound() {
+    // 8192 bytes is accepted, 8193 is not: a remote service must not be able to
+    // push bulk data into engine-held state one header at a time.
+    let small = format!(
+        "small={}; Path=/",
+        "a".repeat(8192 - "small=; Path=/".len())
+    );
+    let large = format!(
+        "large={}; Path=/",
+        "a".repeat(8193 - "large=; Path=/".len())
+    );
+    assert_eq!(small.len(), 8192);
+    assert_eq!(large.len(), 8193);
+    let (url, server, observed) = owned_recorded_server(vec![
+        (
+            200,
+            b"{}".to_vec(),
+            vec![
+                ("Set-Cookie", Box::leak(small.into_boxed_str())),
+                ("Set-Cookie", Box::leak(large.into_boxed_str())),
+            ],
+        ),
+        (200, b"{}".to_vec(), Vec::new()),
+    ])
+    .await;
+    let engine = Engine::new(EngineConfig {
+        allow_private_networks: true,
+        allow_cookie_store: true,
+        ..EngineConfig::default()
+    });
+    let request = json!({
+        "schema_version": 1,
+        "operation": "test",
+        "connection": {
+            "url": url,
+            "method": "GET",
+            "cookies": {"enabled": true, "jar_id": "bounded"}
+        }
+    });
+
+    execute(&engine, request.clone()).await;
+    let second = execute(&engine, request).await;
+    server.await.unwrap();
+
+    assert_eq!(second["status"], "success", "{second}");
+    let sent = observed.lock().unwrap()[1].to_ascii_lowercase();
+    assert!(
+        sent.contains("small="),
+        "a cookie at the bound must be kept: {}",
+        &sent[..sent.len().min(200)]
+    );
+    assert!(
+        !sent.contains("large="),
+        "a cookie past the bound must be dropped: {}",
+        &sent[..sent.len().min(200)]
+    );
+}
+
+#[tokio::test]
+async fn a_cookie_jar_outlives_the_clients_that_use_it() {
+    // The jar belongs to the engine, not to a pooled client. With pooling off
+    // entirely, every request provably builds a fresh client, so the session can
+    // only survive if the jar outlives it.
+    let (first_url, first_server, first_observed) = recorded_server(vec![
+        (200, r#"{"step":1}"#, vec![("Set-Cookie", "sid=a; Path=/")]),
+        (200, r#"{"step":3}"#, vec![]),
+    ])
+    .await;
+    let (second_url, second_server, _) =
+        recorded_server(vec![(200, r#"{"step":2}"#, vec![])]).await;
+    let engine = Engine::new(EngineConfig {
+        allow_private_networks: true,
+        allow_cookie_store: true,
+        max_pooled_origins: 0,
+        ..EngineConfig::default()
+    });
+    let with_jar = |url: &str| {
+        json!({
+            "schema_version": 1,
+            "operation": "test",
+            "connection": {
+                "url": url,
+                "method": "GET",
+                "cookies": {"enabled": true, "jar_id": "session"}
+            }
+        })
+    };
+
+    execute(&engine, with_jar(&first_url)).await;
+    execute(&engine, with_jar(&second_url)).await;
+    let third = execute(&engine, with_jar(&first_url)).await;
+    first_server.await.unwrap();
+    second_server.await.unwrap();
+
+    assert_eq!(third["status"], "success", "{third}");
+    let first_observed = first_observed.lock().unwrap();
+    assert_eq!(first_observed.len(), 2);
+    assert!(
+        first_observed[1]
+            .to_ascii_lowercase()
+            .contains("cookie: sid=a"),
+        "the session must outlive the client that first sent it: {}",
+        first_observed[1]
+    );
+}
+
+#[tokio::test]
+async fn a_cached_response_is_not_shared_across_redirect_policies() {
+    // The first request is allowed to follow the redirect and caches what the
+    // target answered. The second forbids redirects, so it must see the 3xx
+    // rather than the followed result.
+    let (url, server, _) = recorded_server(vec![
+        (
+            302,
+            "",
+            vec![("Location", "/target"), ("Cache-Control", "no-store")],
+        ),
+        (
+            200,
+            r#"{"followed":true}"#,
+            vec![("Cache-Control", "max-age=600")],
+        ),
+        (
+            302,
+            "",
+            vec![("Location", "/target"), ("Cache-Control", "no-store")],
+        ),
+    ])
+    .await;
+    let engine = local_engine();
+
+    let followed = execute(
+        &engine,
+        json!({
+            "schema_version": 1,
+            "operation": "test",
+            "connection": {
+                "url": url,
+                "method": "GET",
+                "request": {"allow_redirects": true, "max_redirects": 3},
+                "cache": {"enabled": true, "fresh_for_ms": 600_000},
+                "success_statuses": [302]
+            }
+        }),
+    )
+    .await;
+    let direct = execute(
+        &engine,
+        json!({
+            "schema_version": 1,
+            "operation": "test",
+            "connection": {
+                "url": url,
+                "method": "GET",
+                "request": {"allow_redirects": false},
+                "cache": {"enabled": true, "fresh_for_ms": 600_000},
+                "success_statuses": [302]
+            }
+        }),
+    )
+    .await;
+    server.await.unwrap();
+
+    assert_eq!(followed["output"]["value"]["followed"], true);
+    assert_eq!(
+        direct["metrics"]["cache_hits"], 0,
+        "a request that forbids redirects must not be served a followed response: {direct}"
+    );
+    assert_eq!(direct["output"]["value"], Value::Null);
+}
+
+#[tokio::test]
+async fn wildcard_response_capture_hides_vendor_credential_headers() {
+    let (url, server, _) = recorded_server(vec![(
+        200,
+        r#"{"ok":true}"#,
+        vec![
+            ("ETag", "\"v1\""),
+            ("X-Auth-Token", "vendor-secret"),
+            ("X-Amz-Security-Token", "aws-secret"),
+            ("X-RateLimit-Remaining", "42"),
+        ],
+    )])
+    .await;
+
+    let result = execute(
+        &local_engine(),
+        json!({
+            "schema_version": 1,
+            "operation": "test",
+            "connection": {"url": url, "method": "GET"},
+            "options": {"capture_response_metadata": true, "response_headers": ["*"]}
+        }),
+    )
+    .await;
+    server.await.unwrap();
+
+    let headers = &result["responses"][0]["headers"];
+    assert_eq!(headers["etag"], "\"v1\"");
+    assert_eq!(headers["x-ratelimit-remaining"], "42");
+    assert!(headers.get("x-auth-token").is_none());
+    assert!(headers.get("x-amz-security-token").is_none());
+}
+
+#[tokio::test]
+async fn cached_responses_report_a_contract_valid_attempt_count() {
+    let (url, server, _) = recorded_server(vec![(
+        200,
+        r#"{"ok":true}"#,
+        vec![("Cache-Control", "max-age=60")],
+    )])
+    .await;
+    let engine = local_engine();
+    let request = json!({
+        "schema_version": 1,
+        "operation": "test",
+        "connection": {
+            "url": url,
+            "method": "GET",
+            "cache": {"enabled": true, "fresh_for_ms": 60_000}
+        },
+        "options": {"capture_response_metadata": true}
+    });
+
+    let first = execute(&engine, request.clone()).await;
+    let second = execute(&engine, request).await;
+    server.await.unwrap();
+
+    assert_eq!(first["status"], "success");
+    assert_eq!(second["status"], "success");
+    assert_eq!(second["metrics"]["cache_hits"], 1);
+    // The v1 execution result schema declares `attempts` with `minimum: 1`.
+    for result in [&first, &second] {
+        assert!(
+            result["responses"][0]["attempts"].as_u64().unwrap() >= 1,
+            "attempts must satisfy the published contract: {result}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn numeric_transforms_preserve_integers_beyond_float_precision() {
+    let identifier = 9_007_199_254_740_993_i64;
+    let body = format!(r#"{{"id":{identifier},"count":7}}"#);
+    let (url, server, _) = owned_recorded_server(vec![(200, body.into_bytes(), vec![])]).await;
+
+    let result = execute(
+        &local_engine(),
+        json!({
+            "schema_version": 1,
+            "operation": "generate",
+            "connection": {
+                "url": url,
+                "method": "GET",
+                "response": {
+                    "output_mapping": [
+                        {"path": "id", "column": "id"},
+                        {"path": "count", "column": "count"}
+                    ],
+                    "transforms": [
+                        {"source": "id", "column": "id", "operation": "add", "value": 1},
+                        {"source": "count", "column": "halved", "operation": "divide", "value": 2}
+                    ]
+                }
+            }
+        }),
+    )
+    .await;
+    server.await.unwrap();
+
+    let record = &result["output"]["records"][0];
+    assert_eq!(record["id"], json!(identifier + 1));
+    // A non-exact integer division still yields the floating point result.
+    assert_eq!(record["halved"], json!(3.5));
+}
+
+#[tokio::test]
+async fn numeric_transforms_cover_unsigned_overflow_and_rounding_edges() {
+    let body = format!(r#"{{"big":{},"small":{},"exact":9}}"#, u64::MAX, i64::MIN);
+    let (url, server, _) = owned_recorded_server(vec![(200, body.into_bytes(), vec![])]).await;
+
+    let result = execute(
+        &local_engine(),
+        json!({
+            "schema_version": 1,
+            "operation": "generate",
+            "connection": {
+                "url": url,
+                "method": "GET",
+                "response": {
+                    "output_mapping": [
+                        {"path": "big", "column": "big"},
+                        {"path": "small", "column": "small"},
+                        {"path": "exact", "column": "exact"}
+                    ],
+                    "transforms": [
+                        // An unsigned value above i64::MAX stays exact.
+                        {"source": "big", "column": "rounded", "operation": "round", "value": 4},
+                        {"source": "big", "column": "minus_one", "operation": "subtract", "value": 1},
+                        // i64::MIN / -1 has no i64 representation but fits u64.
+                        {"source": "small", "column": "negated", "operation": "divide", "value": -1},
+                        // A product beyond u64 is not representable as an exact
+                        // JSON integer, so it must be null and not a lossy float.
+                        {"source": "big", "column": "squared", "operation": "multiply", "value": u64::MAX},
+                        {"source": "exact", "column": "thirds", "operation": "divide", "value": 3}
+                    ]
+                }
+            }
+        }),
+    )
+    .await;
+    server.await.unwrap();
+
+    let record = &result["output"]["records"][0];
+    assert_eq!(record["rounded"], json!(u64::MAX));
+    assert_eq!(record["minus_one"], json!(u64::MAX - 1));
+    assert_eq!(record["negated"], json!(i64::MIN.unsigned_abs()));
+    assert_eq!(record["squared"], Value::Null);
+    assert_eq!(record["thirds"], json!(3));
+}
+
+#[tokio::test]
+async fn xml_responses_decode_entities_and_normalize_attribute_whitespace() {
+    // `&amp;` and friends are mandatory XML escaping: a parser that rejects
+    // them cannot read ordinary payloads. A literal tab or newline inside an
+    // attribute is normalized to a space, while a character reference is not,
+    // which is what XML 1.0 attribute-value normalization prescribes.
+    let body = concat!(
+        "<?xml version=\"1.0\"?>",
+        "<item id=\"a&amp;b\" note=\"line
+break	and tab\" code=\"&#65;&#x42;\">",
+        "<name>Ada&lt;Lovelace&gt;</name>",
+        "</item>"
+    );
+    let (url, server, _) =
+        recorded_server(vec![(200, body, vec![("Content-Type", "application/xml")])]).await;
+
+    let result = execute(
+        &local_engine(),
+        json!({
+            "schema_version": 1,
+            "operation": "test",
+            "connection": {
+                "url": url,
+                "method": "GET",
+                "response": {"format": "xml"}
+            }
+        }),
+    )
+    .await;
+    server.await.unwrap();
+
+    assert_eq!(result["status"], "success", "{result}");
+    let item = &result["output"]["value"]["item"];
+    assert_eq!(item["@id"], "a&b");
+    assert_eq!(item["@note"], "line break and tab");
+    assert_eq!(item["@code"], "AB");
+    assert_eq!(item["name"], "Ada<Lovelace>");
+}
+
+#[tokio::test]
+async fn xml_responses_still_refuse_dtds_and_unknown_entities() {
+    for body in [
+        "<!DOCTYPE item [<!ENTITY x \"y\">]><item>&x;</item>",
+        "<item>&unknown;</item>",
+    ] {
+        let (url, server, _) =
+            recorded_server(vec![(200, body, vec![("Content-Type", "application/xml")])]).await;
+        let result = execute(
+            &local_engine(),
+            json!({
+                "schema_version": 1,
+                "operation": "test",
+                "connection": {
+                    "url": url,
+                    "method": "GET",
+                    "response": {"format": "xml"}
+                }
+            }),
+        )
+        .await;
+        server.await.unwrap();
+        assert_eq!(result["status"], "failed", "{body} must be refused");
+        assert_eq!(result["errors"][0]["code"], "INVALID_RESPONSE");
+    }
 }
 
 #[tokio::test]
@@ -1943,6 +3289,35 @@ async fn recorded_server(
     .await
 }
 
+/// Answers `bodies` in order on an already bound listener, recording each raw
+/// request. Used when the response bodies have to reference the listener's own
+/// address, which is only known after binding.
+fn serve_json(
+    listener: TcpListener,
+    bodies: Vec<String>,
+    observed: Arc<StdMutex<Vec<String>>>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        for body in bodies {
+            // Bounded: a regression that breaks the chain should fail the test
+            // rather than leave it waiting for a request that never comes.
+            let (mut stream, _) = timeout(Duration::from_secs(30), listener.accept())
+                .await
+                .expect("expected another request")
+                .unwrap();
+            let request = read_request(&mut stream).await;
+            observed.lock().unwrap().push(request);
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(head.as_bytes()).await.unwrap();
+            stream.write_all(body.as_bytes()).await.unwrap();
+            stream.shutdown().await.unwrap();
+        }
+    })
+}
+
 async fn owned_recorded_server(
     responses: Vec<OwnedTestResponse>,
 ) -> (String, JoinHandle<()>, Arc<StdMutex<Vec<String>>>) {
@@ -1952,7 +3327,12 @@ async fn owned_recorded_server(
     let task_observed = observed.clone();
     let task = tokio::spawn(async move {
         for (status, body, headers) in responses {
-            let (mut stream, _) = listener.accept().await.unwrap();
+            // Bounded: a regression that stops the chain early should fail the
+            // test rather than leave it waiting for a request that never comes.
+            let (mut stream, _) = timeout(Duration::from_secs(30), listener.accept())
+                .await
+                .expect("expected another request")
+                .unwrap();
             let request = read_request(&mut stream).await;
             task_observed.lock().unwrap().push(request);
             let reason = match status {
@@ -2141,7 +3521,4 @@ async fn read_request(stream: &mut TcpStream) -> String {
     }
     String::from_utf8_lossy(&request).into_owned()
 }
-use std::{
-    sync::{Arc, Mutex as StdMutex},
-    time::Duration,
-};
+use std::sync::{Arc, Mutex as StdMutex};

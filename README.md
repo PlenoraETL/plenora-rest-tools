@@ -10,8 +10,9 @@ pubbliche:
 | Python | plenora-rest | SDK sincrono basato su una wheel ABI3 |
 | Runtime Plenora | plenora.rest-tools | invocazione black-box tramite contratti versionati |
 
-La versione corrente dei manifest è 0.2.2. Le operazioni e i payload pubblici
-usano contratti v1; il catalogo delle capability usa Plenora Capabilities v2.
+La versione corrente è quella dichiarata in `release-metadata.json` e negli
+altri manifest versionati. Le operazioni e i payload pubblici usano contratti
+v1; il catalogo delle capability usa Plenora Capabilities v2.
 
 ## Obiettivo
 

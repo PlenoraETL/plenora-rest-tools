@@ -153,13 +153,38 @@ I payload ordinari rispettano max_request_bytes e max_response_bytes. Upload e
 download usano un limite separato, max_file_transfer_bytes, e non devono
 caricare l'intero artifact in memoria.
 
+I trasferimenti locali richiedono sia allow_file_transfers sia una file_root
+configurata. Senza file_root non esiste un confine da applicare, quindi la
+richiesta viene rifiutata; path assoluti e relativi vengono comunque risolti e
+verificati all'interno della radice.
+
+Il confinamento vale nei confronti del chiamante, non di un processo che possa
+scrivere concorrentemente dentro la radice: la verifica avviene sul path
+canonicalizzato prima dell'apertura, quindi la sostituzione concorrente di una
+directory intermedia con un collegamento simbolico non è impedita. La file_root
+deve essere una directory non condivisa con processi non fidati.
+
 Per i download:
 
 - i byte vengono scritti in un file di staging;
 - overwrite deve essere esplicito;
 - il resume usa Range e validatori coerenti;
 - dimensione e SHA-256 possono essere verificati;
-- un output incompleto non viene promosso a risultato finale.
+- un output incompleto non viene promosso a risultato finale;
+- il file di staging viene rimosso anche quando il trasferimento viene
+  cancellato o interrotto da una deadline.
+
+La promozione finale dello staging non viene annullata: dopo che il rename è
+andato a buon fine non è possibile stabilire in modo portabile che il path
+punti ancora al file scritto dal motore, quindi un errore successivo può
+lasciare un target completo invece di distruggere un file di un altro processo.
+
+Per gli upload il motore ricalcola lo SHA-256 della sorgente al termine del
+trasferimento e fallisce se differisce da quello dichiarato. È un rilevamento
+best-effort, non una garanzia: la sorgente resta un file condiviso che il
+trasporto riapre a ogni tentativo, quindi una modifica annullata prima del
+ricalcolo non viene osservata. Per una garanzia forte la sorgente non deve
+essere scrivibile da altri processi durante il trasferimento.
 
 Nel runtime il payload contiene un riferimento opaco. RuntimeResources risolve
 il riferimento verso un path autorizzato soltanto all'interno del processo. Il
@@ -176,13 +201,120 @@ sono gestiti dal motore, disabilitati per default e limitati alla stessa
 origin. Il client sottostante non applica proxy ambientali o redirect
 automatici.
 
+La cache HTTP è isolata per chiamante, non solo per URL. Nella chiave entrano
+anche autenticazione, identità TLS client, proxy e policy dei redirect. Un
+certificato client conta come autenticazione: cachearne la risposta richiede
+allow_authenticated come per un bearer token. Il pool di connessioni era già
+isolato, ma la cache viene consultata prima del pool e richiede quindi lo stesso
+isolamento.
+
+Cache e cookie store non si combinano: abilitarli insieme è rifiutato con una
+violazione di policy. Una entry appartiene alla sessione che l'ha prodotta, ma
+il jar cambia mentre l'operazione è in corso — un retry o un redirect possono
+acquisire una sessione nuova dopo il calcolo della chiave, e i cookie scadono da
+soli senza nulla da osservare. Rappresentare la sessione nella chiave darebbe
+una garanzia solo apparente, quindi la combinazione resta esclusa finché il
+motore non possiede uno store che possa fissare i cookie per singolo hop.
+
+I cookie jar appartengono comunque al motore e non ai client del pool: sono
+indicizzati per jar_id, sopravvivono all'espulsione di un client e la loro
+istanza fa parte dell'identità del client, così un client creato prima di una
+ricreazione del jar non continua a usare la sessione precedente. Il numero di
+jar è limitato; raggiunto il limite viene espulso il jar più vecchio fra quelli
+che nessuna operazione ha prenotato, mai uno ancora prenotato, perché espellere
+un jar attivo dividerebbe una sessione fra richieste concorrenti. Le prenotazioni
+sono contate dal motore e non dedotte dal numero di riferimenti al jar: quanti
+ne tenga un client HTTP del pool è un dettaglio interno di quel client, e un
+client nel pool non è una prenotazione. Espellere un jar libero porta via anche
+i client costruiti su di esso — una riconnessione, non la perdita di una
+sessione — e nessun altro jar viene toccato. La richiesta viene rifiutata solo se
+ogni jar è prenotato da un'operazione attiva, e il rifiuto avviene prima di
+qualunque attività di rete, inclusa l'acquisizione di un token OAuth: la
+prenotazione copre l'intera operazione, non la sola richiesta HTTP. Lo store
+scarta inoltre header Set-Cookie oltre 8 KiB, come limite di risorsa.
+
+Autorizzare una richiesta di follow-up verso un'altra origin non autorizza il
+trasferimento delle credenziali. L'origin proprietaria è quella a cui viene
+inviata la prima richiesta e non viene mai ricalcolata da una risposta, perché
+l'URL su cui una risposta termina può essere già stato scelto dal servizio
+remoto.
+
+Quando un link di paginazione, un URL di polling, un result URL o una
+cancellazione remota lascia quell'origin, il motore rimuove autenticazione,
+cookie e identità TLS client, e conserva soltanto gli header di una allowlist
+che descrivono la rappresentazione richiesta: Accept e varianti, Content-Type,
+User-Agent, Cache-Control, Pragma, Range, If-Range e i condizionali If-Match,
+If-None-Match, If-Modified-Since, If-Unmodified-Since. L'inoltro usa una
+allowlist e non un elenco di nomi vietati perché un solo nome specifico del
+fornitore non riconosciuto basterebbe a consegnare un segreto a un'origin
+scelta dal servizio remoto.
+
+L'header con la chiave di idempotenza fa eccezione ed è conservato: non è una
+credenziale, è generato dal chiamante, e rimuoverlo lascerebbe attivi i retry
+sui metodi non idempotenti senza la protezione che la chiave fornisce. Le
+chiavi in query o nel body non sono mai state rimosse, essendo parte dell'URL o
+del payload.
+
+Poiché il nome di quell'header è configurabile, l'eccezione è concessa soltanto
+a un nome che dichiara di trasportare una chiave di idempotenza. Un nome dalla
+semantica di credenziale non viene conservato e, sul confine runtime, viene
+rifiutato: altrimenti chiamare `Authorization` l'header di idempotenza sarebbe
+un modo per allargare la allowlist.
+
+L'autorizzazione è monotona. Una volta che una catena ha lasciato l'origin
+proprietaria, la revoca vale per ogni richiesta derivata, compresa una che
+torni all'origin di partenza: altrimenti un'origin intermedia potrebbe scegliere
+quale richiesta autenticata il motore invia all'origin proprietaria, che è un
+confused deputy anche se l'intermediario non vede mai il segreto. Per lo stesso
+motivo un polling cross-origin revoca le credenziali anche per il result URL e
+per la cancellazione remota che introduce.
+
 Nel runtime:
 
 - l'autenticazione inline è rifiutata;
-- Authorization, Proxy-Authorization, Cookie e API key inline sono rifiutati;
+- gli header sensibili inline sono rifiutati, sia in connection.headers sia
+  nei parametri con location header o cookie;
 - le credenziali sono ottenute tramite credential_ref;
 - artifact e direzione sono verificati;
 - correlation id e causation id vengono preservati secondo il contratto.
+
+Per il rifiuto dei segreti inline sul confine runtime e per la redazione dei
+risultati pubblici vale invece una classificazione conservativa, non un elenco
+esatto. Il nome viene diviso in componenti su qualunque carattere non
+alfanumerico, non solo trattino e underscore, perché la grammatica HTTP ammette
+anche punto, punto esclamativo e altri: X.Token va classificato come X-Token.
+
+Un nome è sensibile quando vale una di queste condizioni. Primo, una componente
+è una parola di credenziale: authorization, bearer, cookie, credential,
+credentials, jwt, key, passcode, passphrase, passwd, password, secret, session,
+signature, token. Secondo, una componente termina con uno dei suffissi ammessi —
+accesskey, apikey, authorization, credential, jwt, passcode, passphrase, passwd,
+password, privatekey, secret, signature, token — che copre le grafie incollate
+come X-SessionToken. Terzo, componenti adiacenti compongono un marcatore come
+X-Api-Key. Quarto, una componente inizia o finisce con otp, totp o hotp: queste
+sequenze non aprono né chiudono alcuna parola inglese ordinaria, quindi la stessa
+regola copre X-OTP, X-OTPCode e X-VendorOTP senza enumerare le parole che
+possono affiancarle.
+
+Prima del confronto viene rimossa una eventuale s finale, così X-Api-Keys e
+X-Access-Tokens sono letti esattamente come le loro grafie singolari, mentre
+X-Monkeys resta benigno perché monkey è fra le eccezioni.
+
+Una componente che termina in key è sensibile per default, con un elenco
+esplicito di eccezioni benigne. È enumerato il lato benigno e non quello
+credenziale perché le due omissioni non sono simmetriche: una voce mancante fra
+le eccezioni sovra-classifica un header, mentre una voce mancante fra le grafie
+credenziali sarebbe una fuga, e quelle grafie sono infinite. Le eccezioni sono di due tipi. Le
+parole ordinarie come monkey sono esentate per componente. Gli identificatori di
+fornitore sono invece esentati per nome completo, così l'esenzione copre
+esattamente l'header verificato e non ogni header che ne contenga la componente:
+è il caso di x-ms-documentdb-partitionkey, che Cosmos DB richiede sulle normali
+operazioni sui documenti. Una passkey resta classificata come credenziale.
+
+Il confronto per componente e per suffisso evita di classificare come
+credenziali header ordinari: X-Author e X-Secretariat non lo sono, mentre
+X-Author-Token e X-Secret sì. Gli stessi nomi non attraversano mai i risultati
+pubblici, nemmeno con la cattura wildcard.
 
 La redazione pubblica elimina segreti, body remoti non autorizzati, path,
 indirizzi e dettagli di trasporto.

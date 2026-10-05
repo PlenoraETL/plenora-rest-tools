@@ -1,0 +1,51 @@
+name: Audit
+
+# Vulnerability, licence, and source audit of the pinned dependency graph.
+#
+# This is deliberately separate from Verify: it queries an external advisory
+# database, so its result changes over time for an unchanged commit. Keeping it
+# out of the release gate preserves the reproducibility of scripts/verify.ps1
+# while still surfacing advisories on every pull request and once a day.
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: audit-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dependencies:
+    name: Dependency advisories, licences, and sources
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked --version 0.18.6
+
+      - name: Refuse advisory exemptions that outlived their justification
+        run: |
+          python3 scripts/check_advisory_exemptions.py
+
+      - name: Audit Rust advisories, licences, and sources
+        run: cargo deny --locked check advisories licenses sources bans
+
+      - name: Audit the Python toolchain pinned by the gates
+        run: |
+          python3 -m venv /tmp/audit
+          /tmp/audit/bin/pip install --disable-pip-version-check --no-cache-dir \
+            "pip-audit==2.9.0"
+          printf 'maturin==1.14.1\njsonschema==4.25.1\n' > /tmp/audit/requirements.txt
+          /tmp/audit/bin/pip-audit --strict --requirement /tmp/audit/requirements.txt

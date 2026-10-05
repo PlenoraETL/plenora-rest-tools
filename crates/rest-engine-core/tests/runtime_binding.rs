@@ -2,7 +2,7 @@ use std::{
     collections::BTreeMap,
     fs,
     path::PathBuf,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use plenora_rest_core::{
@@ -300,6 +300,104 @@ async fn runtime_rejects_contract_drift_and_inline_secrets_without_leaking_them(
     assert_eq!(
         secret_response.metadata["plenora.trace.correlation_id"],
         CORRELATION_ID
+    );
+}
+
+#[tokio::test]
+async fn runtime_rejects_secrets_smuggled_through_the_parameter_list() {
+    let engine = local_engine();
+    let resources = EmptyResources;
+    let binding = RuntimeBinding::new(&engine, &resources);
+
+    // A parameter with `location: "header"` or `location: "cookie"` becomes an
+    // HTTP header later on, so it is the same credential channel that
+    // `connection.headers` already blocks.
+    let smuggled = [
+        json!({
+            "name": "Authorization",
+            "mode": "fixed",
+            "value": "Bearer never-return-this-secret",
+            "location": "header"
+        }),
+        json!({
+            "name": "X-Auth-Token",
+            "mode": "fixed",
+            "value": "never-return-this-secret",
+            "location": "header"
+        }),
+        json!({
+            "name": "session",
+            "mode": "fixed",
+            "value": "never-return-this-secret",
+            "location": "cookie"
+        }),
+    ];
+
+    for parameter in smuggled {
+        let mut request = runtime_request("http://127.0.0.1:9/");
+        request.payload["connection"]["parameters"] = json!([parameter]);
+        let response = invoke_serialized(&binding, request, CancellationToken::new()).await;
+        let serialized = serde_json::to_string(&response).unwrap();
+        assert_eq!(response.kind, RuntimeMessageKind::Error);
+        assert_eq!(response.payload["code"], "INVALID_INPUT");
+        assert!(
+            !serialized.contains("never-return-this-secret"),
+            "rejection must not echo the secret back: {serialized}"
+        );
+    }
+
+    // A non-credential header parameter stays allowed.
+    //
+    // The classification must not swallow ordinary headers: this one has to
+    // reach the transport. A listener bound by the test proves it, without
+    // depending on a well-known port happening to be closed.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let observed = tokio::spawn(async move {
+        // Bounded so a regression that rejects the request before the network
+        // fails the test instead of hanging it, and read in a loop because one
+        // TCP read is not guaranteed to carry the whole header block.
+        let (mut stream, _) = tokio::time::timeout(Duration::from_secs(10), listener.accept())
+            .await
+            .expect("the request never reached the transport")
+            .unwrap();
+        let mut request = Vec::new();
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let mut chunk = [0_u8; 512];
+            let read = tokio::time::timeout(Duration::from_secs(10), stream.read(&mut chunk))
+                .await
+                .expect("the request headers never arrived")
+                .unwrap();
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&chunk[..read]);
+        }
+        let body = br#"{"ok":true}"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(response.as_bytes()).await.unwrap();
+        stream.write_all(body).await.unwrap();
+        stream.shutdown().await.unwrap();
+        String::from_utf8_lossy(&request).into_owned()
+    });
+
+    let mut allowed = runtime_request(&format!("http://{address}/"));
+    allowed.payload["connection"]["parameters"] = json!([{
+        "name": "X-Request-Id",
+        "mode": "fixed",
+        "value": "abc",
+        "location": "header"
+    }]);
+    let response = invoke_serialized(&binding, allowed, CancellationToken::new()).await;
+    let request = observed.await.unwrap().to_ascii_lowercase();
+
+    assert_eq!(response.kind, RuntimeMessageKind::Success);
+    assert!(
+        request.contains("x-request-id: abc"),
+        "a non-credential header parameter must reach the wire: {request}"
     );
 }
 
