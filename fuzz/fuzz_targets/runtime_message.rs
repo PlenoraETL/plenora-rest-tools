@@ -135,8 +135,32 @@ fuzz_target!(|dati: &[u8]| {
         );
     }
 
-    // Determinismo, a parte l'identificativo casuale della risposta e una
-    // scadenza che può cadere tra le due invocazioni.
+    // Una richiesta senza correlazione riceve una correlazione nuova, casuale
+    // come l'identificativo del messaggio di risposta.
+    let correlazione_generata = !richiesta
+        .metadata
+        .contains_key("plenora.trace.correlation_id");
+    let id_casuali: &[&str] = if correlazione_generata {
+        &["plenora.message.id", "plenora.trace.correlation_id"]
+    } else {
+        &["plenora.message.id"]
+    };
+    for chiave in id_casuali {
+        let id = message
+            .metadata
+            .get(*chiave)
+            .expect("identificativo generato");
+        assert!(
+            id.len() == 36
+                && id.bytes().all(
+                    |byte| (byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()) || byte == b'-'
+                ),
+            "identificativo generato non canonico"
+        );
+    }
+
+    // Determinismo, a parte gli identificativi casuali e una scadenza che
+    // può cadere tra le due invocazioni.
     let scadenza = richiesta
         .metadata
         .contains_key("plenora.execution.deadline")
@@ -149,7 +173,9 @@ fuzz_target!(|dati: &[u8]| {
     if !scadenza {
         let senza_id = |message: &RuntimeMessage| {
             let mut metadata = message.metadata.clone();
-            metadata.remove("plenora.message.id");
+            for chiave in id_casuali {
+                metadata.remove(*chiave);
+            }
             (metadata, message.payload.clone())
         };
         assert_eq!(
