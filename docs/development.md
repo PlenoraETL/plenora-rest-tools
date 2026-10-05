@@ -78,6 +78,31 @@ la campagna finale di staging descritta nella roadmap.
 Il workflow Verify esegue lo stesso script su pull request, push a main e
 avvio manuale.
 
+## Versioni delle dipendenze
+
+Le dipendenze dirette in Cargo.toml sono fissate alla versione esatta
+(`=x.y.z`) presente in Cargo.lock: il manifest dichiara così il grafo che i
+gate hanno qualificato, e ogni cambio di versione è una modifica esplicita del
+manifest in una pull request dedicata, non l'effetto di un `cargo update`. Le
+dipendenze transitive sono fissate da Cargo.lock, usato con --locked da ogni
+gate.
+
+Il costo è dichiarato: un crate che dipenda da plenora-rest-core eredita i pin
+esatti, e la risoluzione fallisce se richiede un'altra versione delle stesse
+dipendenze (per esempio un serde o un tokio diversi). Il crate oggi è
+distribuito come artifact di release, non su crates.io; se diventasse una
+dipendenza di altri crate, i pin andrebbero rivalutati per quel caso.
+
+Per aggiornare una dipendenza:
+
+~~~powershell
+cargo update -p <crate> --precise <versione>
+~~~
+
+poi allineare il pin in Cargo.toml e far girare il gate completo e il workflow
+Audit. Una versione che dichiara una rust-version oltre la MSRV non si adotta
+senza un innalzamento esplicito della MSRV.
+
 ## Audit delle dipendenze
 
 Il workflow Audit esegue cargo-deny secondo la policy in deny.toml (advisory,
