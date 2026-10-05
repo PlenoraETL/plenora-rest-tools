@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/rest-cli",
     "crates/rest-engine-core",
     "crates/rest-engine-python",
 ]

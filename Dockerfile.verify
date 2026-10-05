@@ -39,9 +39,9 @@ RUN test -f /tmp/msrv-ok \
     && /opt/verify/bin/python scripts/validate_contracts.py
 RUN cargo fmt --all -- --check
 RUN cargo clippy --workspace --all-targets --locked -- -D warnings
-# Library code must not be able to panic: no unwrap, expect or panic, no
-# indexing or slicing that can go out of bounds. Tests are exempt.
-RUN cargo clippy --workspace --lib --locked -- \
+# Library and binary code must not be able to panic: no unwrap, expect or
+# panic, no indexing or slicing that can go out of bounds. Tests are exempt.
+RUN cargo clippy --workspace --lib --bins --locked -- \
     -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic \
     -D clippy::indexing_slicing -D clippy::unreachable \
     -D clippy::todo -D clippy::unimplemented

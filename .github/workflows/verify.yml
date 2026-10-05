@@ -51,9 +51,9 @@ jobs:
       - name: Clippy with every warning denied
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
-      - name: Clippy anti-panic on the libraries
+      - name: Clippy anti-panic on the libraries and the CLI binary
         run: >-
-          cargo clippy --workspace --lib --locked --
+          cargo clippy --workspace --lib --bins --locked --
           -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic
           -D clippy::indexing_slicing -D clippy::unreachable
           -D clippy::todo -D clippy::unimplemented

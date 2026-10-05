@@ -83,6 +83,30 @@ del contratto delle richieste, raccolte in un'unica rottura.
   servissero, andrebbero consegnati come dato remoto in un campo dichiarato del
   risultato, non nell'errore.
 
+### CLI
+
+- Nuova superficie: il binario plenora-rest (crate plenora-rest-cli, non
+  pubblicato su crates.io) implementa CLI 2.0 (plenora-cli-v2). Discovery con
+  `--help`, `--version --format json` (contratto
+  plenora-rest-version-result-v1) e `capabilities --format json` (il documento
+  del core con l'interfaccia `cli` e la superficie `cli` su ogni operazione);
+  comandi `test`, `generate`, `enrich`, `download` e `upload` con
+  `--input REQUEST.json` (anche `-`), `--config ENGINE.json` opzionale e
+  `--format json`.
+- In modalità JSON un solo documento e un newline su stdout, stderr vuoto,
+  exit code proiettato dalla categoria (2, 3, 4, 5, 6, 70, 130); un panic è un
+  errore internal senza dettagli. Parser chiuso: comandi e flag sconosciuti,
+  `--flag=valore`, flag ripetuti, valori mancanti e posizionali in più sono
+  rifiutati con exit 2 e messaggi che non citano gli argomenti.
+- Ctrl-C (e SIGTERM su Unix) è una cancellazione cooperativa: errore
+  cancelled, exit 130. tokio usa ora anche le feature `signal` e `io-std`;
+  Cargo.lock aggiunge signal-hook-registry ed errno (solo Unix).
+- La release include plenora-rest-linux-x86_64, costruito nella doppia build
+  riproducibile con il suo digest in adoption-manifest.json, e
+  plenora-rest-windows-x86_64.exe dal job Windows; entrambi sono in
+  SHA256SUMS, nell'SBOM e nelle attestazioni. Il gate anti-panic di Clippy
+  copre anche i binari (`--lib --bins`).
+
 ### Piattaforme
 
 - Windows x86_64 è una piattaforma supportata: il workflow Verify esegue su

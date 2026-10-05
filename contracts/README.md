@@ -55,8 +55,44 @@ conformità alle superfici comuni. Attualmente il componente adotta:
 - plenora-surface-bindings-v1;
 - plenora-composition-v1.
 
+- plenora-cli-v2.
+
 plenora-arrow-interchange-v1 è dichiarato non applicabile. La libreria scambia
 oggetti JSON e artifact opachi, non record batch Arrow.
+
+## CLI
+
+Il binario plenora-rest (crates/rest-cli) è conforme a CLI 2.0
+(plenora-cli-v2): discovery con `--help`, `--version --format json` e
+`capabilities --format json`, un solo documento JSON su stdout e niente su
+stderr in modalità JSON, envelope cli-envelope-v2 con errori plenora-error-v1,
+proiezione degli exit code di CLI 2.0 §8, cancellazione con exit 130.
+
+| Comando | Operazione | Contratto dell'envelope |
+| --- | --- | --- |
+| `--version --format json` | — | plenora-rest-version-result-v1 |
+| `capabilities --format json` | — | plenora-capabilities-v2 |
+| `test --input REQUEST.json --format json` | rest.test v1 | plenora-rest-execution-result-v1 |
+| `generate --input REQUEST.json --format json` | rest.generate v1 | plenora-rest-execution-result-v1 |
+| `enrich --input REQUEST.json --format json` | rest.enrich v1 | plenora-rest-execution-result-v1 |
+| `download --input REQUEST.json --format json` | rest.download v1 | plenora-rest-file-transfer-result-v1 |
+| `upload --input REQUEST.json --format json` | rest.upload v1 | plenora-rest-file-transfer-result-v1 |
+
+Ogni comando operativo accetta anche `--config ENGINE.json`. Un envelope
+d'errore porta il contratto di output del comando, oppure plenora-error-v1
+quando il comando non è riconosciuto. Il documento delle capability del
+binario è quello di plenora_rest_core::capabilities() con in più l'interfaccia
+`cli` (artifact plenora-rest) e la superficie `cli` sulle cinque operazioni;
+la superficie Rust congelata non cambia.
+
+Il binding comune bindings/cli-v1.json di plenora-contracts elenca
+plenora-rest-tools con `artifact: null` e il profilo rest-tools dice «CLI: not
+required». Le spellature sopra sono quindi del componente e restano non
+normative finché il contratto comune non le adotta; fino ad allora possono
+cambiare solo con una voce nel CHANGELOG. Nel manifest di adozione l'artefatto
+CLI si chiama plenora-rest-linux-x86_64, il nome del file di release, perché
+plenora-rest identifica già la wheel e un nome non può descrivere due artefatti
+diversi.
 
 Il manifest di adozione è la fonte per revisione, versione e digest degli
 artefatti. Questi valori non vengono duplicati nella documentazione.

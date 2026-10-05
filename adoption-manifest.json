@@ -30,6 +30,16 @@
       ]
     },
     {
+      "name": "plenora-rest-linux-x86_64",
+      "surface": "cli",
+      "version": "0.2.2",
+      "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "verification": [
+        "powershell -File scripts/release.ps1",
+        "cargo test -p plenora-rest-cli --test cli"
+      ]
+    },
+    {
       "name": "plenora.rest-tools",
       "surface": "runtime",
       "version": "0.2.2",
@@ -85,6 +95,14 @@
       "status": "conforming",
       "verification": [
         "cargo test -p plenora-rest-core --test runtime_binding"
+      ]
+    },
+    {
+      "id": "plenora-cli-v2",
+      "status": "conforming",
+      "verification": [
+        "cargo test -p plenora-rest-cli --test cli",
+        "cargo test -p plenora-rest-cli --bin plenora-rest"
       ]
     },
     {

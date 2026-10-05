@@ -11,7 +11,8 @@ attraversano il confine pubblico.
 2. Il comportamento esterno è descritto da contratti versionati.
 3. L'Engine possiede trasporto, resilienza e stato di connessione.
 4. Le configurazioni pericolose richiedono autorizzazione esplicita.
-5. Rust, Python e runtime espongono le stesse cinque operazioni normative.
+5. Rust, CLI, Python e runtime espongono le stesse cinque operazioni
+   normative.
 6. Un cambiamento breaking crea una nuova versione del contratto.
 
 ## Componenti
@@ -19,6 +20,7 @@ attraversano il confine pubblico.
 ~~~text
                                   +-----------------------+
 Host Rust ----------------------> |                       |
+Processo -> CLI plenora-rest ---> |                       |
 SDK Python -> binding PyO3 -----> | plenora-rest-core     | -> HTTP/TLS/DNS
 Runtime -> envelope + risorse --> | Engine persistente    | -> servizio REST
                                   |                       |
@@ -30,6 +32,7 @@ Runtime -> envelope + risorse --> | Engine persistente    | -> servizio REST
 | Componente | Responsabilità |
 | --- | --- |
 | crates/rest-engine-core | contratti Rust, Engine, trasporto, runtime binding ed errori |
+| crates/rest-cli | binario plenora-rest: parser chiuso, envelope CLI 2.0, exit code, Ctrl-C |
 | crates/rest-engine-python | estensione nativa PyO3 ABI3 |
 | python/plenora_rest | facciata Python sincrona e tipi pubblici |
 | contracts | schemi component-owned, binding e baseline compatibile |
