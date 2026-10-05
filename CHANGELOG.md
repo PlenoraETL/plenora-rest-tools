@@ -20,3 +20,18 @@ release finché una release non viene preparata.
   colonna null non si applica; uno status di polling null è INVALID_RESPONSE;
   un job id null è un job id assente. Un value null in una trasformazione
   diversa da default_if_null è INVALID_INPUT.
+- Le trasformazioni della risposta sono validate prima dell'esecuzione:
+  un'operazione sconosciuta, un argomento mancante o di tipo sbagliato, una
+  divisione per zero costante o una condition non riconosciuta (compresi
+  apici non chiusi o in eccesso, come `status == 'active`) sono
+  INVALID_INPUT. Prima l'operazione sconosciuta lasciava il valore invariato e
+  una condition senza operatore applicava sempre la trasformazione.
+- Un valore che una trasformazione non sa trattare, o un risultato senza
+  rappresentazione esatta (overflow, interi oltre 2^53 in aritmetica float,
+  stringhe intere oltre i128, float non finiti), fa fallire il record con
+  INVALID_RESPONSE invece di restituire il valore originale o null. Null si
+  propaga. Vedi
+  [Trasformazioni della risposta](docs/architecture.md#trasformazioni-della-risposta).
+- Una condition su una colonna assente o null non applica la trasformazione.
+- Un batch flat_array rifiuta i record che non si risolvono in esattamente un
+  parametro non null.

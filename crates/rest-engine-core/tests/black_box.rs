@@ -1880,9 +1880,6 @@ async fn numeric_transforms_cover_unsigned_overflow_and_rounding_edges() {
                         {"source": "big", "column": "minus_one", "operation": "subtract", "value": 1},
                         // i64::MIN / -1 has no i64 representation but fits u64.
                         {"source": "small", "column": "negated", "operation": "divide", "value": -1},
-                        // A product beyond u64 is not representable as an exact
-                        // JSON integer, so it must be null and not a lossy float.
-                        {"source": "big", "column": "squared", "operation": "multiply", "value": u64::MAX},
                         {"source": "exact", "column": "thirds", "operation": "divide", "value": 3}
                     ]
                 }
@@ -1896,7 +1893,6 @@ async fn numeric_transforms_cover_unsigned_overflow_and_rounding_edges() {
     assert_eq!(record["rounded"], json!(u64::MAX));
     assert_eq!(record["minus_one"], json!(u64::MAX - 1));
     assert_eq!(record["negated"], json!(i64::MIN.unsigned_abs()));
-    assert_eq!(record["squared"], Value::Null);
     assert_eq!(record["thirds"], json!(3));
 }
 
@@ -3668,6 +3664,235 @@ async fn a_mapped_null_from_the_input_is_refused_in_the_query() {
     assert_eq!(result["errors"][0]["code"], "INVALID_INPUT", "{result}");
 }
 
+/// Runs a single-record `generate` whose response is `body` and returns the
+/// result after applying `transforms` to the columns `a` and `b`.
+async fn transform_result(body: &str, transforms: Value) -> Value {
+    let (url, server, _) =
+        owned_recorded_server(vec![(200, body.as_bytes().to_vec(), vec![])]).await;
+    let result = execute(
+        &local_engine(),
+        json!({
+            "schema_version": 1,
+            "operation": "generate",
+            "connection": {
+                "url": url,
+                "method": "GET",
+                "response": {
+                    "output_mapping": [
+                        {"path": "a", "column": "a"},
+                        {"path": "b", "column": "b"}
+                    ],
+                    "transforms": transforms
+                }
+            }
+        }),
+    )
+    .await;
+    server.await.unwrap();
+    result
+}
+
+#[tokio::test]
+async fn unrepresentable_numeric_results_fail_instead_of_becoming_null() {
+    let cases = [
+        // A product beyond u64 has no exact JSON integer.
+        (
+            format!(r#"{{"a":{}}}"#, u64::MAX),
+            json!({"source": "a", "column": "c", "operation": "multiply", "value": u64::MAX}),
+        ),
+        // Mixed integer/float arithmetic would start from a rounded 2^53 + 1.
+        (
+            r#"{"a":9007199254740993}"#.to_owned(),
+            json!({"source": "a", "column": "c", "operation": "subtract", "value": 9007199254740992.0}),
+        ),
+        // A fractional quotient of an integer beyond 2^53 would be computed
+        // from a rounded dividend.
+        (
+            r#"{"a":9007199254740995}"#.to_owned(),
+            json!({"source": "a", "column": "c", "operation": "divide", "value": 3}),
+        ),
+        // An integer string wider than i128 must not be parsed as a float.
+        (
+            r#"{"a":"170141183460469231731687303715884105729"}"#.to_owned(),
+            json!({"source": "a", "column": "c", "operation": "subtract", "value": 1}),
+        ),
+        // A float overflow has no JSON spelling.
+        (
+            r#"{"a":1e308}"#.to_owned(),
+            json!({"source": "a", "column": "c", "operation": "multiply", "value": 10}),
+        ),
+    ];
+    for (body, transform) in cases {
+        let result = transform_result(&body, json!([transform])).await;
+        assert_eq!(result["status"], "failed", "{transform}: {result}");
+        assert_eq!(
+            result["errors"][0]["code"], "INVALID_RESPONSE",
+            "{transform}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn values_a_transform_cannot_handle_fail_the_row() {
+    let cases = [
+        (
+            r#"{"a":"abc"}"#,
+            json!({"source": "a", "column": "c", "operation": "add", "value": 1}),
+        ),
+        (
+            r#"{"a":{"x":1}}"#,
+            json!({"source": "a", "column": "c", "operation": "round"}),
+        ),
+        (
+            r#"{"a":5}"#,
+            json!({"source": "a", "column": "c", "operation": "uppercase"}),
+        ),
+        (
+            r#"{"a":[1]}"#,
+            json!({"source": "a", "column": "c", "operation": "prefix", "value": "x"}),
+        ),
+        (
+            r#"{"a":true}"#,
+            json!({"source": "a", "column": "c", "operation": "kelvin_to_celsius"}),
+        ),
+    ];
+    for (body, transform) in cases {
+        let result = transform_result(body, json!([transform])).await;
+        assert_eq!(result["status"], "failed", "{transform}: {result}");
+        assert_eq!(
+            result["errors"][0]["code"], "INVALID_RESPONSE",
+            "{transform}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn null_propagates_through_transforms() {
+    let transforms = json!([
+        {"source": "a", "column": "sum", "operation": "add", "value": 1},
+        {"source": "a", "column": "upper", "operation": "uppercase"},
+        {"source": "a", "column": "prefixed", "operation": "prefix", "value": "id-"},
+        {"source": "a", "column": "replaced", "operation": "replace", "value": {"find": "a", "replace": "b"}},
+        {"source": "a", "column": "defaulted", "operation": "default_if_null", "value": 0}
+    ]);
+    let result = transform_result(r#"{"a":null}"#, transforms).await;
+    assert_eq!(result["status"], "success", "{result}");
+    let record = &result["output"]["records"][0];
+    for column in ["sum", "upper", "prefixed", "replaced"] {
+        assert_eq!(record[column], Value::Null, "{column}");
+    }
+    assert_eq!(record["defaulted"], json!(0));
+}
+
+#[tokio::test]
+async fn a_condition_on_a_missing_or_null_column_does_not_apply() {
+    let transforms = json!([
+        {"source": "b", "column": "eq", "operation": "default_if_null", "value": "set", "condition": "a == ''"},
+        {"source": "b", "column": "ne", "operation": "default_if_null", "value": "set", "condition": "a != 'x'"},
+        {"source": "b", "column": "hit", "operation": "default_if_null", "value": "set", "condition": "b != 'x'"}
+    ]);
+    let result = transform_result(r#"{"a":null,"b":"y"}"#, transforms).await;
+    assert_eq!(result["status"], "success", "{result}");
+    let record = &result["output"]["records"][0];
+    assert_eq!(record.get("eq"), None, "{record}");
+    assert_eq!(record.get("ne"), None, "{record}");
+    assert_eq!(record["hit"], json!("y"));
+}
+
+#[tokio::test]
+async fn invalid_transforms_are_rejected_before_any_request() {
+    let invalid = [
+        json!({"source": "a", "column": "c", "operation": "explode"}),
+        json!({"source": "a", "column": "", "operation": "uppercase"}),
+        json!({"source": "", "column": "c", "operation": "uppercase"}),
+        json!({"source": "a", "column": "c", "operation": "add"}),
+        json!({"source": "a", "column": "c", "operation": "add", "value": "many"}),
+        json!({"source": "a", "column": "c", "operation": "divide", "value": 0}),
+        json!({"source": "a", "column": "c", "operation": "divide", "value": "0.0"}),
+        json!({"source": "a", "column": "c", "operation": "round", "value": 99}),
+        json!({"source": "a", "column": "c", "operation": "round", "value": 1.5}),
+        json!({"source": "a", "column": "c", "operation": "uppercase", "value": 1}),
+        json!({"source": "a", "column": "c", "operation": "prefix"}),
+        json!({"source": "a", "column": "c", "operation": "prefix", "value": null}),
+        json!({"source": "a", "column": "c", "operation": "replace", "value": {"find": ""}}),
+        json!({"source": "a", "column": "c", "operation": "default_if_null"}),
+        json!({"source": "a", "column": "c", "operation": "uppercase", "condition": "a"}),
+        json!({"source": "a", "column": "c", "operation": "uppercase", "condition": "status == 'active"}),
+        json!({"source": "a", "column": "c", "operation": "uppercase", "condition": "status == active'"}),
+        json!({"source": "a", "column": "c", "operation": "uppercase", "condition": "status == 'a'b'"}),
+        json!({"source": "a", "column": "c", "operation": "uppercase", "condition": "status == 'a\""}),
+        json!({"source": "a", "column": "c", "operation": "uppercase", "condition": "status =="}),
+        json!({"source": "a", "column": "c", "operation": "uppercase", "condition": "== 'x'"}),
+        json!({"source": "a", "column": "c", "operation": "uppercase", "condition": "a == b == c"}),
+        json!({"source": "a", "column": "c", "operation": "uppercase", "condition": "a != b == c"}),
+    ];
+    for transform in invalid {
+        // Port 9 is never contacted: validation fails first.
+        let result = execute(
+            &local_engine(),
+            json!({
+                "schema_version": 1,
+                "operation": "generate",
+                "connection": {
+                    "url": "http://127.0.0.1:9/",
+                    "method": "GET",
+                    "response": {"transforms": [transform]}
+                }
+            }),
+        )
+        .await;
+        assert_eq!(result["status"], "failed", "{transform}");
+        assert_eq!(
+            result["errors"][0]["code"], "INVALID_INPUT",
+            "{transform}: {result}"
+        );
+        assert_eq!(result["metrics"]["requests"], 0, "{transform}");
+    }
+}
+
+#[tokio::test]
+async fn a_flat_array_batch_refuses_records_without_exactly_one_value() {
+    let (url, server, observed) =
+        recorded_server(vec![(200, r#"{"results":[{"ok":1}]}"#, vec![])]).await;
+    let result = execute(
+        &local_engine(),
+        json!({
+            "schema_version": 1,
+            "operation": "enrich",
+            "connection": {
+                "url": url,
+                "method": "POST",
+                "batch": {
+                    "enabled": true,
+                    "input_key": "ids",
+                    "input_format": "flat_array",
+                    "output_path": "results"
+                }
+            },
+            "input": {"records": [{"id": 1}, {"id": null}, {"id": 3, "name": "x"}]}
+        }),
+    )
+    .await;
+    server.await.unwrap();
+
+    let indexes = result["errors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|error| (error["input_index"].clone(), error["code"].clone()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        indexes,
+        [
+            (json!(1), json!("INVALID_INPUT")),
+            (json!(2), json!("INVALID_INPUT"))
+        ],
+        "{result}"
+    );
+    let request = observed.lock().unwrap()[0].clone();
+    assert!(request.contains(r#"{"ids":[1]}"#), "{request}");
+}
+
 #[tokio::test]
 async fn a_null_transform_argument_is_rejected_before_any_request() {
     for transform in [
@@ -3794,6 +4019,45 @@ async fn a_null_job_id_is_not_rendered_into_the_poll_url() {
         1,
         "no poll may reach /jobs/"
     );
+}
+
+#[tokio::test]
+async fn well_formed_conditions_still_apply() {
+    let transforms = json!([
+        {"source": "b", "column": "single", "operation": "uppercase", "condition": "a == 'on'"},
+        {"source": "b", "column": "double", "operation": "uppercase", "condition": "a == \"on\""},
+        {"source": "b", "column": "bare", "operation": "uppercase", "condition": "a==on"},
+        {"source": "b", "column": "empty", "operation": "uppercase", "condition": "a != ''"},
+        {"source": "b", "column": "skipped", "operation": "uppercase", "condition": "a != 'on'"}
+    ]);
+    let result = transform_result(r#"{"a":"on","b":"x"}"#, transforms).await;
+    assert_eq!(result["status"], "success", "{result}");
+    let record = &result["output"]["records"][0];
+    for column in ["single", "double", "bare", "empty"] {
+        assert_eq!(record[column], json!("X"), "{column}: {record}");
+    }
+    assert_eq!(record.get("skipped"), None, "{record}");
+}
+
+#[tokio::test]
+async fn operators_inside_a_quoted_literal_are_part_of_the_literal() {
+    let transforms = json!([
+        {"source": "b", "column": "eq_single", "operation": "uppercase", "condition": "a == 'x==y!=z'"},
+        {"source": "b", "column": "eq_double", "operation": "uppercase", "condition": "a == \"x==y!=z\""},
+        {"source": "b", "column": "ne_single", "operation": "uppercase", "condition": "a != 'a==b'"},
+        {"source": "b", "column": "ne_double", "operation": "uppercase", "condition": "a != \"a!=b\""},
+        {"source": "b", "column": "eq_miss", "operation": "uppercase", "condition": "a == 'x==y'"},
+        {"source": "b", "column": "ne_miss", "operation": "uppercase", "condition": "a != \"x==y!=z\""}
+    ]);
+    let result = transform_result(r#"{"a":"x==y!=z","b":"v"}"#, transforms).await;
+    assert_eq!(result["status"], "success", "{result}");
+    let record = &result["output"]["records"][0];
+    for column in ["eq_single", "eq_double", "ne_single", "ne_double"] {
+        assert_eq!(record[column], json!("V"), "{column}: {record}");
+    }
+    for column in ["eq_miss", "ne_miss"] {
+        assert_eq!(record.get(column), None, "{column}: {record}");
+    }
 }
 
 #[tokio::test]
