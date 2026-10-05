@@ -7,7 +7,7 @@ name = "plenora-rest"
 version = "0.2.2"
 description = "Self-contained, service-agnostic REST execution engine for Python"
 requires-python = ">=3.10,<3.15"
-license = "MIT OR Apache-2.0"
+license = { text = "Proprietary" }
 readme = "README.md"
 classifiers = [
     "Programming Language :: Rust",

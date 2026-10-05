@@ -9,7 +9,11 @@ resolver = "3"
 version = "0.2.2"
 edition = "2024"
 rust-version = "1.85.1"
-license = "MIT OR Apache-2.0"
+# Proprietary, like every Plenora library: no SPDX identifier applies, so
+# the crates point at the repository LICENSE with `license-file`. None of
+# them is published to a registry.
+license-file = "LICENSE"
+publish = false
 authors = ["PlenoraETL contributors"]
 repository = "https://github.com/PlenoraETL/plenora-rest-tools"
 

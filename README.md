@@ -185,4 +185,5 @@ doppia build riproducibile, checksum, SBOM e attestazioni.
 
 ## Licenza
 
-MIT OR Apache-2.0.
+Proprietaria, vedi [LICENSE](LICENSE). Copyright (c) Plenora ETL. Tutti i
+diritti riservati.

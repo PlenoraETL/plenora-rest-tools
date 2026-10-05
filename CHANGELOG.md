@@ -83,6 +83,13 @@ del contratto delle richieste, raccolte in un'unica rottura.
   servissero, andrebbero consegnati come dato remoto in un campo dichiarato del
   risultato, non nell'errore.
 
+### Licenza
+
+- La licenza è proprietaria (LICENSE, come le altre librerie Plenora) e
+  non più MIT OR Apache-2.0: `license-file` nei crate, `publish = false`
+  per tutto il workspace, `License: Proprietary` nei metadati della wheel.
+  cargo-deny ignora le licenze dei soli crate privati del workspace.
+
 ### Dipendenze
 
 - thiserror non è più una dipendenza diretta: Display di EngineError è scritto
