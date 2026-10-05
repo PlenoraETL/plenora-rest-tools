@@ -158,6 +158,47 @@ Deviazione dichiarata: fino a 0.2.2 un fixed con value null veniva omesso e un
 null in una posizione testuale veniva inviato come stringa vuota. Gli schemi v1
 ammettevano già entrambe le forme; cambia la semantica, non lo schema.
 
+### Trasformazioni della risposta
+
+Le trasformazioni sono validate prima di qualunque attività di rete. Sono
+errori di configurazione (INVALID_INPUT): un'operazione sconosciuta, column o
+source vuoti, un argomento mancante o del tipo sbagliato (add, subtract,
+multiply e divide richiedono un numero; divide non accetta zero; round accetta
+un intero di decimali da 0 a 15; prefix e suffix una stringa, un numero o un
+booleano; replace un oggetto con find non vuoto e replace stringa;
+default_if_null un valore; le conversioni di temperatura, uppercase e lowercase
+nessun valore) e una condition che non sia `colonna == 'valore'` o
+`colonna != 'valore'`.
+
+Durante l'esecuzione null si propaga: ogni operazione tranne default_if_null
+trasforma null in null. Un valore che l'operazione non sa trattare fa fallire
+il record con INVALID_RESPONSE invece di essere lasciato invariato o sostituito
+da null: un operando non numerico per un'operazione numerica, un non-stringa
+per uppercase e lowercase, un array o un oggetto per prefix, suffix e replace.
+
+L'aritmetica sugli interi è esatta. Un risultato che non ha una
+rappresentazione esatta fallisce con INVALID_RESPONSE: un intero oltre i64 e
+u64, un intero oltre 2^53 combinato con un float o diviso con resto, una stringa
+intera oltre i128, un risultato float non finito. Un numero scritto come stringa
+viene letto come numero e il risultato è un numero JSON.
+
+Una condition su una colonna assente o null non è soddisfatta né da `==` né da
+`!=`: il confronto è indeterminato, come in SQL, e la trasformazione non viene
+applicata.
+
+Limite dichiarato: il parser JSON legge un intero oltre u64 scritto come numero
+(non come stringa) in un f64 prima che le trasformazioni lo vedano. Il valore è
+già arrotondato all'ingresso e le trasformazioni non possono accorgersene. Un
+servizio che invia identificativi oltre u64 deve inviarli come stringhe.
+
+### Batch flat_array
+
+Con input_format flat_array ogni record deve risolversi in esattamente un
+parametro non null, che diventa l'elemento dell'array. Un record con più
+parametri o con null è rifiutato con INVALID_INPUT, con il suo input_index, e
+non entra nel batch: prima contribuiva il primo valore non null in ordine di
+chiave, o niente, spostando l'allineamento dei record successivi.
+
 ## Job REST asincroni e code
 
 Il polling copre servizi che rispondono alla submit con un job id o una
