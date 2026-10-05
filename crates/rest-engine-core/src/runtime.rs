@@ -15,7 +15,7 @@ use crate::{
     capability::{
         EXECUTION_REQUEST_CONTRACT, EXECUTION_RESULT_CONTRACT, RUNTIME_INTERFACE_CONTRACT,
     },
-    control::is_canonical_deadline,
+    control::is_utc_deadline,
     engine::{is_disallowed_idempotency_header, is_sensitive_header_name},
     error::RetryAdvice,
 };
@@ -179,26 +179,18 @@ where
         ),
         ErrorPayload,
     > {
-        validate_envelope(message)?;
-        let (operation, output_contract) = validate_routing(message)?;
-        // The metadata deadline is checked for its spelling here, as routing:
-        // a malformed one is a protocol error, not a payload error.
+        // RT-018: the category of a refusal is the first that applies,
+        // `protocol` (every reserved value checked against its grammar), then
+        // `unsupported` (well-formed but not advertised), then `timeout`.
+        validate_grammar(message)?;
+        let (operation, output_contract) = validate_support(message)?;
         let metadata_deadline = message.metadata.get(DEADLINE_KEY);
-        if metadata_deadline.is_some_and(|value| !is_canonical_deadline(value)) {
-            return Err(refusal(
-                ErrorCategory::Protocol,
-                "runtime deadline must be RFC 3339 in UTC with a Z suffix",
-            ));
-        }
-        if let Some(key) = message.metadata.get(IDEMPOTENCY_KEY) {
-            if key.is_empty()
-                || key.len() > 255
-                || !key.bytes().all(|byte| matches!(byte, 0x21..=0x7e))
-            {
-                return Err(refusal(
-                    ErrorCategory::Protocol,
-                    "runtime idempotency key must contain 1 to 255 visible ASCII bytes",
-                ));
+        if let Some(deadline) = metadata_deadline {
+            let control = ExecutionControl::default()
+                .with_deadline(deadline)
+                .map_err(|error| error.payload())?;
+            if control.deadline_expired() {
+                return Err(EngineError::DeadlineExpired.payload());
             }
         }
         // A JSON value has no line or column, and serde's message can quote
@@ -255,23 +247,6 @@ const INPUT_CONTRACT_KEY: &str = "plenora.input.contract";
 const OUTPUT_CONTRACT_KEY: &str = "plenora.output.contract";
 const DEADLINE_KEY: &str = "plenora.execution.deadline";
 const IDEMPOTENCY_KEY: &str = "plenora.execution.idempotency_key";
-
-/// Metadata keys Runtime Binding 1.0 reserves. Any other `plenora.*` key is
-/// refused rather than ignored: a misspelled control (`plenora.deadline`,
-/// `plenora.idempotency_key`) would otherwise be lost without a trace.
-const RESERVED_KEYS: [&str; 11] = [
-    MESSAGE_ID_KEY,
-    CAUSATION_KEY,
-    CORRELATION_KEY,
-    CAPABILITY_NAME_KEY,
-    CAPABILITY_VERSION_KEY,
-    OPERATION_KEY,
-    OPERATION_VERSION_KEY,
-    INPUT_CONTRACT_KEY,
-    OUTPUT_CONTRACT_KEY,
-    DEADLINE_KEY,
-    IDEMPOTENCY_KEY,
-];
 
 /// A refusal before invocation: phase `validate`, no remote effect, and
 /// `never` retry, since the same message fails the same way again.
@@ -369,63 +344,27 @@ fn is_canonical_capability_name(value: &str) -> bool {
         })
 }
 
-/// A routing value: absent or malformed is `protocol`, well-formed but not
-/// the one this component advertises is `unsupported` (R1).
-fn route<'a>(
-    message: &'a RuntimeMessage,
-    key: &str,
-    well_formed: fn(&str) -> bool,
-    malformed: &'static str,
-) -> Result<&'a str, ErrorPayload> {
-    match message.metadata.get(key) {
-        Some(value) if well_formed(value) => Ok(value),
-        _ => Err(refusal(ErrorCategory::Protocol, malformed)),
-    }
-}
+/// A reserved key, its grammar, and the refusal text when it does not match.
+type Grammar = (&'static str, fn(&str) -> bool, &'static str);
 
-fn validate_envelope(message: &RuntimeMessage) -> Result<(), ErrorPayload> {
-    if message.schema_version != RUNTIME_BINDING_VERSION {
-        return Err(refusal(
-            ErrorCategory::Unsupported,
-            "runtime envelope schema version is unsupported",
-        ));
-    }
-    if message.contract != RUNTIME_INTERFACE_CONTRACT && message.contract != RUNTIME_VECTOR_CONTRACT
-    {
-        return Err(refusal(
-            if is_canonical_contract(&message.contract) {
-                ErrorCategory::Unsupported
-            } else {
-                ErrorCategory::Protocol
-            },
-            "runtime envelope contract is unsupported",
-        ));
-    }
+/// Every reserved value against its grammar (RT-017): absent where
+/// required, malformed or not canonical is `protocol`, and a value is never
+/// normalized into the grammar. Keys the binding does not reserve, including
+/// unknown `plenora.*` ones, are ignored as optional members.
+fn validate_grammar(message: &RuntimeMessage) -> Result<(), ErrorPayload> {
+    let protocol = |text: &'static str| Err(refusal(ErrorCategory::Protocol, text));
     if message.kind != RuntimeMessageKind::Request {
-        return Err(refusal(
-            ErrorCategory::Protocol,
-            "runtime invocation requires a request envelope",
-        ));
+        return protocol("runtime invocation requires a request envelope");
     }
-    if message.content_type != JSON_CONTENT_TYPE {
-        let well_formed = message
-            .content_type
-            .split_once('/')
-            .is_some_and(|(kind, subtype)| !kind.is_empty() && !subtype.is_empty());
-        return Err(refusal(
-            if well_formed {
-                ErrorCategory::Unsupported
-            } else {
-                ErrorCategory::Protocol
-            },
-            "runtime request content type is not advertised",
-        ));
+    let content_type_well_formed = message
+        .content_type
+        .split_once('/')
+        .is_some_and(|(kind, subtype)| !kind.is_empty() && !subtype.is_empty());
+    if !content_type_well_formed {
+        return protocol("runtime request content type is malformed");
     }
     if !message.payload.is_object() {
-        return Err(refusal(
-            ErrorCategory::Protocol,
-            "runtime request payload must be a JSON object",
-        ));
+        return protocol("runtime request payload must be a JSON object");
     }
     for key in [MESSAGE_ID_KEY, CORRELATION_KEY] {
         if !message
@@ -433,10 +372,7 @@ fn validate_envelope(message: &RuntimeMessage) -> Result<(), ErrorPayload> {
             .get(key)
             .is_some_and(|value| is_canonical_uuid(value))
         {
-            return Err(refusal(
-                ErrorCategory::Protocol,
-                "runtime identity metadata must be a canonical UUID",
-            ));
+            return protocol("runtime identity metadata must be a canonical UUID");
         }
     }
     if message
@@ -444,88 +380,93 @@ fn validate_envelope(message: &RuntimeMessage) -> Result<(), ErrorPayload> {
         .get(CAUSATION_KEY)
         .is_some_and(|value| !is_canonical_uuid(value))
     {
-        return Err(refusal(
-            ErrorCategory::Protocol,
-            "runtime causation metadata must be a canonical UUID",
-        ));
+        return protocol("runtime causation metadata must be a canonical UUID");
+    }
+    let grammars: [Grammar; 5] = [
+        (
+            CAPABILITY_NAME_KEY,
+            is_canonical_capability_name,
+            "runtime capability name is missing or malformed",
+        ),
+        (
+            CAPABILITY_VERSION_KEY,
+            is_canonical_version,
+            "runtime capability version is missing or not canonical",
+        ),
+        (
+            OPERATION_KEY,
+            is_canonical_operation,
+            "runtime operation is missing or malformed",
+        ),
+        (
+            OPERATION_VERSION_KEY,
+            is_canonical_version,
+            "runtime operation version is missing or not canonical",
+        ),
+        (
+            INPUT_CONTRACT_KEY,
+            is_canonical_contract,
+            "runtime input contract is missing or malformed",
+        ),
+    ];
+    for (key, well_formed, text) in grammars {
+        if !message
+            .metadata
+            .get(key)
+            .is_some_and(|value| well_formed(value))
+        {
+            return protocol(text);
+        }
     }
     if message
         .metadata
-        .keys()
-        .any(|key| key.starts_with("plenora.") && !RESERVED_KEYS.contains(&key.as_str()))
+        .get(DEADLINE_KEY)
+        .is_some_and(|value| !is_utc_deadline(value))
     {
-        return Err(refusal(
-            ErrorCategory::Protocol,
-            "runtime metadata contains a plenora key that the binding does not reserve",
-        ));
+        return protocol("runtime deadline must be an RFC 3339 timestamp in UTC");
+    }
+    if let Some(key) = message.metadata.get(IDEMPOTENCY_KEY) {
+        if key.is_empty() || key.len() > 255 || !key.bytes().all(|byte| matches!(byte, 0x21..=0x7e))
+        {
+            return protocol("runtime idempotency key must contain 1 to 255 visible ASCII bytes");
+        }
     }
     Ok(())
 }
 
-/// Capability, versions, operation and input contract, in that order.
-fn validate_routing(
+/// Well-formed values that do not select one advertised runtime operation
+/// (RT-018 step 2): `unsupported`.
+fn validate_support(
     message: &RuntimeMessage,
 ) -> Result<(ExecutionOperation, &'static str), ErrorPayload> {
-    let name = route(
-        message,
-        CAPABILITY_NAME_KEY,
-        is_canonical_capability_name,
-        "runtime capability name is missing or malformed",
-    )?;
-    if name != CAPABILITY_NAME {
-        return Err(refusal(
-            ErrorCategory::Unsupported,
-            "runtime capability name is not plenora.rest-tools",
-        ));
+    let unsupported = |text: &'static str| Err(refusal(ErrorCategory::Unsupported, text));
+    let value = |key: &str| message.metadata.get(key).map_or("", String::as_str);
+    if message.schema_version != RUNTIME_BINDING_VERSION {
+        return unsupported("runtime envelope schema version is unsupported");
     }
-    let version = route(
-        message,
-        CAPABILITY_VERSION_KEY,
-        is_canonical_version,
-        "runtime capability version is missing or not canonical",
-    )?;
-    if version != RUNTIME_BINDING_VERSION.to_string() {
-        return Err(refusal(
-            ErrorCategory::Unsupported,
-            "runtime capability version is unsupported",
-        ));
+    if message.contract != RUNTIME_INTERFACE_CONTRACT && message.contract != RUNTIME_VECTOR_CONTRACT
+    {
+        return unsupported("runtime envelope contract is unsupported");
     }
-    let operation_id = route(
-        message,
-        OPERATION_KEY,
-        is_canonical_operation,
-        "runtime operation is missing or malformed",
-    )?;
-    let operation_version = route(
-        message,
-        OPERATION_VERSION_KEY,
-        is_canonical_version,
-        "runtime operation version is missing or not canonical",
-    )?;
-    let (operation, input_contract, output_contract) = operation_contracts(operation_id)
-        .ok_or_else(|| {
-            refusal(
-                ErrorCategory::Unsupported,
-                "runtime operation is not advertised",
-            )
-        })?;
-    if operation_version != "1" {
-        return Err(refusal(
-            ErrorCategory::Unsupported,
-            "runtime operation version is not advertised",
-        ));
+    if message.content_type != JSON_CONTENT_TYPE {
+        return unsupported("runtime request content type is not advertised");
     }
-    let requested_contract = route(
-        message,
-        INPUT_CONTRACT_KEY,
-        is_canonical_contract,
-        "runtime input contract is missing or malformed",
-    )?;
-    if requested_contract != input_contract {
-        return Err(refusal(
-            ErrorCategory::Unsupported,
-            "runtime input contract does not match the operation",
-        ));
+    if value(CAPABILITY_NAME_KEY) != CAPABILITY_NAME {
+        return unsupported("runtime capability name is not plenora.rest-tools");
+    }
+    if value(CAPABILITY_VERSION_KEY) != RUNTIME_BINDING_VERSION.to_string() {
+        return unsupported("runtime capability version is unsupported");
+    }
+    let Some((operation, input_contract, output_contract)) =
+        operation_contracts(value(OPERATION_KEY))
+    else {
+        return unsupported("runtime operation is not advertised");
+    };
+    if value(OPERATION_VERSION_KEY) != "1" {
+        return unsupported("runtime operation version is not advertised");
+    }
+    if value(INPUT_CONTRACT_KEY) != input_contract {
+        return unsupported("runtime input contract does not match the operation");
     }
     Ok((operation, output_contract))
 }

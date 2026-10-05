@@ -717,10 +717,6 @@ async fn non_canonical_identities_are_refused_and_never_reflected() {
         ),
         ("plenora.trace.correlation_id", None),
         ("plenora.message.causation_id", Some("not-a-uuid")),
-        // A misspelled reserved key is not an alias, and is not ignored.
-        ("plenora.correlation_id", Some(CORRELATION_ID)),
-        ("plenora.deadline", Some("2099-01-01T00:00:00Z")),
-        ("plenora.idempotency_key", Some("key-1")),
     ];
     for (key, value) in cases {
         let mut request = with_credential(runtime_request("http://127.0.0.1:9/"));
@@ -764,13 +760,12 @@ async fn non_canonical_identities_are_refused_and_never_reflected() {
 #[tokio::test]
 async fn deadline_refusals_follow_the_shared_matrix() {
     let deadline = "plenora.execution.deadline";
+    // RT-021: not UTC (an offset, `-00:00`) or not RFC 3339 at all.
     for malformed in [
         "2099-01-01T02:00:00+02:00",
-        "2099-01-01T00:00:00+00:00",
         "2099-01-01T00:00:00-00:00",
-        "2099-01-01t00:00:00z",
-        "2099-01-01T00:00:60Z",
-        "2099-01-01T00:00:00.1234567890Z",
+        "2099-01-01 00:00:00",
+        "tomorrow",
     ] {
         let mut request = with_credential(runtime_request("http://127.0.0.1:9/"));
         request
@@ -872,5 +867,33 @@ async fn a_success_has_a_new_identity_caused_by_the_request() {
     assert_eq!(
         response.metadata["plenora.capability.operation"],
         "rest.test"
+    );
+}
+
+#[tokio::test]
+async fn unknown_plenora_keys_are_ignored_not_refused() {
+    // Keys the binding does not reserve are optional members: a request that
+    // carries them is processed as if they were absent (Runtime Binding 1.0
+    // §9). A control the operation does not support would be refused under
+    // RT-006, but these names are not controls of the binding.
+    let mut request = with_credential(runtime_request("http://127.0.0.1:9/"));
+    for (key, value) in [
+        ("plenora.correlation_id", CORRELATION_ID),
+        ("plenora.deadline", "2000-01-01T00:00:00Z"),
+        ("plenora.vendor.extension", "x"),
+    ] {
+        request.metadata.insert(key.to_owned(), value.to_owned());
+    }
+    let engine = local_engine();
+    let resources = UntouchedResources(std::sync::Mutex::new(0));
+    let binding = RuntimeBinding::new(&engine, &resources);
+    let response = invoke_serialized(&binding, request, CancellationToken::new()).await;
+    // Admitted: the credential was resolved and the request was attempted
+    // (port 9 refuses), so the failure is a transport one, not a refusal.
+    assert_eq!(*resources.0.lock().unwrap(), 1);
+    assert_ne!(
+        response.payload["phase"], "validate",
+        "{:?}",
+        response.payload
     );
 }

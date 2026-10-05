@@ -62,6 +62,11 @@ SHA-256 in upstream/source.json. La revisione deve coincidere con quella di
 adoption-manifest.json; il validatore e il test runtime_vectors rifiutano una
 copia diversa dal suo pin o un file senza pin.
 
+contracts/proposte contiene, con lo stesso sistema di pin, le sonde di rifiuto
+runtime-probes-v1 della proposta plenora-contracts #21 (Runtime Binding 1.0
+§11-13), non ancora normativa: il test runtime_vectors le esegue già, così
+l'adozione è immediata quando la proposta entra nel contratto.
+
 plenora-arrow-interchange-v1 è dichiarato non applicabile. La libreria scambia
 oggetti JSON e artifact opachi, non record batch Arrow.
 

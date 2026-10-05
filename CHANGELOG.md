@@ -87,8 +87,10 @@ del contratto delle richieste, raccolte in un'unica rottura.
 ### Binding runtime allineato alla matrice comune (incompatibile)
 
 Le quattro librerie con superficie runtime rispondono ora allo stesso modo agli
-stessi casi. Le regole marcate (P) seguono le proposte comuni in attesa di
-ratifica in plenora-contracts.
+stessi casi, secondo Runtime Binding 1.0 §11-13 (RT-016..RT-023) proposti in
+plenora-contracts #21 e non ancora normativi; le sonde di quella proposta sono
+copiate in contracts/proposte ed eseguite (test
+proposed_rejection_probes_hold_on_the_rest_request_vector).
 
 - Rifiuti prima dell'invocazione: fase validate, remote_effect none, retry
   never (P). Categoria (P, R1): `unsupported` per un valore ben formato ma non
@@ -97,18 +99,21 @@ ratifica in plenora-contracts.
   assente, malformato o non canonico; codici RUNTIME_UNSUPPORTED e
   RUNTIME_PROTOCOL_VIOLATION. Prima tutti erano INVALID_INPUT,
   invalid_configuration.
-- Identità non canoniche (UUID maiuscoli, tra graffe, assenti), chiavi
-  `plenora.*` non riservate dal binding (es. `plenora.deadline`) e valori di
-  metadato non stringa (un `null` come idempotency key) sono `protocol`.
+- Identità non canoniche (UUID maiuscoli, tra graffe, assenti) e valori di
+  metadato non stringa (un `null` come idempotency key) sono `protocol`. Le
+  chiavi `plenora.*` che il binding non riserva sono ignorate come membri
+  facoltativi. L'ordine delle categorie è quello di RT-018: prima `protocol`
+  su tutti i valori riservati, poi `unsupported`, poi `timeout`.
 - Metadati del risultato (P, R2): `plenora.message.id` sempre nuovo;
   `plenora.message.causation_id` è il message id della richiesta;
   correlazione, operazione e versione dell'operazione sono copiate byte per
   byte solo se canoniche, altrimenti omesse. Prima un id non canonico veniva
   riflesso (anche come causazione), una correlazione assente sostituita con
   una nuova e una versione assente scritta come "1".
-- Deadline: solo RFC 3339 UTC con `Z` (anche per ExecutionControl e
-  `options.deadline`); offset, `+00:00`, minuscole, secondi intercalari e più
-  di 9 decimali sono rifiutati. Una deadline già scaduta è DEADLINE_EXPIRED
+- Deadline: ogni grafia RFC 3339 di UTC (`Z` o `z`, `+00:00`, `t`
+  minuscola, frazioni); un offset diverso da zero o `-00:00` è rifiutato
+  (`protocol` sul runtime, INVALID_INPUT in ExecutionControl e
+  `options.deadline`). Prima un offset qualunque era accettato. Una deadline già scaduta è DEADLINE_EXPIRED
   (timeout, validate, none, never) prima di risolvere credenziali o artefatti;
   prima era TIMEOUT (read, unknown, quarantine) e arrivava dopo la
   risoluzione. Sul runtime una deadline nel payload ora vale; nei metadati e

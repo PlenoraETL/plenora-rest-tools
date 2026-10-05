@@ -4641,9 +4641,15 @@ async fn an_expired_deadline_is_refused_before_anything_runs() {
 }
 
 #[test]
-fn a_deadline_must_be_utc_with_a_z_suffix() {
+fn a_deadline_is_any_rfc_3339_spelling_of_utc() {
+    // Runtime Binding 1.0 RT-021 (proposed in plenora-contracts #21): every
+    // RFC 3339 spelling of UTC is accepted; a non-zero offset (local time)
+    // and `-00:00` (offset unknown) are not UTC.
     for accepted in [
         "2099-01-01T00:00:00Z",
+        "2099-01-01T00:00:00z",
+        "2099-01-01t00:00:00Z",
+        "2099-01-01T00:00:00+00:00",
         "2099-01-01T00:00:00.5Z",
         "2099-01-01T00:00:00.123456789Z",
     ] {
@@ -4654,15 +4660,11 @@ fn a_deadline_must_be_utc_with_a_z_suffix() {
     }
     for refused in [
         "2099-01-01T02:00:00+02:00",
-        "2099-01-01T00:00:00+00:00",
         "2099-01-01T00:00:00-00:00",
-        "2099-01-01t00:00:00z",
-        "2099-01-01 00:00:00Z",
-        "2099-01-01T00:00:60Z",
-        "2099-01-01T00:00:00.1234567890Z",
-        "2099-01-01T00:00:00.Z",
+        "2099-01-01T00:00:00",
         "2099-13-01T00:00:00Z",
         "2099-01-01",
+        "tomorrow",
     ] {
         let error = ExecutionControl::default()
             .with_deadline(refused)

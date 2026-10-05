@@ -842,3 +842,138 @@ async fn contract_negative_examples_are_refused_at_the_runtime_boundary() {
         assert_eq!(operation["side_effect"], "remote", "{}", operation["id"]);
     }
 }
+
+/// Rejection probes of Runtime Binding 1.0 §11-13 (RT-016 to RT-022) as
+/// **proposed, not yet normative**: plenora-contracts pull request 21, copied
+/// with their SHA-256 into `contracts/proposte` (see its `source.json`). When
+/// the proposal reaches the contracts' main branch they move to
+/// `contracts/upstream` unchanged.
+///
+/// Each probe is one metadata mutation of a request vector. The probes are
+/// written against several components' vectors; the routing rules they
+/// exercise are the same for every component, so each mutation is applied to
+/// the REST upload request vector, and the expected metadata is read with
+/// that base: a key the probe expects keeps the base value, or the mutated
+/// value when the probe mutated that very key.
+#[tokio::test]
+async fn proposed_rejection_probes_hold_on_the_rest_request_vector() {
+    let root = repository_root().join("contracts").join("proposte");
+    let source = read_json(&root.join("source.json"));
+    assert!(
+        source["status"]
+            .as_str()
+            .is_some_and(|status| status.starts_with("proposed, not normative")),
+        "the proposal must stay marked as such until it is merged"
+    );
+    let pins = source["files"].as_object().unwrap();
+    for (name, pin) in pins {
+        assert_eq!(
+            sha256_hex(&fs::read(root.join(name)).unwrap()),
+            pin["sha256"].as_str().unwrap(),
+            "{name} differs from the pinned proposal"
+        );
+    }
+    let base = vector(UPLOAD_REQUEST);
+    let mut exercised = 0;
+    for name in pins
+        .keys()
+        .filter(|name| name.starts_with("runtime-probes-v1/"))
+    {
+        let probe = read_json(&root.join(name));
+        let expected = &probe["expected"];
+        // RT-006 for a control REST advertises: idempotency keys are
+        // supported by every rest.* operation, so this probe's premise does
+        // not exist here.
+        if name.ends_with("storage-get-idempotency-key-unsupported.json") {
+            continue;
+        }
+        let mut envelope = json!({
+            "schema_version": base["schema_version"],
+            "contract": base["contract"],
+            "kind": base["kind"],
+            "content_type": base["content_type"],
+            "metadata": base["metadata"],
+            "payload": base["payload"],
+        });
+        let mutation = &probe["mutation"];
+        let mutated_key = if let Some(set) = mutation["set"].as_object() {
+            let (key, value) = set.iter().next().unwrap();
+            envelope["metadata"][key] = value.clone();
+            key.clone()
+        } else {
+            let key = mutation["remove"].as_str().unwrap().to_owned();
+            envelope["metadata"].as_object_mut().unwrap().remove(&key);
+            key
+        };
+        let resources = VectorResources::new("probe");
+        let engine = resources.engine();
+        let binding = RuntimeBinding::new(&engine, &resources);
+        let response: RuntimeMessage = serde_json::from_str(
+            &binding
+                .invoke_json(&envelope.to_string(), CancellationToken::new())
+                .await
+                .expect("an envelope is always answered"),
+        )
+        .unwrap();
+        assert!(
+            resources.calls().is_empty(),
+            "{name}: {:?}",
+            resources.calls()
+        );
+        assert_eq!(response.kind, RuntimeMessageKind::Error, "{name}");
+        assert_eq!(response.content_type, expected["content_type"], "{name}");
+        for axis in ["category", "phase", "remote_effect", "retry"] {
+            assert_eq!(
+                response.payload[axis], expected["error"][axis],
+                "{name}: {axis} in {:?}",
+                response.payload
+            );
+        }
+        let listed = expected["metadata"].as_object().unwrap();
+        for key in [
+            "plenora.capability.operation",
+            "plenora.operation.version",
+            "plenora.output.contract",
+            "plenora.trace.correlation_id",
+        ] {
+            let want = listed.get(key).map(|value| {
+                if key == "plenora.output.contract" {
+                    value.clone()
+                } else if key == mutated_key {
+                    envelope["metadata"][key].clone()
+                } else {
+                    base["metadata"][key].clone()
+                }
+            });
+            assert_eq!(
+                response.metadata.get(key).map(|value| json!(value)),
+                want,
+                "{name}: {key}"
+            );
+        }
+        // RT-020: a new identity, caused by the request when its id is
+        // canonical, never copying the request's own causation.
+        assert_ne!(
+            response
+                .metadata
+                .get("plenora.message.id")
+                .map(String::as_str),
+            envelope["metadata"]["plenora.message.id"].as_str(),
+            "{name}"
+        );
+        let request_id = envelope["metadata"]["plenora.message.id"].as_str();
+        let canonical = request_id.is_some_and(|id| {
+            uuid::Uuid::parse_str(id).is_ok_and(|parsed| parsed.hyphenated().to_string() == id)
+        });
+        assert_eq!(
+            response
+                .metadata
+                .get("plenora.message.causation_id")
+                .map(String::as_str),
+            if canonical { request_id } else { None },
+            "{name}"
+        );
+        exercised += 1;
+    }
+    assert_eq!(exercised, 20, "every applicable probe is exercised");
+}
