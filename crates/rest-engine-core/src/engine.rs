@@ -884,17 +884,34 @@ impl Engine {
         .collect::<Vec<_>>()
         .await;
 
+        // Every record yields exactly one outcome at its own index. A missing,
+        // repeated or out-of-range outcome would silently drop or duplicate a
+        // record, so it fails the operation instead.
         let mut ordered: Vec<Option<EnrichmentOutcome>> =
             (0..request.input.records.len()).map(|_| None).collect();
         for outcome in outcomes {
-            let index = outcome.index;
-            ordered[index] = Some(outcome);
+            let slot = ordered.get_mut(outcome.index).ok_or_else(|| {
+                EngineError::Runtime(ErrorDetail::from(
+                    "enrichment outcome index is out of range",
+                ))
+            })?;
+            if slot.replace(outcome).is_some() {
+                return Err(EngineError::Runtime(ErrorDetail::from(
+                    "enrichment record produced more than one outcome",
+                )));
+            }
         }
+        let ordered = ordered
+            .into_iter()
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| {
+                EngineError::Runtime(ErrorDetail::from("enrichment record produced no outcome"))
+            })?;
 
         let mut output = Vec::with_capacity(request.input.records.len());
         let mut errors = Vec::new();
         let mut succeeded = 0_usize;
-        for outcome in ordered.into_iter().flatten() {
+        for outcome in ordered {
             merge_execution_metrics(metrics, &outcome.metrics);
             responses.extend(outcome.responses);
             match outcome.result {
@@ -2255,17 +2272,18 @@ async fn hash_file(path: &Path, limit: u64) -> Result<String, EngineError> {
         if read == 0 {
             break;
         }
+        let chunk = buffer.get(..read).ok_or_else(|| {
+            EngineError::Runtime(ErrorDetail::from(
+                "file read reported more bytes than its buffer",
+            ))
+        })?;
         let read = u64::try_from(read).map_err(|_| {
             EngineError::Runtime(ErrorDetail::from("file read length overflowed u64"))
         })?;
         if total.saturating_add(read) > limit {
             return Err(EngineError::FileTooLarge { limit_bytes: limit });
         }
-        digest.update(
-            &buffer[..usize::try_from(read).map_err(|_| {
-                EngineError::Runtime(ErrorDetail::from("file read length overflowed usize"))
-            })?],
-        );
+        digest.update(chunk);
         total = total.saturating_add(read);
     }
     Ok(format!("{:x}", digest.finalize()))
@@ -2709,11 +2727,10 @@ fn expand_iterations(
     context: &JsonObject,
     output: &mut Vec<Value>,
 ) {
-    if level >= iterations.len() {
+    let Some(iteration) = iterations.get(level) else {
         output.push(Value::Object(context.clone()));
         return;
-    }
-    let iteration = &iterations[level];
+    };
     let selected = if iteration.path.is_empty() {
         Some(current)
     } else {
@@ -4200,7 +4217,7 @@ fn has_credential_compound(name: &str) -> bool {
     }
     (0..components.len()).any(|start| {
         let mut joined = String::new();
-        components[start..].iter().any(|component| {
+        components.iter().skip(start).any(|component| {
             joined.push_str(component);
             is_marker(&joined)
         })
@@ -4283,6 +4300,7 @@ fn validate_idempotency_key(key: &str) -> Result<(), EngineError> {
 
 fn validate_execution_configuration(request: &ExecutionRequest) -> Result<(), EngineError> {
     validate_transforms(&request.connection.response)?;
+    validate_json_paths(&request.connection)?;
     let Some(polling) = request.connection.polling.as_ref() else {
         return Ok(());
     };
@@ -4341,6 +4359,54 @@ fn validate_execution_configuration(request: &ExecutionRequest) -> Result<(), En
         )));
     }
     Ok(())
+}
+
+/// Every JSON path a request reads from a response must be well formed.
+///
+/// At run time a path that does not resolve means "the response does not have
+/// it", which the operation may legitimately turn into null or a default. A
+/// malformed path never resolves, so without this check a typo in the
+/// configuration would be indistinguishable from a response that lacks the
+/// field.
+fn validate_json_paths(connection: &ConnectionConfig) -> Result<(), EngineError> {
+    let response = &connection.response;
+    let mut paths: Vec<&str> = Vec::new();
+    paths.extend(response.records_path.as_deref());
+    paths.extend(response.error_path.as_deref());
+    paths.extend(
+        response
+            .output_mapping
+            .iter()
+            .map(|mapping| mapping.path.as_str()),
+    );
+    paths.extend(
+        response
+            .iterate_on
+            .iter()
+            .map(|iteration| iteration.path.as_str()),
+    );
+    if let Some(batch) = connection.batch.as_ref() {
+        paths.push(&batch.output_path);
+    }
+    if let Some(polling) = connection.polling.as_ref() {
+        paths.push(&polling.id_path);
+        paths.push(&polling.status_path);
+        paths.extend(polling.url_path.as_deref());
+        paths.extend(polling.result_path.as_deref());
+        paths.extend(polling.result_url_path.as_deref());
+    }
+    match connection.pagination.as_ref() {
+        Some(PaginationConfig::Cursor { cursor_path, .. }) => paths.push(cursor_path),
+        Some(PaginationConfig::Link { link_path, .. }) => paths.push(link_path),
+        _ => {}
+    }
+    if paths.into_iter().all(json_path::is_valid) {
+        Ok(())
+    } else {
+        Err(EngineError::InvalidInput(ErrorDetail::from(
+            "connection contains a malformed JSON path",
+        )))
+    }
 }
 
 fn execution_fingerprint(request: &ExecutionRequest) -> Result<String, EngineError> {

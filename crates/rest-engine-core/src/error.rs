@@ -67,7 +67,7 @@ impl From<&'static str> for ErrorDetail {
 
 /// Every failure the engine reports.
 ///
-/// Variants that describe a failure in words carry an opaque [`ErrorDetail`];
+/// Variants that describe a failure in words carry an opaque `ErrorDetail`
 /// variants that carry numbers chosen by the engine or the protocol (a byte
 /// limit, an HTTP status, a poll count, a contract version) keep them public.
 /// `Display` is the static public message of the variant, the same text as

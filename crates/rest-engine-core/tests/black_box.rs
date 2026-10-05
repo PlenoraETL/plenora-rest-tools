@@ -3912,6 +3912,51 @@ async fn a_flat_array_batch_refuses_records_without_exactly_one_value() {
 }
 
 #[tokio::test]
+async fn malformed_json_paths_are_rejected_before_any_request() {
+    // A malformed path never resolves, so at run time it would read as a
+    // response that lacks the field (null, or the mapping default) instead of
+    // a configuration mistake. Every path the connection reads is checked.
+    let malformed = "data[0";
+    let connections = [
+        json!({"response": {"records_path": malformed}}),
+        json!({"response": {"error_path": malformed}}),
+        json!({"response": {"output_mapping": [{"path": malformed, "column": "c"}]}}),
+        json!({"response": {"output_mapping": [{"path": "items[]", "column": "c"}]}}),
+        json!({"response": {"iterate_on": [{"path": malformed, "as": "item"}]}}),
+        json!({"batch": {"output_path": malformed}}),
+        json!({"polling": {"id_path": malformed}}),
+        json!({"polling": {"status_path": malformed}}),
+        json!({"polling": {"url_path": malformed}}),
+        json!({"polling": {"result_path": malformed}}),
+        json!({"polling": {"result_url_path": malformed}}),
+        json!({"pagination": {"type": "cursor", "cursor_path": malformed}}),
+        json!({"pagination": {"type": "link", "link_path": malformed}}),
+    ];
+    for extra in connections {
+        let mut connection = json!({"url": "http://127.0.0.1:9/", "method": "GET"});
+        for (key, value) in extra.as_object().unwrap() {
+            connection[key] = value.clone();
+        }
+        // Port 9 is never contacted: validation fails first.
+        let result = execute(
+            &local_engine(),
+            json!({
+                "schema_version": 1,
+                "operation": "generate",
+                "connection": connection,
+            }),
+        )
+        .await;
+        assert_eq!(result["status"], "failed", "{extra}");
+        assert_eq!(
+            result["errors"][0]["code"], "INVALID_INPUT",
+            "{extra}: {result}"
+        );
+        assert_eq!(result["metrics"]["requests"], 0, "{extra}");
+    }
+}
+
+#[tokio::test]
 async fn a_null_transform_argument_is_rejected_before_any_request() {
     for transform in [
         json!({"source": "a", "column": "c", "operation": "prefix", "value": null}),
