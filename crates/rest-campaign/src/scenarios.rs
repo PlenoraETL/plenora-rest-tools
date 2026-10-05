@@ -1618,6 +1618,9 @@ async fn upload(observation: &mut Observation, context: &Context, key: &str, rng
         .await
         .is_err()
     {
+        // Disco pieno o directory non scrivibile: l'harness non lascia il
+        // file a metà, e l'operazione conta come errore dell'harness.
+        let _ = tokio::fs::remove_file(&source).await;
         observation.violate(
             Criterion::HarnessError,
             "file sorgente dell'upload non scrivibile",
@@ -1851,16 +1854,27 @@ async fn runtime_binding(
     scan_message(observation, context, &response);
     let counters = context.server.take(key);
     observation.server_hits = counters.hits;
+    let succeeded =
+        response.kind == RuntimeMessageKind::Success && response.payload["status"] == "success";
     observation.check(
-        response.kind == RuntimeMessageKind::Success && response.payload["status"] == "success",
+        succeeded,
         Criterion::UnexpectedOutcome,
         "download verso artifact_sink non riuscito",
     );
-    observation.check(
-        file_digest(&sink).await == Some((size, expected)),
-        Criterion::IncompleteFilePublished,
-        "artifact scritto diverso dal contenuto atteso",
-    );
+    let on_disk = file_digest(&sink).await;
+    if succeeded {
+        observation.check(
+            on_disk == Some((size, expected)),
+            Criterion::IncompleteFilePublished,
+            "artifact scritto diverso dal contenuto atteso",
+        );
+    } else {
+        observation.check(
+            on_disk.is_none(),
+            Criterion::IncompleteFilePublished,
+            "artifact pubblicato dopo un download fallito",
+        );
+    }
     let _ = tokio::fs::remove_file(&sink).await;
     bound_attempts(observation, counters.hits, 2);
 }

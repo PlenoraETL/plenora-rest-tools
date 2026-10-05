@@ -424,7 +424,11 @@ pub fn markdown(report: &Report) -> String {
         report.profile.workers,
         report.profile.ops_per_second,
         report.profile.engine.max_concurrent_requests,
-        optional(report.profile.engine.requests_per_second)
+        report
+            .profile
+            .engine
+            .requests_per_second
+            .map_or_else(|| "non configurato".to_owned(), |rate| rate.to_string())
     );
     let _ = writeln!(
         text,
