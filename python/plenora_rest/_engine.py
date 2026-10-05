@@ -64,6 +64,25 @@ class Engine:
         document = _load_object(raw_document, "capability document")
         return cast(CapabilityDocument, document)
 
+    def open_cookie_session(self) -> str:
+        """Open a cookie session and return its opaque handle.
+
+        Pass the handle as ``connection["cookies"]["session"]``. Once the
+        session is closed or evicted the handle is refused with an explicit
+        error; it never reaches an empty session.
+        """
+        try:
+            return str(self._native.open_cookie_session())
+        except NativePlenoraError as error:
+            raise _public_error(error) from None
+
+    def close_cookie_session(self, handle: str) -> None:
+        """Close the cookie session ``handle`` names; the handle is then refused."""
+        try:
+            self._native.close_cookie_session(handle)
+        except NativePlenoraError as error:
+            raise _public_error(error) from None
+
     def close(self) -> None:
         self._native.close()
 

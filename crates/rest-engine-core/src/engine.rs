@@ -8,6 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::error::ErrorDetail;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use futures_util::{StreamExt, stream};
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
@@ -19,7 +20,7 @@ use tokio::{fs, io::AsyncReadExt, time::sleep};
 use crate::{
     ASYNC_JOB_RECOVERY_CONTRACT, AsyncJobRecovery, AuthConfig, BatchConfig, BatchInputFormat,
     BodyType, CachePolicy, CancellationToken, CapabilityDocument, ConnectionConfig, CookiePolicy,
-    EngineConfig, EngineError, ExecutionControl, ExecutionError, ExecutionMetrics,
+    CookieSession, EngineConfig, EngineError, ExecutionControl, ExecutionError, ExecutionMetrics,
     ExecutionOperation, ExecutionOutput, ExecutionRequest, ExecutionResult, ExecutionStatus,
     FileTransferDirection, FileTransferInput, HttpMethod, HttpResponseMetadata,
     IdempotencyLocation, IntegrityMetadata, JsonObject, OutputMapping, PaginationConfig,
@@ -139,6 +140,17 @@ impl Engine {
         if let Err(error) = validate_execution_configuration(&request) {
             return failed_result(error);
         }
+        // Checked once for the whole operation, before any network activity
+        // and before a credential scope can strip the session from a
+        // follow-up: a stale handle must refuse the operation, not let parts
+        // of it run without cookies.
+        if let Err(error) = self
+            .transport
+            .check_cookie_session(request.connection.cookies.session.as_ref())
+            .await
+        {
+            return failed_result(error);
+        }
         if let Err(error) = self.admit_idempotency(&request) {
             return failed_result(error);
         }
@@ -192,6 +204,29 @@ impl Engine {
         capabilities()
     }
 
+    /// Opens a cookie session and returns its handle.
+    ///
+    /// A request uses the session by naming the handle in
+    /// `connection.cookies.session`. The engine keeps at most
+    /// `EngineConfig::max_cookie_sessions` sessions; opening one more evicts the
+    /// least recently used session no operation is holding, and its handle is
+    /// refused from then on.
+    pub async fn open_cookie_session(&self) -> Result<CookieSession, EngineError> {
+        if self.is_closed() {
+            return Err(EngineError::EngineClosed);
+        }
+        self.transport.open_cookie_session().await
+    }
+
+    /// Closes a cookie session. Its handle, and every copy of it, is refused
+    /// from now on; closing a stale handle is an error.
+    pub async fn close_cookie_session(&self, session: &CookieSession) -> Result<(), EngineError> {
+        if self.is_closed() {
+            return Err(EngineError::EngineClosed);
+        }
+        self.transport.close_cookie_session(session).await
+    }
+
     pub fn close(&self) {
         self.closed.store(true, Ordering::Release);
     }
@@ -206,9 +241,9 @@ impl Engine {
         };
         validate_idempotency_key(key)?;
         if self.config.max_idempotency_keys == 0 {
-            return Err(EngineError::PolicyViolation(
-                "max_idempotency_keys must be greater than zero when a key is used".to_owned(),
-            ));
+            return Err(EngineError::PolicyViolation(ErrorDetail::from(
+                "max_idempotency_keys must be greater than zero when a key is used",
+            )));
         }
         let fingerprint = execution_fingerprint(request)?;
         let mut registry = self
@@ -330,9 +365,9 @@ impl Engine {
         let mut responses = Vec::new();
 
         let result = if request.connection.credential_ref.is_some() {
-            Err(EngineError::InvalidInput(
-                "credential_ref requires an authorized runtime resolver".to_owned(),
-            ))
+            Err(EngineError::InvalidInput(ErrorDetail::from(
+                "credential_ref requires an authorized runtime resolver",
+            )))
         } else if request.schema_version != SCHEMA_VERSION {
             Err(EngineError::UnsupportedSchema {
                 received: request.schema_version,
@@ -402,12 +437,18 @@ impl Engine {
         if self.is_closed() {
             return Err(EngineError::EngineClosed);
         }
-        let request = serde_json::from_str::<ExecutionRequest>(request_json)
-            .map_err(|error| EngineError::InvalidInput(error.to_string()))?;
+        let request = serde_json::from_str::<ExecutionRequest>(request_json).map_err(|error| {
+            EngineError::InvalidInput(ErrorDetail::at(
+                "request is not valid JSON for the contract",
+                error.line(),
+                error.column(),
+            ))
+        })?;
         let control = ExecutionControl::new(cancellation)
             .with_optional_deadline(request.options.deadline.as_deref())?;
         let result = self.execute_with_control(request, control).await;
-        serde_json::to_string(&result).map_err(|error| EngineError::Runtime(error.to_string()))
+        serde_json::to_string(&result)
+            .map_err(|_| EngineError::Runtime(ErrorDetail::from("result could not be serialized")))
     }
 
     async fn test(
@@ -562,9 +603,8 @@ impl Engine {
         let limit = transfer_limit(&self.config, file)?;
         let metadata = fs::metadata(&source).await.map_err(file_io)?;
         if !metadata.is_file() {
-            return Err(EngineError::FileIo(format!(
-                "upload source '{}' is not a regular file",
-                source.display()
+            return Err(EngineError::FileIo(ErrorDetail::from(
+                "upload source is not a regular file",
             )));
         }
         let length = metadata.len();
@@ -581,10 +621,7 @@ impl Engine {
         let sha256 = hash_file(&source, limit).await?;
         if let Some(expected) = validated_checksum(file.expected_sha256.as_deref())? {
             if !sha256.eq_ignore_ascii_case(&expected) {
-                return Err(EngineError::ChecksumMismatch {
-                    expected,
-                    actual: sha256,
-                });
+                return Err(EngineError::ChecksumMismatch);
             }
         }
 
@@ -605,7 +642,7 @@ impl Engine {
                 });
             }
             PreparedBody::Multipart { files, .. } => {
-                validate_multipart_name(&file.field_name, "field_name")?;
+                validate_multipart_name(&file.field_name)?;
                 let filename = file
                     .filename
                     .clone()
@@ -615,11 +652,11 @@ impl Engine {
                             .map(|value| value.to_string_lossy().into_owned())
                     })
                     .ok_or_else(|| {
-                        EngineError::InvalidInput(
-                            "upload file requires an explicit filename".to_owned(),
-                        )
+                        EngineError::InvalidInput(ErrorDetail::from(
+                            "upload file requires an explicit filename",
+                        ))
                     })?;
-                validate_multipart_name(&filename, "filename")?;
+                validate_multipart_name(&filename)?;
                 files.push(PreparedFile {
                     field_name: file.field_name.clone(),
                     filename,
@@ -631,9 +668,9 @@ impl Engine {
                 });
             }
             _ => {
-                return Err(EngineError::InvalidInput(
-                    "upload requires request.body_type 'raw' or 'multipart'".to_owned(),
-                ));
+                return Err(EngineError::InvalidInput(ErrorDetail::from(
+                    "upload requires request.body_type 'raw' or 'multipart'",
+                )));
             }
         }
         let (value, _, _, _) = self
@@ -651,18 +688,11 @@ impl Engine {
         // must say the remote effect is unknown and the failure belongs to the
         // finalize phase. `FileIo` would claim `remote_effect: none` and tell
         // the caller nothing happened remotely, which is exactly wrong here.
-        let transferred =
-            hash_file(&source, limit)
-                .await
-                .map_err(|_| EngineError::ChecksumMismatch {
-                    expected: sha256.clone(),
-                    actual: "unreadable".to_owned(),
-                })?;
+        let transferred = hash_file(&source, limit)
+            .await
+            .map_err(|_| EngineError::ChecksumMismatch)?;
         if transferred != sha256 {
-            return Err(EngineError::ChecksumMismatch {
-                expected: sha256,
-                actual: transferred,
-            });
+            return Err(EngineError::ChecksumMismatch);
         }
         metrics.bytes_uploaded = metrics.bytes_uploaded.saturating_add(length);
         Ok(OperationResult {
@@ -719,7 +749,7 @@ impl Engine {
                 .await?
             }
         };
-        let records = map_records(values, &request.connection.response);
+        let records = map_records(values, &request.connection.response)?;
         let succeeded = records.len();
         Ok(OperationResult {
             output: ExecutionOutput::Records { records },
@@ -743,9 +773,9 @@ impl Engine {
             return self.enrich_batch(request, batch, metrics, responses).await;
         }
         if request.options.enrichment_concurrency == 0 {
-            return Err(EngineError::InvalidInput(
-                "enrichment_concurrency must be greater than zero".to_owned(),
-            ));
+            return Err(EngineError::InvalidInput(ErrorDetail::from(
+                "enrichment_concurrency must be greater than zero",
+            )));
         }
         if request.options.enrichment_concurrency > 1 && request.options.continue_on_error {
             return self.enrich_concurrent(request, metrics, responses).await;
@@ -772,7 +802,7 @@ impl Engine {
                     .map(|(value, _, _, _)| value)
                     .and_then(|value| {
                         response_records(&request.connection, &value)
-                            .map(|values| map_records(values, &request.connection.response))
+                            .and_then(|values| map_records(values, &request.connection.response))
                     }),
                 Err(error) => Err(error),
             };
@@ -835,8 +865,9 @@ impl Engine {
                         .await
                         .map(|(value, _, _, _)| value)
                         .and_then(|value| {
-                            response_records(&request.connection, &value)
-                                .map(|values| map_records(values, &request.connection.response))
+                            response_records(&request.connection, &value).and_then(|values| {
+                                map_records(values, &request.connection.response)
+                            })
                         }),
                     Err(error) => Err(error),
                 };
@@ -901,9 +932,9 @@ impl Engine {
         responses: &mut Vec<HttpResponseMetadata>,
     ) -> Result<OperationResult, EngineError> {
         if batch.max_size == 0 {
-            return Err(EngineError::InvalidInput(
-                "batch max_size must be greater than zero".to_owned(),
-            ));
+            return Err(EngineError::InvalidInput(ErrorDetail::from(
+                "batch max_size must be greater than zero",
+            )));
         }
         let mut connection = request.connection.clone();
         connection.batch = None;
@@ -927,7 +958,13 @@ impl Engine {
             for (offset, record) in records.iter().enumerate() {
                 let mut source = request.input.params.clone();
                 source.extend(record.clone());
-                match resolve_parameters(&connection, &source) {
+                let resolved = resolve_parameters(&connection, &source).and_then(|value| {
+                    if batch.input_format == BatchInputFormat::FlatArray {
+                        flat_batch_item(&value)?;
+                    }
+                    Ok(value)
+                });
+                match resolved {
                     Ok(value) => {
                         parameters.push(value);
                         valid.push(offset);
@@ -953,11 +990,9 @@ impl Engine {
             };
             let mapped = match batch_result {
                 Ok(mapped) if mapped.len() == valid.len() => Some(mapped),
-                Ok(mapped) => {
-                    let error = EngineError::InvalidResponse(format!(
-                        "batch returned {} results for {} input records",
-                        mapped.len(),
-                        valid.len()
+                Ok(_) => {
+                    let error = EngineError::InvalidResponse(ErrorDetail::from(
+                        "batch returned a different number of results than input records",
                     ));
                     for offset in &valid {
                         errors.push(error.execution_error(Some(base_index + offset)));
@@ -1189,9 +1224,9 @@ impl Engine {
                 allow_cross_origin,
             } => {
                 if relation.trim().is_empty() {
-                    return Err(EngineError::InvalidInput(
-                        "pagination Link relation cannot be empty".to_owned(),
-                    ));
+                    return Err(EngineError::InvalidInput(ErrorDetail::from(
+                        "pagination Link relation cannot be empty",
+                    )));
                 }
                 let mut next_url: Option<String> = None;
                 let mut seen = HashSet::new();
@@ -1292,6 +1327,13 @@ impl Engine {
             &mut request,
             preserved_idempotency_header(connection, options),
         );
+        // The idempotency key is what switched on retries for a non-idempotent
+        // method. When its header had to be withheld from this origin, the
+        // request is no longer protected, so it is retried only if the caller
+        // asked for that independently of the key.
+        if idempotency_header_withheld(connection, options, &request) {
+            request.retry.retry_non_idempotent = connection.retry.retry_non_idempotent;
+        }
         self.request_prepared_json(
             connection,
             request,
@@ -1499,18 +1541,18 @@ impl Engine {
                     active_key: None,
                 });
             }
-            Some(PollState::Failure(status)) => {
-                return Err(EngineError::InvalidResponse(format!(
-                    "asynchronous operation failed with status '{status}'"
+            Some(PollState::Failure) => {
+                return Err(EngineError::InvalidResponse(ErrorDetail::from(
+                    "asynchronous operation reported a failure status",
                 )));
             }
             Some(PollState::Pending) | None => {}
         }
         let poll_url = poll_url(&initial_value, &initial_response, polling)?;
         if !polling.allow_cross_origin && !same_origin(&initial_response.final_url, &poll_url) {
-            return Err(EngineError::UnsafeAddress(
-                "cross-origin polling is blocked".to_owned(),
-            ));
+            return Err(EngineError::UnsafeAddress(ErrorDetail::from(
+                "cross-origin polling is blocked",
+            )));
         }
 
         // Narrowed in place, so everything derived afterwards inherits the
@@ -1545,24 +1587,23 @@ impl Engine {
     ) -> Result<PollCompletion, EngineError> {
         let base_url = &credential_scope.origin.clone();
         let resume = polling.resume.as_ref().ok_or_else(|| {
-            EngineError::InvalidInput("polling resume configuration is missing".to_owned())
+            EngineError::InvalidInput(ErrorDetail::from("polling resume configuration is missing"))
         })?;
         validate_job_id(&resume.job_id)?;
         let job_id = Value::String(resume.job_id.clone());
         let template = polling.url_template.as_deref().ok_or_else(|| {
-            EngineError::InvalidInput(
-                "polling resume requires url_template and cannot infer a prior Location URL"
-                    .to_owned(),
-            )
+            EngineError::InvalidInput(ErrorDetail::from(
+                "polling resume requires url_template and cannot infer a prior Location URL",
+            ))
         })?;
         let target = render_poll_template_from_base(template, base_url, Some(&job_id))?;
-        let poll_url = base_url
-            .join(&target)
-            .map_err(|error| EngineError::InvalidUrl(format!("polling resume URL: {error}")))?;
+        let poll_url = base_url.join(&target).map_err(|_| {
+            EngineError::InvalidUrl(ErrorDetail::from("polling resume URL is invalid"))
+        })?;
         if !polling.allow_cross_origin && !same_origin(base_url, &poll_url) {
-            return Err(EngineError::UnsafeAddress(
-                "cross-origin polling is blocked".to_owned(),
-            ));
+            return Err(EngineError::UnsafeAddress(ErrorDetail::from(
+                "cross-origin polling is blocked",
+            )));
         }
         credential_scope.narrow(&poll_url);
         let active_key = self.register_polled_job(
@@ -1597,9 +1638,9 @@ impl Engine {
     ) -> Result<PollCompletion, EngineError> {
         if polling.max_attempts == 0 {
             remove_active_job(&active_key);
-            return Err(EngineError::InvalidInput(
-                "polling max_attempts must be greater than zero".to_owned(),
-            ));
+            return Err(EngineError::InvalidInput(ErrorDetail::from(
+                "polling max_attempts must be greater than zero",
+            )));
         }
         let poll_started = Instant::now();
         let budget = polling.max_wait_ms.map(Duration::from_millis);
@@ -1654,17 +1695,16 @@ impl Engine {
                         active_key: Some(active_key),
                     });
                 }
-                Some(PollState::Failure(status)) => {
+                Some(PollState::Failure) => {
                     remove_active_job(&active_key);
-                    return Err(EngineError::InvalidResponse(format!(
-                        "asynchronous operation failed with status '{status}'"
+                    return Err(EngineError::InvalidResponse(ErrorDetail::from(
+                        "asynchronous operation reported a failure status",
                     )));
                 }
                 Some(PollState::Pending) => {}
                 None => {
-                    return Err(EngineError::InvalidResponse(format!(
-                        "poll response has no status at '{}'",
-                        polling.status_path
+                    return Err(EngineError::InvalidResponse(ErrorDetail::from(
+                        "poll response has no status at status_path",
                     )));
                 }
             }
@@ -1724,23 +1764,23 @@ impl Engine {
         credential_scope: &CredentialScope,
     ) -> Result<ActiveRemoteCancel, EngineError> {
         if cancel.timeout_ms == 0 {
-            return Err(EngineError::InvalidInput(
-                "polling cancel timeout_ms must be greater than zero".to_owned(),
-            ));
+            return Err(EngineError::InvalidInput(ErrorDetail::from(
+                "polling cancel timeout_ms must be greater than zero",
+            )));
         }
         let target = match cancel.url_template.as_deref() {
             Some(template) => {
                 let rendered = render_poll_template_from_base(template, poll_url, job_id)?;
-                poll_url.join(&rendered).map_err(|error| {
-                    EngineError::InvalidUrl(format!("polling cancel URL: {error}"))
+                poll_url.join(&rendered).map_err(|_| {
+                    EngineError::InvalidUrl(ErrorDetail::from("polling cancel URL is invalid"))
                 })?
             }
             None => poll_url.clone(),
         };
         if !polling.allow_cross_origin && !same_origin(poll_url, &target) {
-            return Err(EngineError::UnsafeAddress(
-                "cross-origin polling cancellation is blocked".to_owned(),
-            ));
+            return Err(EngineError::UnsafeAddress(ErrorDetail::from(
+                "cross-origin polling cancellation is blocked",
+            )));
         }
         let mut request = self.prepare_followup_request(
             connection,
@@ -1779,6 +1819,8 @@ impl Engine {
             max_redirects: connection.request.max_redirects,
             retry: connection.retry.clone(),
             cookies: connection.cookies.clone(),
+            admitted_jar: None,
+            caller_session: connection.cookies.session.clone(),
             cache,
             circuit_breaker: connection.circuit_breaker.clone(),
             requests_per_second: connection.requests_per_second,
@@ -1838,9 +1880,9 @@ impl Engine {
     ) -> Result<PreparedRequest, EngineError> {
         let target = polling_result_url(status_value, status_response, polling, job_id)?;
         if !polling.allow_cross_origin && !same_origin(&status_response.final_url, &target) {
-            return Err(EngineError::UnsafeAddress(
-                "cross-origin polling result URL is blocked".to_owned(),
-            ));
+            return Err(EngineError::UnsafeAddress(ErrorDetail::from(
+                "cross-origin polling result URL is blocked",
+            )));
         }
         let mut request = PreparedRequest {
             url: target,
@@ -1858,6 +1900,8 @@ impl Engine {
             max_redirects: connection.request.max_redirects,
             retry: connection.retry.clone(),
             cookies: connection.cookies.clone(),
+            admitted_jar: None,
+            caller_session: connection.cookies.session.clone(),
             cache: connection.cache.clone(),
             circuit_breaker: connection.circuit_breaker.clone(),
             requests_per_second: connection.requests_per_second,
@@ -1897,10 +1941,10 @@ impl Engine {
             root.join(requested)
         };
         let filename = candidate.file_name().ok_or_else(|| {
-            EngineError::InvalidInput("download path must include a filename".to_owned())
+            EngineError::InvalidInput(ErrorDetail::from("download path must include a filename"))
         })?;
         let parent = candidate.parent().ok_or_else(|| {
-            EngineError::InvalidInput("download path has no parent directory".to_owned())
+            EngineError::InvalidInput(ErrorDetail::from("download path has no parent directory"))
         })?;
         let parent = fs::canonicalize(parent).await.map_err(file_io)?;
         ensure_within_root(&parent, &root)?;
@@ -1908,15 +1952,13 @@ impl Engine {
         if fs::try_exists(&target).await.map_err(file_io)? {
             let metadata = fs::symlink_metadata(&target).await.map_err(file_io)?;
             if metadata.is_dir() {
-                return Err(EngineError::FileIo(format!(
-                    "download destination '{}' is a directory",
-                    target.display()
+                return Err(EngineError::FileIo(ErrorDetail::from(
+                    "download destination is a directory",
                 )));
             }
             if !file.overwrite {
-                return Err(EngineError::FileIo(format!(
-                    "download destination '{}' already exists",
-                    target.display()
+                return Err(EngineError::FileIo(ErrorDetail::from(
+                    "download destination already exists",
                 )));
             }
         }
@@ -1927,9 +1969,9 @@ impl Engine {
         if self.config.allow_file_transfers {
             Ok(())
         } else {
-            Err(EngineError::PolicyViolation(
-                "file transfers are not enabled for this engine".to_owned(),
-            ))
+            Err(EngineError::PolicyViolation(ErrorDetail::from(
+                "file transfers are not enabled for this engine",
+            )))
         }
     }
 
@@ -1942,7 +1984,9 @@ impl Engine {
     async fn transfer_root(&self) -> Result<PathBuf, EngineError> {
         self.ensure_file_transfers_allowed()?;
         self.canonical_file_root().await?.ok_or_else(|| {
-            EngineError::PolicyViolation("file transfers require a configured file_root".to_owned())
+            EngineError::PolicyViolation(ErrorDetail::from(
+                "file transfers require a configured file_root",
+            ))
         })
     }
 
@@ -1958,9 +2002,8 @@ impl Engine {
         };
         let root = fs::canonicalize(root).await.map_err(file_io)?;
         if !fs::metadata(&root).await.map_err(file_io)?.is_dir() {
-            return Err(EngineError::FileIo(format!(
-                "configured file_root '{}' is not a directory",
-                root.display()
+            return Err(EngineError::FileIo(ErrorDetail::from(
+                "configured file_root is not a directory",
             )));
         }
         Ok(Some(root))
@@ -1975,11 +2018,11 @@ impl Engine {
     ) -> Result<PreparedRequest, EngineError> {
         let template = url_override.unwrap_or(&connection.url);
         if template.trim().is_empty() {
-            return Err(EngineError::InvalidUrl("URL is empty".to_owned()));
+            return Err(EngineError::InvalidUrl(ErrorDetail::from("URL is empty")));
         }
         let (rendered_url, consumed) = render_template(template, parameters, true);
         let mut url = Url::parse(&rendered_url)
-            .map_err(|error| EngineError::InvalidUrl(error.to_string()))?;
+            .map_err(|_| EngineError::InvalidUrl(ErrorDetail::from("rendered URL is not valid")))?;
         let legacy_query_only = matches!(
             &connection.method,
             HttpMethod::Get | HttpMethod::Head | HttpMethod::Delete | HttpMethod::Options
@@ -1993,32 +2036,37 @@ impl Engine {
             let location = spec.map_or(ParameterLocation::Auto, |spec| spec.location);
             if consumed.contains(name) {
                 if !matches!(location, ParameterLocation::Auto | ParameterLocation::Path) {
-                    return Err(EngineError::InvalidInput(format!(
-                        "parameter '{name}' is used in the URL but has location '{location:?}'"
+                    return Err(EngineError::InvalidInput(ErrorDetail::from(
+                        "parameter is used in the URL but has a non-path location",
                     )));
                 }
+                refuse_null_in_text(value)?;
                 continue;
             }
             match location {
                 ParameterLocation::Path => {
-                    return Err(EngineError::InvalidInput(format!(
-                        "path parameter '{name}' has no matching URL placeholder"
+                    return Err(EngineError::InvalidInput(ErrorDetail::from(
+                        "path parameter has no matching URL placeholder",
                     )));
                 }
                 ParameterLocation::Query => {
+                    refuse_null_in_text(value)?;
                     query_parameters.insert(name.clone(), value.clone());
                 }
                 ParameterLocation::Header => {
+                    refuse_null_in_text(value)?;
                     insert_header(&mut headers, name, parameter_header_value(value));
                 }
                 ParameterLocation::Body => {
                     body_parameters.insert(name.clone(), value.clone());
                 }
                 ParameterLocation::Cookie => {
+                    refuse_null_in_text(value)?;
                     validate_cookie_name(name)?;
                     cookies.push((name.clone(), cookie_value(value)?));
                 }
                 ParameterLocation::Auto if legacy_query_only => {
+                    refuse_null_in_text(value)?;
                     query_parameters.insert(name.clone(), value.clone());
                 }
                 ParameterLocation::Auto => {
@@ -2047,18 +2095,31 @@ impl Engine {
         } else {
             match connection.request.body_type {
                 BodyType::Json => PreparedBody::Json(Value::Object(body_parameters)),
-                BodyType::FormUrlencoded => PreparedBody::Form(
-                    body_parameters
-                        .iter()
-                        .map(|(key, value)| (key.clone(), value_as_text(value)))
-                        .collect(),
-                ),
+                BodyType::FormUrlencoded => {
+                    for value in body_parameters.values() {
+                        refuse_null_in_text(value)?;
+                    }
+                    PreparedBody::Form(
+                        body_parameters
+                            .iter()
+                            .map(|(key, value)| (key.clone(), value_as_text(value)))
+                            .collect(),
+                    )
+                }
                 BodyType::Multipart => {
+                    for value in body_parameters.values() {
+                        refuse_null_in_text(value)?;
+                    }
                     multipart_body(&body_parameters, self.config.max_request_bytes)?
                 }
                 BodyType::Raw => {
                     let raw = connection.request.raw_body.as_deref().unwrap_or_default();
-                    let (rendered, _) = render_template(raw, parameters, false);
+                    let (rendered, consumed) = render_template(raw, parameters, false);
+                    for name in &consumed {
+                        if let Some(value) = parameters.get(name) {
+                            refuse_null_in_text(value)?;
+                        }
+                    }
                     ensure_request_size(rendered.len(), self.config.max_request_bytes)?;
                     PreparedBody::Raw(rendered)
                 }
@@ -2068,7 +2129,11 @@ impl Engine {
         match &body {
             PreparedBody::Json(value) => {
                 let size = serde_json::to_vec(value)
-                    .map_err(|error| EngineError::InvalidInput(error.to_string()))?
+                    .map_err(|_| {
+                        EngineError::InvalidInput(ErrorDetail::from(
+                            "JSON body could not be serialized",
+                        ))
+                    })?
                     .len();
                 ensure_request_size(size, self.config.max_request_bytes)?;
             }
@@ -2105,6 +2170,8 @@ impl Engine {
             max_redirects: connection.request.max_redirects,
             retry,
             cookies: connection.cookies.clone(),
+            admitted_jar: None,
+            caller_session: connection.cookies.session.clone(),
             cache: connection.cache.clone(),
             circuit_breaker: connection.circuit_breaker.clone(),
             requests_per_second: connection.requests_per_second,
@@ -2121,18 +2188,16 @@ impl Default for Engine {
 }
 
 fn required_file_input(request: &ExecutionRequest) -> Result<&FileTransferInput, EngineError> {
-    request
-        .input
-        .file
-        .as_ref()
-        .ok_or_else(|| EngineError::InvalidInput("operation requires input.file".to_owned()))
+    request.input.file.as_ref().ok_or_else(|| {
+        EngineError::InvalidInput(ErrorDetail::from("operation requires input.file"))
+    })
 }
 
 fn required_path(value: &str) -> Result<PathBuf, EngineError> {
     if value.trim().is_empty() {
-        Err(EngineError::InvalidInput(
-            "file path cannot be empty".to_owned(),
-        ))
+        Err(EngineError::InvalidInput(ErrorDetail::from(
+            "file path cannot be empty",
+        )))
     } else {
         Ok(PathBuf::from(value))
     }
@@ -2140,14 +2205,14 @@ fn required_path(value: &str) -> Result<PathBuf, EngineError> {
 
 fn transfer_limit(config: &EngineConfig, file: &FileTransferInput) -> Result<u64, EngineError> {
     if config.max_file_transfer_bytes == 0 {
-        return Err(EngineError::PolicyViolation(
-            "max_file_transfer_bytes must be greater than zero".to_owned(),
-        ));
+        return Err(EngineError::PolicyViolation(ErrorDetail::from(
+            "max_file_transfer_bytes must be greater than zero",
+        )));
     }
     match file.max_bytes {
-        Some(0) => Err(EngineError::InvalidInput(
-            "input.file.max_bytes must be greater than zero".to_owned(),
-        )),
+        Some(0) => Err(EngineError::InvalidInput(ErrorDetail::from(
+            "input.file.max_bytes must be greater than zero",
+        ))),
         Some(limit) => Ok(limit.min(config.max_file_transfer_bytes)),
         None => Ok(config.max_file_transfer_bytes),
     }
@@ -2158,9 +2223,9 @@ fn validated_checksum(value: Option<&str>) -> Result<Option<String>, EngineError
         return Ok(None);
     };
     if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(EngineError::InvalidInput(
-            "expected_sha256 must contain exactly 64 hexadecimal characters".to_owned(),
-        ));
+        return Err(EngineError::InvalidInput(ErrorDetail::from(
+            "expected_sha256 must contain exactly 64 hexadecimal characters",
+        )));
     }
     Ok(Some(value.to_ascii_lowercase()))
 }
@@ -2169,9 +2234,9 @@ fn ensure_within_root(path: &Path, root: &Path) -> Result<(), EngineError> {
     if path.starts_with(root) {
         Ok(())
     } else {
-        Err(EngineError::PolicyViolation(
-            "file path is outside the configured file_root".to_owned(),
-        ))
+        Err(EngineError::PolicyViolation(ErrorDetail::from(
+            "file path is outside the configured file_root",
+        )))
     }
 }
 
@@ -2190,14 +2255,15 @@ async fn hash_file(path: &Path, limit: u64) -> Result<String, EngineError> {
         if read == 0 {
             break;
         }
-        let read = u64::try_from(read)
-            .map_err(|_| EngineError::Runtime("file read length overflowed u64".to_owned()))?;
+        let read = u64::try_from(read).map_err(|_| {
+            EngineError::Runtime(ErrorDetail::from("file read length overflowed u64"))
+        })?;
         if total.saturating_add(read) > limit {
             return Err(EngineError::FileTooLarge { limit_bytes: limit });
         }
         digest.update(
             &buffer[..usize::try_from(read).map_err(|_| {
-                EngineError::Runtime("file read length overflowed usize".to_owned())
+                EngineError::Runtime(ErrorDetail::from("file read length overflowed usize"))
             })?],
         );
         total = total.saturating_add(read);
@@ -2205,10 +2271,10 @@ async fn hash_file(path: &Path, limit: u64) -> Result<String, EngineError> {
     Ok(format!("{:x}", digest.finalize()))
 }
 
-fn validate_multipart_name(value: &str, name: &str) -> Result<(), EngineError> {
+fn validate_multipart_name(value: &str) -> Result<(), EngineError> {
     if value.trim().is_empty() || value.contains(['\r', '\n', '\0']) {
-        Err(EngineError::InvalidInput(format!(
-            "upload {name} is empty or contains unsupported characters"
+        Err(EngineError::InvalidInput(ErrorDetail::from(
+            "upload multipart name is empty or contains unsupported characters",
         )))
     } else {
         Ok(())
@@ -2216,19 +2282,27 @@ fn validate_multipart_name(value: &str, name: &str) -> Result<(), EngineError> {
 }
 
 fn file_io(error: std::io::Error) -> EngineError {
-    EngineError::FileIo(error.to_string())
+    EngineError::FileIo(crate::error::io_detail(&error))
 }
 
 enum PollState {
     Pending,
     Success,
-    Failure(String),
+    /// The remote status is not kept: it is third-party text.
+    Failure,
 }
 
 fn poll_state(response: &Value, polling: &PollingConfig) -> Result<Option<PollState>, EngineError> {
     let Some(value) = json_path::get(response, &polling.status_path) else {
         return Ok(None);
     };
+    // A null status is not the empty string: it matches no configured value,
+    // even an empty one, and is reported instead of being guessed.
+    if value.is_null() {
+        return Err(EngineError::InvalidResponse(ErrorDetail::from(
+            "asynchronous status is null",
+        )));
+    }
     let status = value_as_text(value);
     if polling
         .pending_values
@@ -2249,10 +2323,10 @@ fn poll_state(response: &Value, polling: &PollingConfig) -> Result<Option<PollSt
         .iter()
         .any(|value| value.eq_ignore_ascii_case(&status))
     {
-        return Ok(Some(PollState::Failure(status)));
+        return Ok(Some(PollState::Failure));
     }
-    Err(EngineError::InvalidResponse(format!(
-        "unknown asynchronous status '{status}'"
+    Err(EngineError::InvalidResponse(ErrorDetail::from(
+        "unknown asynchronous status",
     )))
 }
 
@@ -2261,17 +2335,21 @@ fn evaluate_application_success(
     connection: &ConnectionConfig,
 ) -> Result<(), EngineError> {
     if let Some(path) = &connection.response.error_path {
-        if let Some(value) = json_path::get(response, path)
-            .filter(|value| !value.is_null() && value.as_str() != Some(""))
+        if json_path::get(response, path)
+            .is_some_and(|value| !value.is_null() && value.as_str() != Some(""))
         {
-            return Err(EngineError::Application(application_error_text(value)));
+            // The remote message at error_path is not captured: it is
+            // third-party text, and the error contract carries none.
+            return Err(EngineError::Application(ErrorDetail::from(
+                "the response reports an error at error_path",
+            )));
         }
     }
     if let Some(condition) = &connection.response.success_when {
         if !matches_success_condition(response, condition) {
-            return Err(EngineError::Application(
-                "success_when condition was not satisfied".to_owned(),
-            ));
+            return Err(EngineError::Application(ErrorDetail::from(
+                "success_when condition was not satisfied",
+            )));
         }
     }
     Ok(())
@@ -2328,22 +2406,10 @@ fn json_truthy(value: &Value) -> bool {
     }
 }
 
-fn application_error_text(value: &Value) -> String {
-    value
-        .as_object()
-        .and_then(|object| {
-            ["detail", "error", "message"]
-                .into_iter()
-                .find_map(|key| object.get(key))
-        })
-        .map(value_as_text)
-        .unwrap_or_else(|| value_as_text(value))
-}
-
 fn poll_result(response: Value, polling: &PollingConfig) -> Result<Value, EngineError> {
     match &polling.result_path {
         Some(path) => json_path::get(&response, path).cloned().ok_or_else(|| {
-            EngineError::InvalidResponse(format!("polling result path '{path}' was not found"))
+            EngineError::InvalidResponse(ErrorDetail::from("polling result path was not found"))
         }),
         None => Ok(response),
     }
@@ -2358,13 +2424,12 @@ fn poll_url(
         json_path::get(response, path)
             .and_then(Value::as_str)
             .ok_or_else(|| {
-                EngineError::InvalidResponse(format!("polling URL path '{path}' was not found"))
+                EngineError::InvalidResponse(ErrorDetail::from("polling URL path was not found"))
             })?
             .to_owned()
     } else if let Some(template) = &polling.url_template {
         let job_id = polling_job_id(response, response_data, polling).ok_or_else(|| {
-            let source = polling.id_header.as_deref().unwrap_or(&polling.id_path);
-            EngineError::InvalidResponse(format!("polling job id '{source}' was not found"))
+            EngineError::InvalidResponse(ErrorDetail::from("polling job id was not found"))
         })?;
         render_poll_template(template, response_data, Some(&job_id))?
     } else if let Some(header) = &polling.location_header {
@@ -2373,18 +2438,20 @@ fn poll_url(
             .get(&header.to_ascii_lowercase())
             .cloned()
             .ok_or_else(|| {
-                EngineError::InvalidResponse(format!("polling response has no '{header}' header"))
+                EngineError::InvalidResponse(ErrorDetail::from(
+                    "polling response has no location header",
+                ))
             })?
     } else {
-        return Err(EngineError::InvalidInput(
-            "polling requires url_path, url_template, or location_header".to_owned(),
-        ));
+        return Err(EngineError::InvalidInput(ErrorDetail::from(
+            "polling requires url_path, url_template, or location_header",
+        )));
     };
 
     response_data
         .final_url
         .join(&target)
-        .map_err(|error| EngineError::InvalidUrl(format!("polling URL: {error}")))
+        .map_err(|_| EngineError::InvalidUrl(ErrorDetail::from("polling URL is invalid")))
 }
 
 fn polling_job_id(
@@ -2399,7 +2466,10 @@ fn polling_job_id(
             .cloned()
             .map(Value::String)
     } else {
-        json_path::get(response, &polling.id_path).cloned()
+        // A null id is no id: rendered into a URL it would become "".
+        json_path::get(response, &polling.id_path)
+            .filter(|value| !value.is_null())
+            .cloned()
     }
 }
 
@@ -2413,13 +2483,13 @@ fn polling_result_url(
         render_poll_template(template, response_data, job_id)?
     } else {
         let path = polling.result_url_path.as_deref().ok_or_else(|| {
-            EngineError::InvalidInput("polling result URL is not configured".to_owned())
+            EngineError::InvalidInput(ErrorDetail::from("polling result URL is not configured"))
         })?;
         let template = json_path::get(response, path)
             .and_then(Value::as_str)
             .ok_or_else(|| {
-                EngineError::InvalidResponse(format!(
-                    "polling result URL path '{path}' was not found"
+                EngineError::InvalidResponse(ErrorDetail::from(
+                    "polling result URL path was not found",
                 ))
             })?;
         render_poll_template(template, response_data, job_id)?
@@ -2427,7 +2497,7 @@ fn polling_result_url(
     response_data
         .final_url
         .join(&target)
-        .map_err(|error| EngineError::InvalidUrl(format!("polling result URL: {error}")))
+        .map_err(|_| EngineError::InvalidUrl(ErrorDetail::from("polling result URL is invalid")))
 }
 
 fn render_poll_template(
@@ -2449,7 +2519,7 @@ fn render_poll_template_from_base(
         return Ok(template);
     }
     let job_id = job_id.ok_or_else(|| {
-        EngineError::InvalidResponse("polling result URL requires a job id".to_owned())
+        EngineError::InvalidResponse(ErrorDetail::from("polling result URL requires a job id"))
     })?;
     let parameters = Map::from_iter([
         ("id".to_owned(), job_id.clone()),
@@ -2472,9 +2542,9 @@ fn validate_job_id(value: &str) -> Result<(), EngineError> {
         || value.len() > 512
         || value.chars().any(|character| character.is_control())
     {
-        return Err(EngineError::InvalidInput(
-            "polling job_id must contain 1 to 512 non-control characters".to_owned(),
-        ));
+        return Err(EngineError::InvalidInput(ErrorDetail::from(
+            "polling job_id must contain 1 to 512 non-control characters",
+        )));
     }
     Ok(())
 }
@@ -2489,6 +2559,14 @@ fn resolve_parameters(
 
     for parameter in &connection.parameters {
         let value = match parameter.mode {
+            // A fixed parameter without a value has nothing to send: dropping
+            // it would make a configuration mistake indistinguishable from an
+            // optional parameter that is legitimately absent.
+            ParameterMode::Fixed if parameter.value.is_none() => {
+                return Err(EngineError::InvalidInput(ErrorDetail::from(
+                    "fixed parameter has no value",
+                )));
+            }
             ParameterMode::Fixed => parameter.value.clone(),
             ParameterMode::Mapped => {
                 let source_path = parameter.source.as_deref().unwrap_or(&parameter.name);
@@ -2504,7 +2582,9 @@ fn resolve_parameters(
                 parameters.insert(parameter.name.clone(), value);
             }
             None if parameter.required => {
-                return Err(EngineError::MissingParameter(parameter.name.clone()));
+                return Err(EngineError::MissingParameter(ErrorDetail::from(
+                    "a required parameter has no value",
+                )));
             }
             None => {}
         }
@@ -2518,7 +2598,7 @@ fn response_records(
 ) -> Result<Vec<Value>, EngineError> {
     let selected = match &connection.response.records_path {
         Some(path) => json_path::get(response, path).ok_or_else(|| {
-            EngineError::InvalidResponse(format!("records path '{path}' was not found"))
+            EngineError::InvalidResponse(ErrorDetail::from("records path was not found"))
         })?,
         None => response,
     };
@@ -2527,9 +2607,9 @@ fn response_records(
             Value::Array(values) => Ok(values.clone()),
             Value::Object(_) => Ok(vec![selected.clone()]),
             Value::Null => Ok(Vec::new()),
-            _ => Err(EngineError::InvalidResponse(
-                "records value must be an array, object, or null".to_owned(),
-            )),
+            _ => Err(EngineError::InvalidResponse(ErrorDetail::from(
+                "records value must be an array, object, or null",
+            ))),
         };
     }
     let mut output = Vec::new();
@@ -2545,10 +2625,12 @@ fn response_records(
 
 fn batch_payload(batch: &BatchConfig, parameters: Vec<JsonObject>) -> JsonObject {
     let values = match batch.input_format {
+        // Every record was checked by `flat_batch_item`, so each one contributes
+        // exactly one element and the array stays aligned with the input.
         BatchInputFormat::FlatArray => Value::Array(
             parameters
                 .into_iter()
-                .filter_map(|parameters| parameters.into_values().find(|value| !value.is_null()))
+                .map(|parameters| parameters.into_values().next().unwrap_or(Value::Null))
                 .collect(),
         ),
         BatchInputFormat::Array | BatchInputFormat::Object => {
@@ -2556,6 +2638,22 @@ fn batch_payload(batch: &BatchConfig, parameters: Vec<JsonObject>) -> JsonObject
         }
     };
     Map::from_iter([(batch.input_key.clone(), values)])
+}
+
+/// The single value a record contributes to a `flat_array` batch.
+///
+/// A flat array has one element per record and nothing else to align results
+/// with. A record that resolves to several parameters, or to a `null`, used to
+/// contribute its first non-null value in key order, or nothing at all, which
+/// silently picked a field or shifted every later record. Both are refused.
+fn flat_batch_item(parameters: &JsonObject) -> Result<&Value, EngineError> {
+    let mut values = parameters.values();
+    match (values.next(), values.next()) {
+        (Some(value), None) if !value.is_null() => Ok(value),
+        _ => Err(EngineError::InvalidInput(ErrorDetail::from(
+            "a flat_array batch record must resolve to exactly one non-null parameter",
+        ))),
+    }
 }
 
 fn batch_response(
@@ -2567,20 +2665,17 @@ fn batch_response(
         response
     } else {
         json_path::get(response, &batch.output_path).ok_or_else(|| {
-            EngineError::InvalidResponse(format!(
-                "batch output path '{}' was not found",
-                batch.output_path
-            ))
+            EngineError::InvalidResponse(ErrorDetail::from("batch output path was not found"))
         })?
     };
-    let values = selected
-        .as_array()
-        .ok_or_else(|| EngineError::InvalidResponse("batch output must be an array".to_owned()))?;
-    Ok(values
+    let values = selected.as_array().ok_or_else(|| {
+        EngineError::InvalidResponse(ErrorDetail::from("batch output must be an array"))
+    })?;
+    values
         .iter()
         .map(|value| {
             if value.is_null() {
-                return JsonObject::new();
+                return Ok(JsonObject::new());
             }
             let mut row: JsonObject = if config.output_mapping.is_empty() {
                 value
@@ -2601,10 +2696,10 @@ fn batch_response(
                     })
                     .collect()
             };
-            apply_transforms(&mut row, &config.transforms);
-            row
+            apply_transforms(&mut row, &config.transforms)?;
+            Ok(row)
         })
-        .collect())
+        .collect()
 }
 
 fn expand_iterations(
@@ -2642,13 +2737,16 @@ fn expand_iterations(
     }
 }
 
-fn map_records(values: Vec<Value>, response: &ResponseConfig) -> Vec<JsonObject> {
+fn map_records(
+    values: Vec<Value>,
+    response: &ResponseConfig,
+) -> Result<Vec<JsonObject>, EngineError> {
     values
         .iter()
         .map(|value| {
             let mut row = map_value(value, &response.output_mapping);
-            apply_transforms(&mut row, &response.transforms);
-            row
+            apply_transforms(&mut row, &response.transforms)?;
+            Ok(row)
         })
         .collect()
 }
@@ -2673,35 +2771,206 @@ fn map_value(value: &Value, mappings: &[OutputMapping]) -> JsonObject {
         .collect()
 }
 
-fn apply_transforms(row: &mut JsonObject, transforms: &[ResponseTransform]) {
+fn apply_transforms(
+    row: &mut JsonObject,
+    transforms: &[ResponseTransform],
+) -> Result<(), EngineError> {
     for transform in transforms {
-        if transform.column.is_empty()
-            || transform
-                .condition
-                .as_deref()
-                .is_some_and(|condition| !transform_condition(row, condition))
-        {
-            continue;
+        if let Some(condition) = transform.condition.as_deref() {
+            if !transform_condition(row, condition) {
+                continue;
+            }
         }
         let source = row.get(&transform.source).cloned().unwrap_or(Value::Null);
-        let value = transform_value(&source, transform);
+        let value = transform_value(&source, transform).map_err(|failure| {
+            EngineError::InvalidResponse(ErrorDetail::from(failure.describe()))
+        })?;
         row.insert(transform.column.clone(), value);
+    }
+    Ok(())
+}
+
+/// A transform condition, `column == 'literal'` or `column != 'literal'`.
+struct TransformCondition<'a> {
+    column: &'a str,
+    expected: &'a str,
+    equals: bool,
+}
+
+fn parse_transform_condition(condition: &str) -> Option<TransformCondition<'_>> {
+    let is_operator_or_quote = |character: char| matches!(character, '=' | '!' | '\'' | '"');
+    // The column cannot contain `=`, `!` or a quote, so the first of those
+    // characters starts the operator. Searching the whole string for `==`
+    // instead would find one inside a quoted literal, as in
+    // `status != 'a==b'`, and split there.
+    let operator = condition.find(is_operator_or_quote)?;
+    let (left, rest) = condition.split_at(operator);
+    let (right, equals) = if let Some(right) = rest.strip_prefix("==") {
+        (right, true)
+    } else {
+        (rest.strip_prefix("!=")?, false)
+    };
+    let column = left.trim();
+    if column.is_empty() {
+        return None;
+    }
+    // The literal is either quoted with one matching pair, or bare. Trimming
+    // quote characters from both ends would accept `'active` or `active"` and
+    // compare against a value the author never wrote.
+    let right = right.trim();
+    let expected = match right.chars().next() {
+        Some(quote @ ('\'' | '"')) => {
+            let inner = right
+                .strip_prefix(quote)
+                .and_then(|rest| rest.strip_suffix(quote))?;
+            if inner.contains(quote) {
+                return None;
+            }
+            inner
+        }
+        _ if right.is_empty() || right.contains(is_operator_or_quote) => return None,
+        _ => right,
+    };
+    Some(TransformCondition {
+        column,
+        expected,
+        equals,
+    })
+}
+
+/// Evaluates a condition validated by [`validate_transforms`].
+///
+/// A missing or `null` column satisfies neither `==` nor `!=`: comparing it
+/// as an empty string would make `column == ''` match a value that is not
+/// there. As in SQL, the comparison is unknown and the transform is skipped.
+fn transform_condition(row: &JsonObject, condition: &str) -> bool {
+    let Some(condition) = parse_transform_condition(condition) else {
+        // Unreachable after validation; never apply a transform on a condition
+        // that was not understood.
+        return false;
+    };
+    match row.get(condition.column) {
+        None | Some(Value::Null) => false,
+        Some(actual) => (value_as_text(actual) == condition.expected) == condition.equals,
     }
 }
 
-fn transform_condition(row: &JsonObject, condition: &str) -> bool {
-    let (left, expected, equals) = if let Some((left, right)) = condition.split_once("==") {
-        (left, right, true)
-    } else if let Some((left, right)) = condition.split_once("!=") {
-        (left, right, false)
-    } else {
-        return true;
-    };
-    let actual = row.get(left.trim()).map(value_as_text).unwrap_or_default();
-    let expected = expected
-        .trim()
-        .trim_matches(|character| character == '\'' || character == '"');
-    (actual == expected) == equals
+/// Largest decimal count accepted by `round`: beyond it `f64` has no digits
+/// left to round.
+const MAX_ROUND_DECIMALS: u64 = 15;
+
+/// Validates response transforms before any network activity.
+///
+/// An unknown operation, a missing or ill-typed argument, or a condition that
+/// cannot be parsed used to leave the column untouched or write `null`, which
+/// is indistinguishable from data. They are configuration errors.
+fn validate_transforms(response: &ResponseConfig) -> Result<(), EngineError> {
+    for transform in &response.transforms {
+        let invalid =
+            |reason: &'static str| Err(EngineError::InvalidInput(ErrorDetail::from(reason)));
+        if transform.column.is_empty() {
+            return invalid("has an empty column");
+        }
+        if transform.source.is_empty() {
+            return invalid("has an empty source");
+        }
+        if transform
+            .condition
+            .as_deref()
+            .is_some_and(|condition| parse_transform_condition(condition).is_none())
+        {
+            return invalid(
+                "has a condition that is not `column == 'value'` or `column != 'value'`",
+            );
+        }
+        let value = transform.value.as_ref();
+        match transform.operation.as_str() {
+            "add" | "subtract" | "multiply" | "divide" => {
+                let Some(argument) = value else {
+                    return invalid("requires a numeric value");
+                };
+                match numeric_operand(argument) {
+                    Ok(argument) => {
+                        if transform.operation == "divide" && argument.is_zero() {
+                            return invalid("divides by zero");
+                        }
+                    }
+                    Err(_) => return invalid("requires a numeric value"),
+                }
+            }
+            "round" => {
+                if let Some(decimals) = value {
+                    if !decimals
+                        .as_u64()
+                        .is_some_and(|decimals| decimals <= MAX_ROUND_DECIMALS)
+                    {
+                        return invalid("requires an integer number of decimals from 0 to 15");
+                    }
+                }
+            }
+            "kelvin_to_celsius" | "celsius_to_kelvin" | "uppercase" | "lowercase" => {
+                if value.is_some() {
+                    return invalid("does not take a value");
+                }
+            }
+            "prefix" | "suffix" => {
+                if !value.is_some_and(is_text_scalar) {
+                    return invalid("requires a string, number, or boolean value");
+                }
+            }
+            "replace" => {
+                let pair = value.and_then(Value::as_object).and_then(|pair| {
+                    let find = pair.get("find")?.as_str()?;
+                    pair.get("replace")?.as_str()?;
+                    (pair.len() == 2 && !find.is_empty()).then_some(())
+                });
+                if pair.is_none() {
+                    return invalid(
+                        "requires a value with exactly a non-empty string 'find' and a string 'replace'",
+                    );
+                }
+            }
+            "default_if_null" => {
+                if value.is_none() {
+                    return invalid("requires a value");
+                }
+            }
+            _ => {
+                return Err(EngineError::InvalidInput(ErrorDetail::from(
+                    "transform for column has an unknown operation",
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn is_text_scalar(value: &Value) -> bool {
+    matches!(value, Value::String(_) | Value::Number(_) | Value::Bool(_))
+}
+
+/// Why a transform could not produce a value for one row.
+#[derive(Debug, PartialEq, Eq)]
+enum TransformFailure {
+    /// The source is not a number, nor a string holding one.
+    NotNumeric,
+    /// The source is not text-like (a string, number, or boolean).
+    NotText,
+    /// The source is not a string.
+    NotString,
+    /// The exact result, or an operand, has no exact representation.
+    Unrepresentable,
+}
+
+impl TransformFailure {
+    fn describe(&self) -> &'static str {
+        match self {
+            Self::NotNumeric => "received a value that is not numeric",
+            Self::NotText => "received a value that is not a string, number, or boolean",
+            Self::NotString => "received a value that is not a string",
+            Self::Unrepresentable => "produced a result that cannot be represented exactly",
+        }
+    }
 }
 
 /// Operand of a numeric transform.
@@ -2721,13 +2990,29 @@ enum Numeric {
     Float(f64),
 }
 
+/// Largest integer magnitude that `f64` represents exactly, 2^53.
+const F64_EXACT_INTEGER: i128 = 1 << 53;
+
 impl Numeric {
-    fn as_f64(self) -> f64 {
+    /// The value as `f64`, only when the conversion is exact.
+    ///
+    /// An integer beyond 2^53 has no exact `f64`; converting it would make
+    /// floating point arithmetic start from a different number than the one
+    /// received, so mixed or fractional arithmetic on it is refused.
+    fn exact_f64(self) -> Option<f64> {
         match self {
-            Self::Signed(value) => value as f64,
-            Self::Unsigned(value) => value as f64,
-            Self::Wide(value) => value as f64,
-            Self::Float(value) => value,
+            Self::Float(value) => Some(value),
+            integer => integer
+                .as_i128()
+                .filter(|value| value.unsigned_abs() <= F64_EXACT_INTEGER.unsigned_abs())
+                .map(|value| value as f64),
+        }
+    }
+
+    fn is_zero(self) -> bool {
+        match self {
+            Self::Float(value) => value == 0.0,
+            integer => integer.as_i128() == Some(0),
         }
     }
 
@@ -2745,63 +3030,79 @@ impl Numeric {
         self.as_i128().is_some()
     }
 
-    fn into_value(self) -> Value {
+    fn into_value(self) -> Result<Value, TransformFailure> {
         match self {
-            Self::Signed(value) => Value::Number(Number::from(value)),
-            Self::Unsigned(value) => Value::Number(Number::from(value)),
-            Self::Wide(value) => integer_value(value).unwrap_or(Value::Null),
-            Self::Float(value) => Number::from_f64(value)
-                .map(Value::Number)
-                .unwrap_or(Value::Null),
+            Self::Signed(value) => Ok(Value::Number(Number::from(value))),
+            Self::Unsigned(value) => Ok(Value::Number(Number::from(value))),
+            Self::Wide(value) => integer_value(value),
+            Self::Float(value) => float_value(value),
         }
     }
 }
 
-/// Narrows an exact integer result back to a JSON representable integer.
-///
-/// Returns `None` when the value fits neither `i64` nor `u64`: emitting a
-/// rounded `f64` there would reintroduce exactly the silent precision loss this
-/// type exists to prevent, so the transform yields null instead.
-fn integer_value(value: i128) -> Option<Value> {
-    if let Ok(value) = i64::try_from(value) {
-        return Some(Value::Number(Number::from(value)));
-    }
-    u64::try_from(value)
-        .ok()
-        .map(|value| Value::Number(Number::from(value)))
+/// A finite `f64` as a JSON number; NaN and infinities have no JSON spelling.
+fn float_value(value: f64) -> Result<Value, TransformFailure> {
+    Number::from_f64(value)
+        .map(Value::Number)
+        .ok_or(TransformFailure::Unrepresentable)
 }
 
-fn numeric_operand(value: &Value) -> Option<Numeric> {
+/// Narrows an exact integer result back to a JSON representable integer.
+///
+/// Fails when the value fits neither `i64` nor `u64`: emitting a rounded `f64`
+/// there would reintroduce exactly the silent precision loss this type exists
+/// to prevent.
+fn integer_value(value: i128) -> Result<Value, TransformFailure> {
+    if let Ok(value) = i64::try_from(value) {
+        return Ok(Value::Number(Number::from(value)));
+    }
+    u64::try_from(value)
+        .map(|value| Value::Number(Number::from(value)))
+        .map_err(|_| TransformFailure::Unrepresentable)
+}
+
+fn numeric_operand(value: &Value) -> Result<Numeric, TransformFailure> {
     if let Some(integer) = value.as_i64() {
-        return Some(Numeric::Signed(integer));
+        return Ok(Numeric::Signed(integer));
     }
     if let Some(integer) = value.as_u64() {
-        return Some(Numeric::Unsigned(integer));
+        return Ok(Numeric::Unsigned(integer));
     }
     if let Some(float) = value.as_f64() {
-        return Some(Numeric::Float(float));
+        return Ok(Numeric::Float(float));
     }
-    let text = value.as_str()?.trim();
+    let text = value.as_str().ok_or(TransformFailure::NotNumeric)?.trim();
     if let Ok(integer) = text.parse::<i64>() {
-        return Some(Numeric::Signed(integer));
+        return Ok(Numeric::Signed(integer));
     }
     if let Ok(integer) = text.parse::<u64>() {
-        return Some(Numeric::Unsigned(integer));
+        return Ok(Numeric::Unsigned(integer));
     }
     // A numeric identifier carried as a string can exceed `u64`. Parsing it as
     // `i128` before reaching for `f64` keeps the value exact, which matters
     // because the very next step may bring it back into a representable range.
     if let Ok(integer) = text.parse::<i128>() {
-        return Some(Numeric::Wide(integer));
+        return Ok(Numeric::Wide(integer));
     }
-    text.parse::<f64>().ok().map(Numeric::Float)
+    // An integer literal too wide even for `i128` must not fall through to the
+    // float parser, which would accept it rounded.
+    let digits = text.strip_prefix(['+', '-']).unwrap_or(text);
+    if !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(TransformFailure::Unrepresentable);
+    }
+    match text.parse::<f64>() {
+        Ok(float) if float.is_finite() => Ok(Numeric::Float(float)),
+        Ok(_) => Err(TransformFailure::Unrepresentable),
+        Err(_) => Err(TransformFailure::NotNumeric),
+    }
 }
 
 /// Result of an exact integer computation on two integral operands.
 enum IntegerOutcome {
     Exact(i128),
     /// The operands are integers but the result is not, as in `7 / 2`. Falling
-    /// back to floating point is the answer the caller wants.
+    /// back to floating point is the answer the caller wants, provided both
+    /// operands convert to `f64` exactly.
     Fractional,
     /// The result is an integer too large to represent. Falling back to
     /// floating point here would silently return a rounded value, which is the
@@ -2814,22 +3115,26 @@ enum IntegerOutcome {
 ///
 /// `i128` is wide enough for any sum, difference, or product of two JSON
 /// integers except the extremes of `u64 * u64`, which `checked_*` reports.
+/// Floating point starts only from operands that convert to `f64` exactly, and
+/// a non-finite result is refused: either would return a number other than the
+/// one the arithmetic defines, without saying so.
 fn numeric_arithmetic(
     left: Numeric,
     right: Numeric,
     integer: impl Fn(i128, i128) -> IntegerOutcome,
     float: impl Fn(f64, f64) -> f64,
-) -> Value {
+) -> Result<Value, TransformFailure> {
     if let (Some(left), Some(right)) = (left.as_i128(), right.as_i128()) {
         match integer(left, right) {
-            IntegerOutcome::Exact(result) => {
-                return integer_value(result).unwrap_or(Value::Null);
-            }
-            IntegerOutcome::Unrepresentable => return Value::Null,
+            IntegerOutcome::Exact(result) => return integer_value(result),
+            IntegerOutcome::Unrepresentable => return Err(TransformFailure::Unrepresentable),
             IntegerOutcome::Fractional => {}
         }
     }
-    Numeric::Float(float(left.as_f64(), right.as_f64())).into_value()
+    let (Some(left), Some(right)) = (left.exact_f64(), right.exact_f64()) else {
+        return Err(TransformFailure::Unrepresentable);
+    };
+    float_value(float(left, right))
 }
 
 /// Wraps a checked `i128` operation: `None` means the exact result overflows.
@@ -2837,112 +3142,136 @@ fn checked_integer(result: Option<i128>) -> IntegerOutcome {
     result.map_or(IntegerOutcome::Unrepresentable, IntegerOutcome::Exact)
 }
 
-fn transform_value(source: &Value, transform: &ResponseTransform) -> Value {
-    let original = || source.clone();
-    let numeric = || numeric_operand(source);
-    let argument = || transform.value.as_ref().and_then(numeric_operand);
-    let number = |value: f64| {
-        Number::from_f64(value)
-            .map(Value::Number)
-            .unwrap_or(Value::Null)
+/// Applies one transform validated by [`validate_transforms`] to one value.
+///
+/// `null` propagates: every operation except `default_if_null` maps a `null`
+/// source to `null`, as SQL does. Any other value the operation cannot handle
+/// fails the row instead of being passed through or replaced by `null`.
+fn transform_value(
+    source: &Value,
+    transform: &ResponseTransform,
+) -> Result<Value, TransformFailure> {
+    if transform.operation == "default_if_null" {
+        return Ok(if source.is_null() {
+            transform.value.clone().unwrap_or(Value::Null)
+        } else {
+            source.clone()
+        });
+    }
+    if source.is_null() {
+        return Ok(Value::Null);
+    }
+    let argument = || {
+        transform
+            .value
+            .as_ref()
+            .map(numeric_operand)
+            .ok_or(TransformFailure::NotNumeric)?
+    };
+    let text = || {
+        if is_text_scalar(source) {
+            Ok(value_as_text(source))
+        } else {
+            Err(TransformFailure::NotText)
+        }
+    };
+    let fixed_text = || {
+        transform
+            .value
+            .as_ref()
+            .map(value_as_text)
+            .unwrap_or_default()
     };
     match transform.operation.as_str() {
-        "subtract" => numeric()
-            .zip(argument())
-            .map(|(a, b)| {
-                numeric_arithmetic(a, b, |a, b| checked_integer(a.checked_sub(b)), |a, b| a - b)
-            })
-            .unwrap_or_else(original),
-        "add" => numeric()
-            .zip(argument())
-            .map(|(a, b)| {
-                numeric_arithmetic(a, b, |a, b| checked_integer(a.checked_add(b)), |a, b| a + b)
-            })
-            .unwrap_or_else(original),
-        "multiply" => numeric()
-            .zip(argument())
-            .map(|(a, b)| {
-                numeric_arithmetic(a, b, |a, b| checked_integer(a.checked_mul(b)), |a, b| a * b)
-            })
-            .unwrap_or_else(original),
-        "divide" => numeric().zip(argument()).map_or_else(original, |(a, b)| {
-            if b.as_f64() == 0.0 {
-                Value::Null
-            } else {
-                // Only an exact integer division stays integral; a remainder
-                // means the true result is fractional, not unrepresentable.
-                numeric_arithmetic(
-                    a,
-                    b,
-                    |a, b| match a.checked_rem(b) {
-                        Some(0) => checked_integer(a.checked_div(b)),
-                        Some(_) => IntegerOutcome::Fractional,
-                        None => IntegerOutcome::Unrepresentable,
-                    },
-                    |a, b| a / b,
-                )
+        "subtract" => numeric_arithmetic(
+            numeric_operand(source)?,
+            argument()?,
+            |a, b| checked_integer(a.checked_sub(b)),
+            |a, b| a - b,
+        ),
+        "add" => numeric_arithmetic(
+            numeric_operand(source)?,
+            argument()?,
+            |a, b| checked_integer(a.checked_add(b)),
+            |a, b| a + b,
+        ),
+        "multiply" => numeric_arithmetic(
+            numeric_operand(source)?,
+            argument()?,
+            |a, b| checked_integer(a.checked_mul(b)),
+            |a, b| a * b,
+        ),
+        "divide" => {
+            let divisor = argument()?;
+            if divisor.is_zero() {
+                // Rejected by validation; kept so this function never divides
+                // by zero on its own.
+                return Err(TransformFailure::Unrepresentable);
             }
-        }),
-        "round" => numeric().map_or_else(original, |value| {
+            // Only an exact integer division stays integral; a remainder
+            // means the true result is fractional, not unrepresentable.
+            numeric_arithmetic(
+                numeric_operand(source)?,
+                divisor,
+                |a, b| match a.checked_rem(b) {
+                    Some(0) => checked_integer(a.checked_div(b)),
+                    Some(_) => IntegerOutcome::Fractional,
+                    None => IntegerOutcome::Unrepresentable,
+                },
+                |a, b| a / b,
+            )
+        }
+        "round" => {
+            let value = numeric_operand(source)?;
             if value.is_integer() {
                 // Rounding an integer to any number of decimals is the integer.
                 return value.into_value();
             }
-            let decimals = argument().map_or(0.0, Numeric::as_f64).clamp(0.0, 15.0) as i32;
-            let factor = 10_f64.powi(decimals);
-            number((value.as_f64() * factor).round() / factor)
-        }),
-        "kelvin_to_celsius" => numeric()
-            .map(|value| number(value.as_f64() - 273.15))
-            .unwrap_or_else(original),
-        "celsius_to_kelvin" => numeric()
-            .map(|value| number(value.as_f64() + 273.15))
-            .unwrap_or_else(original),
+            let decimals = transform
+                .value
+                .as_ref()
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+                .min(MAX_ROUND_DECIMALS);
+            let factor = 10_f64.powi(decimals as i32);
+            let value = value.exact_f64().ok_or(TransformFailure::Unrepresentable)?;
+            float_value((value * factor).round() / factor)
+        }
+        "kelvin_to_celsius" | "celsius_to_kelvin" => {
+            let value = numeric_operand(source)?
+                .exact_f64()
+                .ok_or(TransformFailure::Unrepresentable)?;
+            let offset = 273.15;
+            float_value(if transform.operation == "kelvin_to_celsius" {
+                value - offset
+            } else {
+                value + offset
+            })
+        }
         "uppercase" => source
             .as_str()
             .map(|value| Value::String(value.to_uppercase()))
-            .unwrap_or(Value::Null),
+            .ok_or(TransformFailure::NotString),
         "lowercase" => source
             .as_str()
             .map(|value| Value::String(value.to_lowercase()))
-            .unwrap_or(Value::Null),
-        "prefix" => transform
-            .value
-            .as_ref()
-            .map(|prefix| {
-                Value::String(format!(
-                    "{}{}",
-                    value_as_text(prefix),
-                    value_as_text(source)
-                ))
-            })
-            .unwrap_or(Value::Null),
-        "suffix" => transform
-            .value
-            .as_ref()
-            .map(|suffix| {
-                Value::String(format!(
-                    "{}{}",
-                    value_as_text(source),
-                    value_as_text(suffix)
-                ))
-            })
-            .unwrap_or(Value::Null),
-        "replace" => transform
-            .value
-            .as_ref()
-            .and_then(Value::as_object)
-            .and_then(|value| {
-                let find = value.get("find")?.as_str()?;
-                let replacement = value.get("replace")?.as_str()?;
-                Some(Value::String(
-                    value_as_text(source).replace(find, replacement),
-                ))
-            })
-            .unwrap_or(Value::Null),
-        "default_if_null" if source.is_null() => transform.value.clone().unwrap_or(Value::Null),
-        "default_if_null" => source.clone(),
-        _ => source.clone(),
+            .ok_or(TransformFailure::NotString),
+        "prefix" => Ok(Value::String(format!("{}{}", fixed_text(), text()?))),
+        "suffix" => Ok(Value::String(format!("{}{}", text()?, fixed_text()))),
+        "replace" => {
+            let pair = transform.value.as_ref().and_then(Value::as_object);
+            let find = pair.and_then(|pair| pair.get("find")?.as_str());
+            let replacement = pair.and_then(|pair| pair.get("replace")?.as_str());
+            match (find, replacement) {
+                (Some(find), Some(replacement)) if !find.is_empty() => {
+                    Ok(Value::String(text()?.replace(find, replacement)))
+                }
+                // Rejected by validation.
+                _ => Err(TransformFailure::NotText),
+            }
+        }
+        // Rejected by validation: never pass an unknown operation through.
+        _ => Err(TransformFailure::NotText),
     }
 }
 
@@ -3056,8 +3385,8 @@ fn serialize_query_parameter(
             );
         }
         (QueryStyle::DeepObject, _) => {
-            return Err(EngineError::InvalidInput(format!(
-                "deep_object query parameter '{name}' must be an object"
+            return Err(EngineError::InvalidInput(ErrorDetail::from(
+                "deep_object query parameter must be an object",
             )));
         }
         (_, value) => pairs.push((name.to_owned(), value_as_text(value))),
@@ -3110,9 +3439,9 @@ fn cookie_value(value: &Value) -> Result<String, EngineError> {
         .bytes()
         .any(|byte| byte <= 0x20 || byte >= 0x7f || matches!(byte, b';' | b','))
     {
-        return Err(EngineError::InvalidInput(
-            "cookie parameter contains unsupported characters".to_owned(),
-        ));
+        return Err(EngineError::InvalidInput(ErrorDetail::from(
+            "cookie parameter contains unsupported characters",
+        )));
     }
     Ok(value)
 }
@@ -3144,8 +3473,8 @@ fn validate_cookie_name(name: &str) -> Result<(), EngineError> {
     if valid {
         Ok(())
     } else {
-        Err(EngineError::InvalidInput(format!(
-            "invalid cookie parameter name '{name}'"
+        Err(EngineError::InvalidInput(ErrorDetail::from(
+            "invalid cookie parameter name",
         )))
     }
 }
@@ -3190,12 +3519,12 @@ fn multipart_body(
                 .get("data_base64")
                 .and_then(Value::as_str)
                 .ok_or_else(|| {
-                    EngineError::InvalidInput(format!(
-                        "multipart file '{name}' has invalid data_base64"
+                    EngineError::InvalidInput(ErrorDetail::from(
+                        "multipart file has invalid data_base64",
                     ))
                 })?;
             let data = STANDARD.decode(encoded).map_err(|_| {
-                EngineError::InvalidInput(format!("multipart file '{name}' is not valid base64"))
+                EngineError::InvalidInput(ErrorDetail::from("multipart file is not valid base64"))
             })?;
             let filename = file
                 .get("filename")
@@ -3206,8 +3535,8 @@ fn multipart_body(
                 .get("content_type")
                 .map(|value| {
                     value.as_str().map(ToOwned::to_owned).ok_or_else(|| {
-                        EngineError::InvalidInput(format!(
-                            "multipart file '{name}' has invalid content_type"
+                        EngineError::InvalidInput(ErrorDetail::from(
+                            "multipart file has invalid content_type",
                         ))
                     })
                 })
@@ -3246,6 +3575,30 @@ fn ensure_request_size(size: usize, limit: usize) -> Result<(), EngineError> {
     }
 }
 
+/// Refuses a `null` (alone, in an array, or as an object member) in a
+/// parameter that is rendered as text: URL path, query, header, cookie, form
+/// field, multipart field, or raw body template.
+///
+/// Text has no spelling for `null`. Rendering it as an empty string would send
+/// a value the caller never gave, and dropping it would make it absent, so the
+/// request is rejected before any network activity. A JSON body keeps `null`.
+fn refuse_null_in_text(value: &Value) -> Result<(), EngineError> {
+    fn contains_null(value: &Value) -> bool {
+        match value {
+            Value::Null => true,
+            Value::Array(values) => values.iter().any(contains_null),
+            Value::Object(values) => values.values().any(contains_null),
+            Value::Bool(_) | Value::Number(_) | Value::String(_) => false,
+        }
+    }
+    if contains_null(value) {
+        return Err(EngineError::InvalidInput(ErrorDetail::from(
+            "parameter is null in a location rendered as text",
+        )));
+    }
+    Ok(())
+}
+
 fn value_as_text(value: &Value) -> String {
     match value {
         Value::String(value) => value.clone(),
@@ -3263,15 +3616,15 @@ fn value_as_string(value: &Value) -> Option<String> {
 
 fn usize_value(value: usize) -> Result<Value, EngineError> {
     let value = u64::try_from(value)
-        .map_err(|_| EngineError::InvalidInput("numeric value is too large".to_owned()))?;
+        .map_err(|_| EngineError::InvalidInput(ErrorDetail::from("numeric value is too large")))?;
     Ok(Value::Number(Number::from(value)))
 }
 
 fn ensure_page_size(page_size: usize) -> Result<(), EngineError> {
     if page_size == 0 {
-        Err(EngineError::InvalidInput(
-            "pagination page_size must be greater than zero".to_owned(),
-        ))
+        Err(EngineError::InvalidInput(ErrorDetail::from(
+            "pagination page_size must be greater than zero",
+        )))
     } else {
         Ok(())
     }
@@ -3297,13 +3650,13 @@ fn merge_execution_metrics(target: &mut ExecutionMetrics, source: &ExecutionMetr
 }
 
 fn pagination_url(base: &Url, target: &str, allow_cross_origin: bool) -> Result<Url, EngineError> {
-    let resolved = base.join(target).map_err(|error| {
-        EngineError::InvalidResponse(format!("invalid pagination link: {error}"))
-    })?;
+    let resolved = base
+        .join(target)
+        .map_err(|_| EngineError::InvalidResponse(ErrorDetail::from("invalid pagination link")))?;
     if !allow_cross_origin && !same_origin(base, &resolved) {
-        return Err(EngineError::UnsafeAddress(
-            "cross-origin pagination is blocked".to_owned(),
-        ));
+        return Err(EngineError::UnsafeAddress(ErrorDetail::from(
+            "cross-origin pagination is blocked",
+        )));
     }
     Ok(resolved)
 }
@@ -3318,9 +3671,9 @@ fn link_header_target(
     for entry in split_link_header(header)? {
         let entry = entry.trim();
         let Some(target_end) = entry.strip_prefix('<').and_then(|value| value.find('>')) else {
-            return Err(EngineError::InvalidResponse(
-                "Link header contains an invalid target".to_owned(),
-            ));
+            return Err(EngineError::InvalidResponse(ErrorDetail::from(
+                "Link header contains an invalid target",
+            )));
         };
         let target = &entry[1..=target_end];
         let parameters = &entry[target_end + 2..];
@@ -3370,9 +3723,9 @@ fn split_link_header(value: &str) -> Result<Vec<&str>, EngineError> {
         }
     }
     if in_target || in_quotes || escaped {
-        return Err(EngineError::InvalidResponse(
-            "Link header is not well formed".to_owned(),
-        ));
+        return Err(EngineError::InvalidResponse(ErrorDetail::from(
+            "Link header is not well formed",
+        )));
     }
     entries.push(&value[start..]);
     Ok(entries)
@@ -3398,9 +3751,9 @@ fn split_quoted(value: &str, separator: char) -> Result<Vec<&str>, EngineError> 
         }
     }
     if in_quotes || escaped {
-        return Err(EngineError::InvalidResponse(
-            "Link header parameter is not well formed".to_owned(),
-        ));
+        return Err(EngineError::InvalidResponse(ErrorDetail::from(
+            "Link header parameter is not well formed",
+        )));
     }
     values.push(&value[start..]);
     Ok(values)
@@ -3410,9 +3763,9 @@ fn unquote_header_value(value: &str) -> Result<&str, EngineError> {
     match (value.strip_prefix('"'), value.strip_suffix('"')) {
         (Some(value), Some(_)) if value.ends_with('"') => Ok(&value[..value.len() - 1]),
         (None, None) => Ok(value),
-        _ => Err(EngineError::InvalidResponse(
-            "Link header contains an invalid quoted value".to_owned(),
-        )),
+        _ => Err(EngineError::InvalidResponse(ErrorDetail::from(
+            "Link header contains an invalid quoted value",
+        ))),
     }
 }
 
@@ -3466,9 +3819,9 @@ fn apply_idempotency(
     validate_idempotency_key(key)?;
     let name = connection.idempotency.name.trim();
     if name.is_empty() || name.len() > 256 || name.chars().any(char::is_control) {
-        return Err(EngineError::InvalidInput(
-            "idempotency field name must contain 1 to 256 non-control characters".to_owned(),
-        ));
+        return Err(EngineError::InvalidInput(ErrorDetail::from(
+            "idempotency field name must contain 1 to 256 non-control characters",
+        )));
     }
     match connection.idempotency.location {
         IdempotencyLocation::Header => {
@@ -3478,23 +3831,23 @@ fn apply_idempotency(
                 .map(|(_, value)| value)
             {
                 if existing != key {
-                    return Err(EngineError::InvalidInput(
-                        "idempotency header conflicts with a configured header".to_owned(),
-                    ));
+                    return Err(EngineError::InvalidInput(ErrorDetail::from(
+                        "idempotency header conflicts with a configured header",
+                    )));
                 }
             }
             insert_header(headers, name, key.to_owned());
         }
         IdempotencyLocation::Query => {
-            insert_idempotency_field(query, name, key, "query")?;
+            insert_idempotency_field(query, name, key)?;
         }
         IdempotencyLocation::Body => {
             if matches!(connection.request.body_type, BodyType::None | BodyType::Raw) {
-                return Err(EngineError::InvalidInput(
-                    "body idempotency requires json, form_urlencoded, or multipart body".to_owned(),
-                ));
+                return Err(EngineError::InvalidInput(ErrorDetail::from(
+                    "body idempotency requires json, form_urlencoded, or multipart body",
+                )));
             }
-            insert_idempotency_field(body, name, key, "body")?;
+            insert_idempotency_field(body, name, key)?;
         }
     }
     Ok(())
@@ -3504,12 +3857,11 @@ fn insert_idempotency_field(
     target: &mut JsonObject,
     name: &str,
     key: &str,
-    location: &str,
 ) -> Result<(), EngineError> {
     if let Some(existing) = target.get(name) {
         if existing.as_str() != Some(key) {
-            return Err(EngineError::InvalidInput(format!(
-                "idempotency {location} field conflicts with a configured parameter"
+            return Err(EngineError::InvalidInput(ErrorDetail::from(
+                "idempotency field conflicts with a configured parameter",
             )));
         }
     }
@@ -3578,6 +3930,9 @@ impl CredentialScope {
             is_transferable_cross_origin_header(name)
                 || preserved.is_some_and(|kept| kept.eq_ignore_ascii_case(name))
         });
+        // The session's cookies do not cross the origin, but the caller's
+        // handle stays in `caller_session`, so the transport still refuses the
+        // request if the session has ended.
         request.cookies = CookiePolicy::default();
         request.tls.client_identity_pem = None;
     }
@@ -3607,6 +3962,25 @@ fn preserved_idempotency_header<'a>(
         return None;
     }
     Some(name)
+}
+
+/// True when the engine added an idempotency header and the credential scope
+/// removed it from `request`.
+fn idempotency_header_withheld(
+    connection: &ConnectionConfig,
+    options: &crate::ExecutionOptions,
+    request: &PreparedRequest,
+) -> bool {
+    if options.idempotency_key.is_none()
+        || connection.idempotency.location != IdempotencyLocation::Header
+    {
+        return false;
+    }
+    let name = connection.idempotency.name.trim();
+    !request
+        .headers
+        .keys()
+        .any(|header| header.eq_ignore_ascii_case(name))
 }
 
 /// True when an idempotency header name would smuggle a credential-shaped
@@ -3806,12 +4180,21 @@ fn is_credential_component(component: &str) -> bool {
 
 /// True when a compound marker is spelled out by a run of adjacent components,
 /// or ends one of them.
+///
+/// A trailing plural is stripped as for single components, so `X-SessionIDs`
+/// and `X-Session-Ids` read like `X-SessionID`.
 fn has_credential_compound(name: &str) -> bool {
+    let singular = |text: &str| text.strip_suffix('s').map(str::to_owned);
+    let is_marker = |text: &str| {
+        CREDENTIAL_COMPOUNDS.contains(&text)
+            || singular(text).is_some_and(|stem| CREDENTIAL_COMPOUNDS.contains(&stem.as_str()))
+    };
     let components = header_components(name).collect::<Vec<_>>();
     if components.iter().any(|component| {
+        let stem = component.strip_suffix('s').unwrap_or(component);
         CREDENTIAL_COMPOUNDS
             .iter()
-            .any(|marker| component.ends_with(marker))
+            .any(|marker| component.ends_with(marker) || stem.ends_with(marker))
     }) {
         return true;
     }
@@ -3819,7 +4202,7 @@ fn has_credential_compound(name: &str) -> bool {
         let mut joined = String::new();
         components[start..].iter().any(|component| {
             joined.push_str(component);
-            CREDENTIAL_COMPOUNDS.contains(&joined.as_str())
+            is_marker(&joined)
         })
     })
 }
@@ -3891,40 +4274,41 @@ fn failed_result_with_recoveries(
 
 fn validate_idempotency_key(key: &str) -> Result<(), EngineError> {
     if key.is_empty() || key.len() > 255 || !key.bytes().all(|byte| matches!(byte, 0x21..=0x7e)) {
-        return Err(EngineError::InvalidInput(
-            "idempotency_key must contain 1 to 255 visible ASCII bytes".to_owned(),
-        ));
+        return Err(EngineError::InvalidInput(ErrorDetail::from(
+            "idempotency_key must contain 1 to 255 visible ASCII bytes",
+        )));
     }
     Ok(())
 }
 
 fn validate_execution_configuration(request: &ExecutionRequest) -> Result<(), EngineError> {
+    validate_transforms(&request.connection.response)?;
     let Some(polling) = request.connection.polling.as_ref() else {
         return Ok(());
     };
     if polling.max_attempts == 0 {
-        return Err(EngineError::InvalidInput(
-            "polling max_attempts must be greater than zero".to_owned(),
-        ));
+        return Err(EngineError::InvalidInput(ErrorDetail::from(
+            "polling max_attempts must be greater than zero",
+        )));
     }
     if polling.max_wait_ms == Some(0) {
-        return Err(EngineError::InvalidInput(
-            "polling max_wait_ms must be greater than zero when configured".to_owned(),
-        ));
+        return Err(EngineError::InvalidInput(ErrorDetail::from(
+            "polling max_wait_ms must be greater than zero when configured",
+        )));
     }
     if !polling.interval_backoff.is_finite() || polling.interval_backoff < 1.0 {
-        return Err(EngineError::InvalidInput(
-            "polling interval_backoff must be finite and at least one".to_owned(),
-        ));
+        return Err(EngineError::InvalidInput(ErrorDetail::from(
+            "polling interval_backoff must be finite and at least one",
+        )));
     }
     if polling
         .cancel
         .as_ref()
         .is_some_and(|cancel| cancel.timeout_ms == 0)
     {
-        return Err(EngineError::InvalidInput(
-            "polling cancel timeout_ms must be greater than zero".to_owned(),
-        ));
+        return Err(EngineError::InvalidInput(ErrorDetail::from(
+            "polling cancel timeout_ms must be greater than zero",
+        )));
     }
 
     let Some(resume) = polling.resume.as_ref() else {
@@ -3932,14 +4316,14 @@ fn validate_execution_configuration(request: &ExecutionRequest) -> Result<(), En
     };
     validate_job_id(&resume.job_id)?;
     if polling.url_template.is_none() {
-        return Err(EngineError::InvalidInput(
-            "polling resume requires url_template and cannot infer a prior Location URL".to_owned(),
-        ));
+        return Err(EngineError::InvalidInput(ErrorDetail::from(
+            "polling resume requires url_template and cannot infer a prior Location URL",
+        )));
     }
     if request.connection.pagination.is_some() {
-        return Err(EngineError::InvalidInput(
-            "polling resume cannot be combined with pagination".to_owned(),
-        ));
+        return Err(EngineError::InvalidInput(ErrorDetail::from(
+            "polling resume cannot be combined with pagination",
+        )));
     }
     if request
         .connection
@@ -3947,14 +4331,14 @@ fn validate_execution_configuration(request: &ExecutionRequest) -> Result<(), En
         .as_ref()
         .is_some_and(|batch| batch.enabled)
     {
-        return Err(EngineError::InvalidInput(
-            "polling resume cannot be combined with batch execution".to_owned(),
-        ));
+        return Err(EngineError::InvalidInput(ErrorDetail::from(
+            "polling resume cannot be combined with batch execution",
+        )));
     }
     if request.operation == ExecutionOperation::Enrich && request.input.records.len() != 1 {
-        return Err(EngineError::InvalidInput(
-            "polling resume for enrichment requires exactly one input record".to_owned(),
-        ));
+        return Err(EngineError::InvalidInput(ErrorDetail::from(
+            "polling resume for enrichment requires exactly one input record",
+        )));
     }
     Ok(())
 }
@@ -3963,8 +4347,11 @@ fn execution_fingerprint(request: &ExecutionRequest) -> Result<String, EngineErr
     let mut normalized = request.clone();
     normalized.options.deadline = None;
     normalized.options.idempotency_key = None;
-    let bytes =
-        serde_json::to_vec(&normalized).map_err(|error| EngineError::Runtime(error.to_string()))?;
+    let bytes = serde_json::to_vec(&normalized).map_err(|_| {
+        EngineError::Runtime(ErrorDetail::from(
+            "request could not be serialized for its fingerprint",
+        ))
+    })?;
     Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
@@ -4041,8 +4428,9 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        is_disallowed_idempotency_header, is_sensitive_header_name, link_header_target, map_value,
-        names_an_idempotency_key, render_template, resolve_parameters, selected_response_headers,
+        evaluate_application_success, is_disallowed_idempotency_header, is_sensitive_header_name,
+        link_header_target, map_value, names_an_idempotency_key, render_template,
+        resolve_parameters, selected_response_headers,
     };
     use crate::{ConnectionConfig, OutputMapping, ParameterLocation, ParameterMode, ParameterSpec};
 
@@ -4253,6 +4641,10 @@ mod tests {
             "X-Api-Keys",
             "X-Access-Tokens",
             "X-Secrets",
+            "X-SessionIDs",
+            "X-Session-Ids",
+            "X-Refresh-Tokens",
+            "X-ClientSecrets",
             // The routing exemption is granted to verified full names only, so
             // an unrelated header carrying the same component keeps the
             // conservative treatment.
@@ -4303,6 +4695,29 @@ mod tests {
         assert_eq!(
             selected_response_headers(&headers, &["*".to_owned()]),
             BTreeMap::from([("etag".to_owned(), "abc".to_owned())])
+        );
+    }
+
+    #[test]
+    fn the_remote_message_at_error_path_is_not_captured() {
+        let connection = ConnectionConfig {
+            response: crate::ResponseConfig {
+                error_path: Some("error".to_owned()),
+                ..crate::ResponseConfig::default()
+            },
+            ..ConnectionConfig::default()
+        };
+        let response = json!({"error": {"message": "user abc123 not found at 10.0.0.7"}});
+        let Err(crate::EngineError::Application(detail)) =
+            evaluate_application_success(&response, &connection)
+        else {
+            panic!("an error at error_path must fail the request");
+        };
+        assert_eq!(detail.text(), "the response reports an error at error_path");
+        let debug = format!("{detail:?}");
+        assert!(
+            !debug.contains("abc123") && !debug.contains("10.0.0.7"),
+            "{debug}"
         );
     }
 }

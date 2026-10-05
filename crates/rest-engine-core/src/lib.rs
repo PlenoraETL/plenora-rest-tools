@@ -28,7 +28,7 @@ pub use capability::{
 pub use contract::{
     ASYNC_JOB_RECOVERY_CONTRACT, ApiKeyLocation, ArtifactReference, AsyncJobRecovery, AuthConfig,
     BatchConfig, BatchInputFormat, BodyType, CachePolicy, CircuitBreakerPolicy, ConnectionConfig,
-    CookiePolicy, EngineConfig, ExecutionError, ExecutionInput, ExecutionMetrics,
+    CookiePolicy, CookieSession, EngineConfig, ExecutionError, ExecutionInput, ExecutionMetrics,
     ExecutionOperation, ExecutionOptions, ExecutionOutput, ExecutionRequest, ExecutionResult,
     ExecutionStatus, FileTransferDirection, FileTransferInput, HttpMethod, HttpResponseMetadata,
     IdempotencyConfig, IdempotencyLocation, IntegrityMetadata, IterationSpec, JsonObject,

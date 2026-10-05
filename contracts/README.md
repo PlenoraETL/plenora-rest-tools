@@ -106,6 +106,15 @@ La politica v1 è intenzionalmente rigida:
 - compatibility-v1.json non deve essere aggiornato per aggirare un errore del
   gate.
 
+Deviazione dichiarata per la 0.3.0, decisa dal maintainer: la superficie Rust
+congelata cambia una volta sola per EngineError (campi testuali opachi, vedi
+docs/architecture.md) e per le sessioni cookie (export CookieSession, entrypoint
+Engine::open_cookie_session e Engine::close_cookie_session, CookiePolicy con
+session al posto di enabled e jar_id). compatibility-v1.json e
+bindings/rust-v1.json sono stati aggiornati insieme a questa decisione, non per
+aggirare il gate. Gli schemi JSON v1 non cambiano: `connection.cookies` era già
+un oggetto libero.
+
 Un'aggiunta apparentemente compatibile alla superficie pubblica richiede
 comunque una decisione esplicita e una revisione del contratto. Implementazioni
 interne e configurazioni private possono evolvere senza cambiare il wire
