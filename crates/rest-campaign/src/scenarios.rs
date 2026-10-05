@@ -38,7 +38,7 @@ pub const MAIN_ENGINE_LABEL: &str = "principale";
 /// Etichetta degli Engine aperti e chiusi dallo scenario di ricambio.
 pub const CHURN_ENGINE_LABEL: &str = "ricambio";
 /// Riferimento della credenziale risolta dal runtime binding.
-pub const CREDENTIAL_REFERENCE: &str = "cred/campaign";
+pub const CREDENTIAL_REFERENCE: &str = "secret://campaign/credential";
 
 macro_rules! scenarios {
     ($($variant:ident => $name:literal),+ $(,)?) => {
@@ -268,7 +268,7 @@ impl RuntimeResources for CampaignResources {
 
     fn resolve_artifact_sink(&self, reference: &str) -> Result<PathBuf, EngineError> {
         let name = reference
-            .strip_prefix("artifact/")
+            .strip_prefix("artifact://campaign/")
             .filter(|name| {
                 !name.is_empty()
                     && name
@@ -1847,7 +1847,7 @@ async fn runtime_binding(
                 "method": "GET",
                 "headers": headers(MAIN_ENGINE_LABEL)
             },
-            "input": {"file": {"artifact_sink": {"reference": format!("artifact/{key}")}, "expected_sha256": expected}}
+            "input": {"file": {"artifact_sink": {"reference": format!("artifact://campaign/{key}")}, "expected_sha256": expected}}
         }),
     );
     let response = binding.invoke(download, CancellationToken::new()).await;
