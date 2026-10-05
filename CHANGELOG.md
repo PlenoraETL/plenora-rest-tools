@@ -109,6 +109,11 @@ del contratto delle richieste, raccolte in un'unica rottura.
 - `unsafe_code = "forbid"` vale per tutto il workspace ([workspace.lints]),
   test compresi; maturin è fissato a 1.14.1 anche in build-system.requires;
   rustdoc gira con `-D warnings` nel gate.
+- plenora-rest-core dichiara `#![deny(missing_docs)]`: tutta l'API
+  pubblica (tipi del contratto e loro campi, errori, capability, runtime
+  binding, controlli di esecuzione, Engine) è documentata con default,
+  unità, limiti ed errori reali; un elemento pubblico nuovo senza
+  documentazione non compila. Nessun cambiamento di superficie.
 
 ### Dipendenze
 

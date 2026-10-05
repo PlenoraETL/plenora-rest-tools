@@ -33,6 +33,18 @@ use crate::{
     },
 };
 
+/// REST execution engine.
+///
+/// An `Engine` owns everything that outlives a single execution: the
+/// [`EngineConfig`] policies, HTTP connection pools, cached OAuth tokens, the
+/// HTTP cache, circuit breaker state, the request rate limiter, cookie
+/// sessions and the registry of admitted idempotency keys. Executions take
+/// `&self`, so one engine can serve concurrent executions from several tasks;
+/// the engine-wide limits (`max_concurrent_requests`, `requests_per_second`)
+/// apply across all of them.
+///
+/// Executions never panic and never return a Rust error: every failure is
+/// reported in the [`ExecutionResult`] with status `failed`.
 pub struct Engine {
     config: EngineConfig,
     transport: Transport,
@@ -110,6 +122,8 @@ struct EnrichmentOutcome {
 }
 
 impl Engine {
+    /// Creates an engine with the given configuration. Nothing is validated
+    /// or connected here: policies are enforced when an execution uses them.
     pub fn new(config: EngineConfig) -> Self {
         Self {
             transport: Transport::new(config.clone()),
@@ -119,6 +133,11 @@ impl Engine {
         }
     }
 
+    /// Runs one execution with no external cancellation.
+    ///
+    /// The deadline is taken from `options.deadline` (RFC 3339); an invalid
+    /// value fails the execution with `INVALID_INPUT`. Otherwise identical to
+    /// [`execute_with_control`](Self::execute_with_control).
     pub async fn execute(&self, request: ExecutionRequest) -> ExecutionResult {
         let control = match ExecutionControl::default()
             .with_optional_deadline(request.options.deadline.as_deref())
@@ -129,6 +148,19 @@ impl Engine {
         self.execute_with_control(request, control).await
     }
 
+    /// Runs one execution under the cancellation token and deadline of
+    /// `control`; `options.deadline` of the request is not read here.
+    ///
+    /// Before any network activity the engine checks, in order: that it is
+    /// not closed (`ENGINE_CLOSED`), the request configuration
+    /// (`INVALID_INPUT`), the cookie session handle (`POLICY_VIOLATION`), the
+    /// idempotency key (`INVALID_INPUT`, `POLICY_VIOLATION`,
+    /// `IDEMPOTENCY_CONFLICT`) and the deadline (`TIMEOUT`). A cancellation
+    /// fails the execution with `CANCELLED` and an expired deadline with
+    /// `TIMEOUT`; in both cases asynchronous jobs being polled are cancelled
+    /// remotely when their polling configuration asks for it, within a shared
+    /// budget of 5 seconds, and their recovery data is returned in
+    /// `recoveries`.
     pub async fn execute_with_control(
         &self,
         request: ExecutionRequest,
@@ -200,6 +232,8 @@ impl Engine {
         }
     }
 
+    /// The capability document of this build; the same value as the free
+    /// function [`capabilities`](crate::capabilities).
     pub fn capabilities(&self) -> CapabilityDocument {
         capabilities()
     }
@@ -227,10 +261,15 @@ impl Engine {
         self.transport.close_cookie_session(session).await
     }
 
+    /// Closes the engine. From now on new executions fail with
+    /// `ENGINE_CLOSED` and cookie session calls return
+    /// [`EngineError::EngineClosed`]; executions already admitted run to
+    /// completion. Idempotent and irreversible.
     pub fn close(&self) {
         self.closed.store(true, Ordering::Release);
     }
 
+    /// Whether [`close`](Self::close) has been called.
     pub fn is_closed(&self) -> bool {
         self.closed.load(Ordering::Acquire)
     }
@@ -424,11 +463,24 @@ impl Engine {
         }
     }
 
+    /// JSON form of [`execute`](Self::execute): parses a
+    /// `plenora-rest-execution-request-v1` document and returns the
+    /// serialized `plenora-rest-execution-result-v1` document.
+    ///
+    /// Only failures outside the execution are a Rust error: a closed engine
+    /// ([`EngineError::EngineClosed`]), text that does not parse as the
+    /// request contract or an invalid `options.deadline`
+    /// ([`EngineError::InvalidInput`], with only the line and column of a
+    /// parse failure), or a result that cannot be serialized
+    /// ([`EngineError::Runtime`]). A failed execution is a successful call
+    /// returning a result with status `failed`.
     pub async fn execute_json(&self, request_json: &str) -> Result<String, EngineError> {
         self.execute_json_with_cancellation(request_json, CancellationToken::new())
             .await
     }
 
+    /// [`execute_json`](Self::execute_json) with an external cancellation
+    /// token; the deadline still comes from `options.deadline`.
     pub async fn execute_json_with_cancellation(
         &self,
         request_json: &str,

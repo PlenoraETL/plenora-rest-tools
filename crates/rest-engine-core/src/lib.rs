@@ -5,6 +5,7 @@
 //! types never cross this boundary.
 
 #![forbid(unsafe_code)]
+#![deny(missing_docs)]
 
 mod capability;
 mod contract;

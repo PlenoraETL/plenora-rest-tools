@@ -18,19 +18,56 @@ use crate::{
     engine::{is_disallowed_idempotency_header, is_sensitive_header_name},
 };
 
+/// Envelope contract accepted on input as an alternative to
+/// `plenora-runtime-binding-v1`, used by conformance vectors. Responses always
+/// carry `plenora-runtime-binding-v1`.
 pub const RUNTIME_VECTOR_CONTRACT: &str = "plenora-runtime-vector-v1";
+/// Contract of the payload of an error envelope, written in its
+/// `plenora.output.contract` metadata.
 pub const ERROR_CONTRACT: &str = "plenora-error-v1";
+/// Content type of request and success envelopes; a request with any other
+/// content type is rejected.
 pub const JSON_CONTENT_TYPE: &str = "application/json";
+/// Content type of error envelopes.
 pub const ERROR_CONTENT_TYPE: &str = "application/vnd.plenora.error+json";
 
+/// Envelope exchanged with a Plenora runtime host (`plenora-runtime-binding-v1`).
+///
+/// Unknown fields are rejected when deserializing. `Debug` prints the metadata
+/// keys only and never the payload, which can contain request data.
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeMessage {
+    /// Envelope version; must equal
+    /// [`RUNTIME_BINDING_VERSION`](crate::RUNTIME_BINDING_VERSION) (1),
+    /// otherwise `UNSUPPORTED_SCHEMA`.
     pub schema_version: u32,
+    /// Envelope contract: `plenora-runtime-binding-v1` or
+    /// [`RUNTIME_VECTOR_CONTRACT`] on input, always
+    /// `plenora-runtime-binding-v1` on output.
     pub contract: String,
+    /// Direction of the message; an invocation must be a `request`.
     pub kind: RuntimeMessageKind,
+    /// [`JSON_CONTENT_TYPE`] for requests and successes,
+    /// [`ERROR_CONTENT_TYPE`] for errors.
     pub content_type: String,
+    /// String metadata. A request must carry `plenora.message.id` and
+    /// `plenora.trace.correlation_id` (lowercase hyphenated UUIDs),
+    /// `plenora.capability.name` (`plenora.rest-tools`),
+    /// `plenora.capability.version` (`1`), `plenora.capability.operation`
+    /// (`rest.test`, `rest.generate`, `rest.enrich`, `rest.download`,
+    /// `rest.upload`), `plenora.operation.version` (`1`) and
+    /// `plenora.input.contract` matching the operation; it may carry
+    /// `plenora.message.causation_id`, `plenora.execution.deadline`
+    /// (RFC 3339) and `plenora.execution.idempotency_key`. A response carries a
+    /// new `plenora.message.id`, the request id as
+    /// `plenora.message.causation_id`, the correlation id, the operation and
+    /// its version, and `plenora.output.contract`.
     pub metadata: BTreeMap<String, String>,
+    /// Request: an execution request object whose `operation` matches the
+    /// selected operation; its idempotency key must come from the metadata,
+    /// not from `options.idempotency_key`. Success: the execution result.
+    /// Error: an [`ErrorPayload`] object.
     pub payload: Value,
 }
 
@@ -48,20 +85,41 @@ impl fmt::Debug for RuntimeMessage {
     }
 }
 
+/// Direction of a [`RuntimeMessage`], serialized in snake case.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeMessageKind {
+    /// An invocation sent by the host.
     Request,
+    /// A completed execution; the payload is the execution result.
     Success,
+    /// A refused or failed invocation; the payload is an error object.
     Error,
 }
 
+/// Host-provided resolution of the opaque references a runtime request may
+/// contain.
+///
+/// Runtime requests cannot carry secrets or local paths inline: inline
+/// authentication, sensitive headers or parameters, client private keys,
+/// proxy credentials and local file paths are rejected with `INVALID_INPUT`.
+/// They name references instead, which the binding passes to these methods
+/// after checking that each is non-empty, at most 512 bytes, not absolute,
+/// not a `file:` URL or drive path, and free of `..` segments. An error
+/// returned by a method becomes the error envelope of the invocation.
 pub trait RuntimeResources: Send + Sync {
+    /// Resolves `connection.credential_ref` to the authentication to use.
     fn resolve_credentials(&self, reference: &str) -> Result<AuthConfig, EngineError>;
+    /// Resolves the `artifact_source` of a `rest.upload` to the local file to
+    /// read.
     fn resolve_artifact_source(&self, reference: &str) -> Result<PathBuf, EngineError>;
+    /// Resolves the `artifact_sink` of a `rest.download` to the local file to
+    /// write.
     fn resolve_artifact_sink(&self, reference: &str) -> Result<PathBuf, EngineError>;
 }
 
+/// Adapter that serves `plenora-runtime-binding-v1` envelopes with an
+/// [`Engine`] and the [`RuntimeResources`] of the host.
 pub struct RuntimeBinding<'engine, 'resources, Resources> {
     engine: &'engine Engine,
     resources: &'resources Resources,
@@ -71,10 +129,17 @@ impl<'engine, 'resources, Resources> RuntimeBinding<'engine, 'resources, Resourc
 where
     Resources: RuntimeResources,
 {
+    /// Binds an engine to the host resources; both are borrowed.
     pub fn new(engine: &'engine Engine, resources: &'resources Resources) -> Self {
         Self { engine, resources }
     }
 
+    /// Validates the envelope, resolves its references, runs the execution
+    /// and returns the response envelope. Never fails as a Rust call: every
+    /// refusal or failed execution is an `error` envelope whose payload is the
+    /// error object of the first execution error (with `details.async_jobs`
+    /// when asynchronous jobs remained active); otherwise a `success`
+    /// envelope carries the execution result.
     pub async fn invoke(
         &self,
         request: RuntimeMessage,
@@ -124,6 +189,11 @@ where
         }
     }
 
+    /// JSON form of [`invoke`](Self::invoke). Returns
+    /// [`EngineError::InvalidInput`] when the text is not a valid envelope
+    /// (only line and column are kept) and [`EngineError::Runtime`] when the
+    /// response cannot be serialized; every other outcome is a serialized
+    /// envelope.
     pub async fn invoke_json(
         &self,
         request_json: &str,
