@@ -67,6 +67,23 @@ del contratto delle richieste, raccolte in un'unica rottura.
 - Un batch flat_array rifiuta i record che non si risolvono in esattamente un
   parametro non null.
 
+### Limiti espliciti (incompatibile)
+
+- La paginazione fermata da max_rows o max_pages mentre la sorgente ha ancora
+  dati restituisce un risultato partial: le righe lette più l'errore
+  PAGINATION_LIMIT_REACHED (resource_limit, details.max_rows/max_pages). Prima
+  il risultato era success con le righe troncate in silenzio. Nuova variante
+  EngineError::PaginationLimit. Vedi
+  [Paginazione](docs/limiti.md#paginazione).
+- Un Retry-After oltre retry.max_retry_after_ms non viene più accorciato al
+  massimo per riprovare prima del tempo chiesto dal server: l'operazione
+  fallisce con lo status ricevuto.
+- Oltre i 128 handle di recovery ammessi dal contratto, il primo errore porta
+  details.recoveries_omitted con il numero degli handle lasciati fuori; prima
+  venivano scartati in silenzio.
+- AGENTS.md raccoglie le regole del repository; docs/limiti.md è il registro
+  unico dei limiti, dei comportamenti oltre la soglia e delle deviazioni.
+
 ### API Rust (incompatibile)
 
 - EngineError non contiene più testo di terzi: i campi testuali delle varianti

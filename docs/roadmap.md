@@ -187,5 +187,6 @@ Non è previsto trasformare la libreria in:
 
 - [Panoramica](../README.md)
 - [Architettura](architecture.md)
+- [Limiti e deviazioni](limiti.md)
 - [Contratti](../contracts/README.md)
 - [Sviluppo e release](development.md)
