@@ -307,7 +307,9 @@ apre e le chiude l'host che possiede l'Engine.
 
 Il motore tiene al massimo `max_cookie_sessions` sessioni (256 per default),
 una per slot. L'handle indica lo slot e la sua generazione, più un
-identificativo casuale dell'Engine e un valore casuale della sessione. Quando
+identificativo casuale dell'Engine e un valore casuale della sessione di 128
+bit, letti dalla sorgente casuale del sistema (se la sorgente fallisce, aprire
+una sessione è un errore esplicito). Quando
 una sessione finisce, perché chiusa o espulsa, la generazione dello slot
 avanza: ogni copia dell'handle viene da quel momento rifiutata con
 POLICY_VIOLATION prima di qualunque attività di rete, inclusa l'acquisizione di
@@ -323,6 +325,16 @@ Se uno slot arrivasse all'ultima generazione rappresentabile verrebbe ritirato
 invece di ripartire da zero, perché un vecchio handle potrebbe portare di nuovo
 una generazione valida; con tutti gli slot ritirati l'apertura fallisce in modo
 esplicito.
+
+Una richiesta risolve l'handle una sola volta, quando viene ammessa, prima di
+qualunque attività di rete; da lì in poi usa per tutta la sua durata il jar
+ottenuto all'ammissione, senza risolvere di nuovo l'handle. Chiudere una
+sessione mentre una richiesta ammessa è ancora in corso (per esempio in attesa
+di un token OAuth) rende subito stantio l'handle per le richieste nuove, che
+vengono rifiutate prima della rete, ma la richiesta in corso completa con la
+sua sessione. Lo slot viene liberato, e la sua generazione avanza, soltanto
+dopo che l'ultima richiesta in corso lo ha rilasciato: fino ad allora non viene
+riusato.
 
 Aprire una sessione quando tutti gli slot sono occupati espelle quella usata
 meno di recente fra quelle che nessuna operazione ha prenotato, mai una ancora

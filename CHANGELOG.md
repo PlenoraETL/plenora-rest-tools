@@ -25,6 +25,11 @@ del contratto delle richieste, raccolte in un'unica rottura.
   il ricambio di sessioni non esaurisce il motore. Sostituisce il registro di
   jar_id espulsi della correzione precedente. Uno slot con la generazione
   esaurita viene ritirato, non riusato.
+- Una richiesta usa per tutta la sua durata la sessione risolta quando è stata
+  ammessa: chiudere la sessione mentre la richiesta è in corso rifiuta solo le
+  richieste nuove, e lo slot viene riusato soltanto dopo la fine di quella in
+  corso. Il valore casuale dell'handle è di 128 bit dalla sorgente del sistema
+  (getrandom, già nel grafo tramite uuid, ora dipendenza diretta pinnata).
 - Superficie congelata aggiornata con decisione esplicita: export CookieSession
   ed entrypoint di sessione in compatibility-v1.json e bindings/rust-v1.json.
 

@@ -604,7 +604,7 @@ pub struct CookieSession {
     pub(crate) engine: u64,
     pub(crate) slot: u32,
     pub(crate) generation: u64,
-    pub(crate) nonce: u64,
+    pub(crate) nonce: u128,
 }
 
 const COOKIE_SESSION_PREFIX: &str = "rcs1";
@@ -613,7 +613,7 @@ impl CookieSession {
     /// The opaque token, as it travels in JSON.
     pub fn to_token(&self) -> String {
         format!(
-            "{COOKIE_SESSION_PREFIX}.{:016x}.{}.{}.{:016x}",
+            "{COOKIE_SESSION_PREFIX}.{:016x}.{}.{}.{:032x}",
             self.engine, self.slot, self.generation, self.nonce
         )
     }
@@ -631,20 +631,21 @@ impl CookieSession {
         let slot = parts.next()?;
         let generation = parts.next()?;
         let nonce = parts.next()?;
-        if parts.next().is_some() || engine.len() != 16 || nonce.len() != 16 {
+        if parts.next().is_some() || engine.len() != 16 || nonce.len() != 32 {
             return None;
         }
-        let hex = |text: &str| {
+        let lowercase_hex = |text: &str| {
             text.bytes()
                 .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-                .then(|| u64::from_str_radix(text, 16).ok())
-                .flatten()
         };
+        if !lowercase_hex(engine) || !lowercase_hex(nonce) {
+            return None;
+        }
         let session = Self {
-            engine: hex(engine)?,
+            engine: u64::from_str_radix(engine, 16).ok()?,
             slot: slot.parse().ok()?,
             generation: generation.parse().ok()?,
-            nonce: hex(nonce)?,
+            nonce: u128::from_str_radix(nonce, 16).ok()?,
         };
         // Rejects leading zeros, signs and other spellings `parse` tolerates.
         (session.to_token() == token).then_some(session)
@@ -1212,6 +1213,37 @@ mod tests {
             let again: ParameterSpec =
                 serde_json::from_value(serde_json::to_value(&spec).unwrap()).unwrap();
             assert_eq!(again.value, spec.value, "{document}");
+        }
+    }
+
+    #[test]
+    fn a_cookie_session_token_has_one_canonical_128_bit_spelling() {
+        let session = super::CookieSession {
+            engine: 0x0123_4567_89ab_cdef,
+            slot: 7,
+            generation: 42,
+            nonce: u128::MAX - 1,
+        };
+        let token = session.to_token();
+        assert_eq!(
+            token,
+            "rcs1.0123456789abcdef.7.42.fffffffffffffffffffffffffffffffe"
+        );
+        assert_eq!(super::CookieSession::from_token(&token), Some(session));
+        for malformed in [
+            // A 64-bit nonce, the earlier format.
+            "rcs1.0123456789abcdef.7.42.fffffffffffffffe",
+            // Uppercase, a sign, leading zeros, extra parts.
+            "rcs1.0123456789ABCDEF.7.42.fffffffffffffffffffffffffffffffe",
+            "rcs1.0123456789abcdef.+7.42.fffffffffffffffffffffffffffffffe",
+            "rcs1.0123456789abcdef.07.42.fffffffffffffffffffffffffffffffe",
+            "rcs1.0123456789abcdef.7.42.fffffffffffffffffffffffffffffffe.0",
+        ] {
+            assert_eq!(
+                super::CookieSession::from_token(malformed),
+                None,
+                "{malformed}"
+            );
         }
     }
 }

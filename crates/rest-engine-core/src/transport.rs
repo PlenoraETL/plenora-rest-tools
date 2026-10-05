@@ -105,6 +105,9 @@ pub(crate) struct PreparedRequest {
     pub max_redirects: usize,
     pub retry: RetryPolicy,
     pub cookies: CookiePolicy,
+    /// Jar of the cookie session, resolved once when the operation is admitted
+    /// and used for its whole duration.
+    pub admitted_jar: Option<CookieJar>,
     pub cache: CachePolicy,
     pub circuit_breaker: CircuitBreakerPolicy,
     pub requests_per_second: Option<f64>,
@@ -210,7 +213,9 @@ pub(crate) struct Transport {
 /// list of what it evicted.
 struct SessionRegistry {
     /// Random per engine, so a handle issued by another engine is refused.
-    engine: u64,
+    /// `None` when the system random source failed at construction: every
+    /// session operation is then refused rather than run with a guessable id.
+    engine: Option<u64>,
     capacity: usize,
     slots: Vec<SessionSlot>,
 }
@@ -225,15 +230,19 @@ struct SessionSlot {
 enum SlotState {
     Free,
     Open(OpenSession),
+    /// Closed while operations still held it. The handle is already refused
+    /// for new requests; the slot is freed, and its generation advanced, only
+    /// once the last of those operations has released its lease.
+    Closing(CookieJar),
     /// The generation counter is exhausted. The slot is never used again rather
     /// than restarting from a generation an old handle might still carry.
     Retired,
 }
 
 struct OpenSession {
-    /// Random per session: a handle cannot be assembled from a slot number and
-    /// a guessed generation.
-    nonce: u64,
+    /// Random per session, 128 bits: a handle cannot be assembled from a slot
+    /// number and a guessed generation.
+    nonce: u128,
     jar: CookieJar,
     /// Order of last use, for evicting the least recently used session.
     last_used: u64,
@@ -248,15 +257,21 @@ enum SessionRefusal {
     Stale,
 }
 
-/// A random 64-bit value, from the operating system's generator.
-fn random_u64() -> u64 {
-    uuid::Uuid::new_v4().as_u64_pair().0
+/// 128 random bits from the operating system's generator.
+fn random_u128() -> Result<u128, EngineError> {
+    let mut bytes = [0_u8; 16];
+    getrandom::fill(&mut bytes).map_err(|_| random_source_error())?;
+    Ok(u128::from_le_bytes(bytes))
+}
+
+fn random_source_error() -> EngineError {
+    EngineError::Runtime(ErrorDetail::from("the system random source failed"))
 }
 
 impl SessionRegistry {
     fn new(capacity: usize) -> Self {
         Self {
-            engine: random_u64(),
+            engine: getrandom::u64().ok(),
             capacity,
             slots: Vec::new(),
         }
@@ -264,7 +279,7 @@ impl SessionRegistry {
 
     /// The open session `handle` names, if the handle is current.
     fn resolve(&mut self, handle: &CookieSession) -> Result<&mut OpenSession, SessionRefusal> {
-        if handle.engine != self.engine {
+        if Some(handle.engine) != self.engine {
             return Err(SessionRefusal::ForeignEngine);
         }
         let slot = usize::try_from(handle.slot)
@@ -287,6 +302,7 @@ impl SessionRegistry {
         let slot = &mut self.slots[index];
         let incarnation = match std::mem::replace(&mut slot.state, SlotState::Free) {
             SlotState::Open(session) => Some(session.jar.incarnation),
+            SlotState::Closing(jar) => Some(jar.incarnation),
             SlotState::Free | SlotState::Retired => None,
         };
         match slot.generation.checked_add(1) {
@@ -324,7 +340,7 @@ impl CookieStore for BoundedJar {
 }
 
 #[derive(Clone)]
-struct CookieJar {
+pub(crate) struct CookieJar {
     jar: Arc<BoundedJar>,
     /// Operations currently holding this jar, counted by this crate rather than
     /// inferred from `Arc::strong_count`.
@@ -496,7 +512,9 @@ impl Transport {
         }
         let incarnation = self.next_sequence();
         let last_used = self.next_sequence();
+        let nonce = random_u128()?;
         let mut registry = self.sessions.lock().await;
+        let engine = registry.engine.ok_or_else(random_source_error)?;
         let index = loop {
             if let Some(index) = registry
                 .slots
@@ -504,6 +522,17 @@ impl Transport {
                 .position(|slot| matches!(slot.state, SlotState::Free))
             {
                 break index;
+            }
+            // A closed session whose last operation has finished: its slot can
+            // move to the next generation now. Leases are released without this
+            // lock, so the count is read here rather than acted on at release.
+            if let Some(index) = registry.slots.iter().position(|slot| {
+                matches!(&slot.state, SlotState::Closing(jar) if jar.leases.load(Ordering::Acquire) == 0)
+            }) {
+                if let Some(incarnation) = registry.end(index) {
+                    self.drop_session_clients(incarnation).await;
+                }
+                continue;
             }
             if registry.slots.len() < registry.capacity {
                 registry.slots.push(SessionSlot {
@@ -540,8 +569,6 @@ impl Transport {
             // because every iteration either returns, or frees or retires one
             // of finitely many slots.
         };
-        let nonce = random_u64();
-        let engine = registry.engine;
         let slot = &mut registry.slots[index];
         slot.state = SlotState::Open(OpenSession {
             nonce,
@@ -562,19 +589,33 @@ impl Transport {
         })
     }
 
-    /// Closes the session `handle` names and frees its slot.
+    /// Closes the session `handle` names.
     ///
-    /// The slot moves to its next generation, so the handle, and every copy of
-    /// it, is refused from now on. Closing a handle that is already stale is
-    /// an error rather than a no-op, so a caller that lost track of a session
-    /// finds out.
+    /// The handle, and every copy of it, is refused for new requests from now
+    /// on. Operations already admitted keep the jar they were admitted with
+    /// until they finish; the slot is freed and moves to its next generation
+    /// only after the last of them has released it, so a closed session is
+    /// never handed to a new one while still in use. Closing a handle that is
+    /// already stale is an error rather than a no-op, so a caller that lost
+    /// track of a session finds out.
     pub async fn close_cookie_session(&self, handle: &CookieSession) -> Result<(), EngineError> {
         let mut registry = self.sessions.lock().await;
-        registry.resolve(handle).map_err(session_refusal_error)?;
+        let session = registry.resolve(handle).map_err(session_refusal_error)?;
+        let held = session.jar.leases.load(Ordering::Acquire) > 0;
+        let incarnation = session.jar.incarnation;
         let index = usize::try_from(handle.slot).map_err(|_| {
             EngineError::Runtime(ErrorDetail::from("cookie session slot index overflowed"))
         })?;
-        if let Some(incarnation) = registry.end(index) {
+        if held {
+            let slot = &mut registry.slots[index];
+            slot.state = match std::mem::replace(&mut slot.state, SlotState::Free) {
+                SlotState::Open(session) => SlotState::Closing(session.jar),
+                other => other,
+            };
+            // Idle pooled clients go now; one built by an operation still in
+            // flight is removed when the slot is reclaimed.
+            self.drop_session_clients(incarnation).await;
+        } else if let Some(incarnation) = registry.end(index) {
             self.drop_session_clients(incarnation).await;
         }
         Ok(())
@@ -599,11 +640,22 @@ impl Transport {
     /// an OAuth token had already been fetched. The returned lease keeps the
     /// session from being evicted while this operation authenticates and
     /// resolves DNS.
+    ///
+    /// The jar resolved here is the one the whole operation uses: it is stored
+    /// in the request and `client_for` never resolves the handle again, so a
+    /// session closed while the operation is in flight cannot turn into a
+    /// refusal after network activity has already happened.
     async fn admit_cookie_jar(
         &self,
-        cookies: &CookiePolicy,
+        request: &mut PreparedRequest,
     ) -> Result<Option<JarLease>, EngineError> {
-        Ok(self.cookie_jar(cookies).await?.map(|(_, lease)| lease))
+        Ok(match self.cookie_jar(&request.cookies).await? {
+            Some((jar, lease)) => {
+                request.admitted_jar = Some(jar);
+                Some(lease)
+            }
+            None => None,
+        })
     }
 
     /// The jar of the session `cookies` names, with a lease that keeps the
@@ -639,7 +691,7 @@ impl Transport {
 
     pub async fn execute(&self, mut request: PreparedRequest) -> Result<ResponseData, EngineError> {
         self.validate_request(&request)?;
-        let _jar_lease = self.admit_cookie_jar(&request.cookies).await?;
+        let _jar_lease = self.admit_cookie_jar(&mut request).await?;
         let auth_stats = self.resolve_auth(&mut request).await?;
 
         let mut response = self.execute_cached(&request).await?;
@@ -661,7 +713,7 @@ impl Transport {
         success_statuses: &[u16],
     ) -> Result<DownloadData, EngineError> {
         self.validate_request(&request)?;
-        let _jar_lease = self.admit_cookie_jar(&request.cookies).await?;
+        let _jar_lease = self.admit_cookie_jar(&mut request).await?;
         if target.resume {
             if request.method != HttpMethod::Get {
                 return Err(EngineError::InvalidInput(ErrorDetail::from(
@@ -1274,6 +1326,7 @@ impl Transport {
                 ..RetryPolicy::default()
             },
             cookies: CookiePolicy::default(),
+            admitted_jar: None,
             cache: CachePolicy::default(),
             circuit_breaker: CircuitBreakerPolicy::default(),
             requests_per_second: original.requests_per_second,
@@ -1382,7 +1435,7 @@ impl Transport {
 
         for redirects in 0..=request.max_redirects {
             let client = self
-                .client_for(&url, &request.tls, request.proxy.as_ref(), &request.cookies)
+                .client_for(&url, &request.tls, request.proxy.as_ref(), request)
                 .await?;
             let headers = request_headers(request)?;
             let mut request_url = url.clone();
@@ -1706,7 +1759,7 @@ impl Transport {
         url: &Url,
         tls: &TlsConfig,
         proxy: Option<&ProxyConfig>,
-        cookies: &CookiePolicy,
+        request: &PreparedRequest,
     ) -> Result<Client, EngineError> {
         if !tls.verify && !self.config.allow_insecure_tls {
             return Err(EngineError::PolicyViolation(ErrorDetail::from(
@@ -1729,11 +1782,19 @@ impl Transport {
             }
             None => None,
         };
-        // The lease is redundant here — the operation that asked for this client
-        // already holds one for the same session — but holding it costs nothing
-        // and keeps this lookup correct on its own.
-        let leased = self.cookie_jar(cookies).await?;
-        let jar = leased.as_ref().map(|(jar, _)| jar);
+        // The jar admitted with the operation, never a fresh resolution of the
+        // handle: the operation's lease keeps it alive, and resolving again
+        // here could refuse a session closed in the meantime after an OAuth
+        // token had already been fetched.
+        let jar = match (&request.cookies.session, &request.admitted_jar) {
+            (None, _) => None,
+            (Some(_), Some(jar)) => Some(jar),
+            (Some(_), None) => {
+                return Err(EngineError::Runtime(ErrorDetail::from(
+                    "a cookie session was used without being admitted",
+                )));
+            }
+        };
         let key = ClientKey {
             host: host.clone(),
             port,

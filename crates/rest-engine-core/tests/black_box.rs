@@ -4316,3 +4316,82 @@ async fn a_malformed_cookie_session_handle_is_invalid_input() {
         assert!(matches!(error, EngineError::InvalidInput(_)), "{request}");
     }
 }
+
+#[tokio::test]
+async fn closing_a_session_during_oauth_keeps_the_admitted_request_and_refuses_new_ones() {
+    // The resource server sets a cookie on the first request, then expects the
+    // in-flight request to arrive with it.
+    let (resource_url, resource_server, resource_observed) = recorded_server(vec![
+        (
+            200,
+            r#"{"step":1}"#,
+            vec![("Set-Cookie", "sid=held; Path=/")],
+        ),
+        (200, r#"{"step":2}"#, vec![]),
+    ])
+    .await;
+
+    // The token endpoint accepts, announces the arrival, and answers only when
+    // the test says so: the request is held inside OAuth, after admission and
+    // after network activity has started.
+    let token_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let token_url = format!("http://{}/token", token_listener.local_addr().unwrap());
+    let (arrived, arrival) = tokio::sync::oneshot::channel();
+    let (release, released) = tokio::sync::oneshot::channel::<()>();
+    let token_server = tokio::spawn(async move {
+        let (mut stream, _) = token_listener.accept().await.unwrap();
+        let _ = read_request(&mut stream).await;
+        let _ = arrived.send(());
+        released.await.unwrap();
+        let body = r#"{"access_token":"t","token_type":"Bearer","expires_in":3600}"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream.write_all(response.as_bytes()).await.unwrap();
+        stream.shutdown().await.unwrap();
+    });
+
+    let engine = Arc::new(cookie_engine(1));
+    let session = engine.open_cookie_session().await.unwrap();
+    let token = session.to_token();
+    let first = execute(&engine, with_session(&resource_url, &token)).await;
+    assert_eq!(first["status"], "success", "{first}");
+
+    let mut with_oauth = with_session(&resource_url, &token);
+    with_oauth["connection"]["auth"] = json!({
+        "type": "oauth2_client_credentials",
+        "token_url": token_url,
+        "client_id": "client",
+        "client_secret": "secret"
+    });
+    let in_flight_engine = Arc::clone(&engine);
+    let in_flight = tokio::spawn(async move { execute(&in_flight_engine, with_oauth).await });
+    timeout(Duration::from_secs(5), arrival)
+        .await
+        .expect("the request never reached the token endpoint")
+        .unwrap();
+
+    engine.close_cookie_session(&session).await.unwrap();
+    // New requests are refused at once, before any network activity.
+    assert_refused_before_network(&engine, &token).await;
+    // The only slot is still held by the in-flight request: it is not reused.
+    assert!(engine.open_cookie_session().await.is_err());
+
+    release.send(()).unwrap();
+    let completed = in_flight.await.unwrap();
+    token_server.await.unwrap();
+    resource_server.await.unwrap();
+    assert_eq!(completed["status"], "success", "{completed}");
+    assert!(
+        resource_observed.lock().unwrap()[1]
+            .to_ascii_lowercase()
+            .contains("cookie: sid=held"),
+        "the in-flight request must keep the session it was admitted with"
+    );
+
+    // Released: the slot is reused, under a new generation.
+    let reopened = engine.open_cookie_session().await.unwrap();
+    assert_ne!(reopened, session);
+    assert_refused_before_network(&engine, &token).await;
+}
