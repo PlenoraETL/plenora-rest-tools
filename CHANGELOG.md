@@ -83,6 +83,13 @@ del contratto delle richieste, raccolte in un'unica rottura.
   servissero, andrebbero consegnati come dato remoto in un campo dichiarato del
   risultato, non nell'errore.
 
+### Copertura
+
+- Nuovo workflow Coverage: core Rust, binding PyO3 e SDK Python misurati
+  separatamente (cargo-llvm-cov 0.9.1, coverage.py 7.16.1) contro i minimi di
+  scripts/coverage_budget.json, con il verificatore fail-closed di
+  plenora-database-tools e i suoi self-test.
+
 ### Dipendenze
 
 - thiserror non è più una dipendenza diretta: Display di EngineError è scritto

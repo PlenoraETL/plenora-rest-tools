@@ -1,0 +1,160 @@
+name: Coverage
+
+# Offline, reproducible coverage of the three surfaces, each against its own
+# floor in scripts/coverage_budget.json: the Rust core, the PyO3 binding and
+# the Python SDK. A large surface cannot hide the regression of a small one,
+# and scripts/check_coverage.py refuses a report it cannot trust (missing
+# totals, inconsistent percentages, files outside the declared sources)
+# rather than turning it into a pass. Floors start just under the measured
+# values; raising them is an ordinary reviewed edit of the budget.
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: coverage-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust-product:
+    name: Rust core
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+
+      - name: Self-test of the budget checker
+        run: python3 scripts/test_check_coverage.py
+
+      - name: Install Rust 1.98.1 with llvm-tools
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # 1.98.1
+        with:
+          toolchain: '1.98.1'
+          components: llvm-tools-preview
+
+      - name: Install cargo-llvm-cov 0.9.1
+        run: cargo +1.98.1 install cargo-llvm-cov --version 0.9.1 --locked
+
+      # The binding crate is measured by the python job, through the wheel
+      # the SDK actually loads; counting it here would mix two surfaces.
+      - name: Measure and report
+        env:
+          RUST_COVERAGE_IGNORE: '(^|/)crates/rest-engine-python/'
+        run: |
+          mkdir -p coverage/rust
+          cargo +1.98.1 llvm-cov --locked --workspace \
+            --json --summary-only \
+            --output-path coverage/rust/summary.json \
+            --ignore-filename-regex "$RUST_COVERAGE_IGNORE"
+          cargo +1.98.1 llvm-cov report \
+            --lcov --output-path coverage/rust/lcov.info \
+            --ignore-filename-regex "$RUST_COVERAGE_IGNORE"
+          cargo +1.98.1 llvm-cov report \
+            --html --output-dir coverage/rust/html \
+            --ignore-filename-regex "$RUST_COVERAGE_IGNORE"
+
+      - name: Rust core budget
+        run: >-
+          python3 scripts/check_coverage.py
+          --summary coverage/rust/summary.json
+          --surface rust_product
+
+      - name: Keep the report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-rust
+          path: coverage/rust
+          if-no-files-found: error
+          retention-days: 14
+
+  python:
+    name: Python SDK and native binding, from the installed wheel
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+
+      - name: Pinned Python tools
+        run: python -m pip install --disable-pip-version-check --no-cache-dir -r requirements-coverage.txt
+
+      - name: Install Rust 1.98.1 with llvm-tools
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # 1.98.1
+        with:
+          toolchain: '1.98.1'
+          components: llvm-tools-preview
+
+      - name: Install cargo-llvm-cov 0.9.1
+        run: cargo +1.98.1 install cargo-llvm-cov --version 0.9.1 --locked
+
+      # The instrumented extension is built into a wheel, installed in a clean
+      # environment and driven by the SDK suite from outside the checkout:
+      # what is measured is the code a Python caller actually runs.
+      - name: Build the instrumented wheel and run the SDK suite
+        shell: bash
+        env:
+          RUSTUP_TOOLCHAIN: '1.98.1'
+        run: |
+          mkdir -p coverage/python-binding/dist coverage/python-sdk
+          source <(cargo llvm-cov show-env --sh)
+          cargo llvm-cov clean --workspace
+          python -m maturin build --locked --out coverage/python-binding/dist
+          python -m venv "$RUNNER_TEMP/sdk"
+          "$RUNNER_TEMP/sdk/bin/pip" install --disable-pip-version-check --no-cache-dir \
+            --no-deps coverage/python-binding/dist/*.whl
+          "$RUNNER_TEMP/sdk/bin/pip" install --disable-pip-version-check --no-cache-dir \
+            "$(grep '^coverage==' requirements-coverage.txt)"
+          export COVERAGE_FILE="$GITHUB_WORKSPACE/coverage/python-sdk/.coverage"
+          (cd "$RUNNER_TEMP" && "$RUNNER_TEMP/sdk/bin/python" -m coverage run \
+            --branch --source=plenora_rest \
+            -m unittest discover -s "$GITHUB_WORKSPACE/python/tests" -v)
+          "$RUNNER_TEMP/sdk/bin/python" -m coverage json --pretty-print -o coverage/python-sdk/summary.json
+          "$RUNNER_TEMP/sdk/bin/python" -m coverage html -d coverage/python-sdk/html
+          cargo llvm-cov report -p plenora-rest-python \
+            --json --summary-only \
+            --output-path coverage/python-binding/summary.json
+          cargo llvm-cov report -p plenora-rest-python \
+            --lcov --output-path coverage/python-binding/lcov.info
+
+      - name: Python SDK budget
+        run: >-
+          python3 scripts/check_coverage.py
+          --summary coverage/python-sdk/summary.json
+          --surface python_sdk
+
+      - name: Native binding budget
+        run: >-
+          python3 scripts/check_coverage.py
+          --summary coverage/python-binding/summary.json
+          --surface python_binding
+
+      - name: Keep the reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-python
+          path: |
+            coverage/python-sdk
+            coverage/python-binding
+          if-no-files-found: error
+          retention-days: 14
