@@ -37,6 +37,18 @@ del contratto delle richieste, raccolte in un'unica rottura.
 - Superficie congelata aggiornata con decisione esplicita: export CookieSession
   ed entrypoint di sessione in compatibility-v1.json e bindings/rust-v1.json.
 
+### Campagna operativa
+
+- Nuovo crate crates/rest-campaign (non pubblicato, nessuna dipendenza nuova)
+  con il binario plenora-rest-campaign: fasi smoke, load con iniezione di
+  guasti e soak contro un server HTTP locale in-process, campionamento di RSS,
+  descriptor e thread (Linux), file temporanei, latenze, throughput ed errori,
+  verifica dei criteri di accettazione della roadmap con exit code non zero e
+  report JSON e Markdown. Profili in campaign/profiles.json, soglie proposte e
+  da approvare in campaign/limits.json, esecuzione con scripts/campaign.sh e
+  con il workflow Campaign. Vedi
+  [Campagna come codice](docs/roadmap.md#campagna-come-codice).
+
 ### Comportamento
 
 - Un null esplicito in value di un parametro, di una trasformazione o in
