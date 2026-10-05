@@ -90,6 +90,26 @@ del contratto delle richieste, raccolte in un'unica rottura.
   prova installata su CPython 3.10-3.14; il workflow Release la costruisce, la
   prova sulla stessa matrice e la include in SHA256SUMS, SBOM e attestazioni.
 
+### Robustezza e gate
+
+- Nessuna indicizzazione o slicing che possa andare in panic nelle
+  librerie: i 16 punti trovati da Clippy (engine, json_path,
+  response_body, transport) usano accessi controllati, e un invariante
+  interno violato diventa RUNTIME_ERROR. Nell'enrichment concorrente un
+  esito mancante, ripetuto o fuori indice fa fallire l'operazione invece
+  di perdere o duplicare un record. Il gate anti-panic gira nel Docker e
+  su Windows.
+- Un percorso JSON malformato in records_path, error_path,
+  output_mapping, iterate_on, batch.output_path, nei percorsi del polling
+  o della paginazione è INVALID_INPUT prima di ogni richiesta. Prima non si
+  risolveva mai e veniva letto come campo assente (null o default).
+- rust-toolchain.toml fissa il compilatore 1.98.1 per gate locali, CI
+  Linux e Windows e build di release; l'immagine del gate Docker è
+  rust:1.98.1 e lo stage msrv resta su 1.85.1.
+- `unsafe_code = "forbid"` vale per tutto il workspace ([workspace.lints]),
+  test compresi; maturin è fissato a 1.14.1 anche in build-system.requires;
+  rustdoc gira con `-D warnings` nel gate.
+
 ### Dipendenze
 
 - thiserror non è più una dipendenza diretta: Display di EngineError è scritto

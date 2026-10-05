@@ -40,15 +40,13 @@ jobs:
         shell: bash
         run: python scripts/release.py validate-version "${GITHUB_REF_NAME}"
 
-      - name: Install Rust 1.97.1
+      - name: Install Rust 1.98.1
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # 1.98.1
         with:
-          toolchain: '1.97.1'
+          toolchain: '1.98.1'
 
       - name: Build the wheel
         shell: pwsh
-        env:
-          RUSTUP_TOOLCHAIN: '1.97.1'
         run: |
           $env:SOURCE_DATE_EPOCH = (python scripts/release.py source-date-epoch).Trim()
           python -m pip install --disable-pip-version-check --no-cache-dir "maturin==1.14.1"

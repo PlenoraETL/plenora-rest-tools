@@ -13,6 +13,11 @@ license = "MIT OR Apache-2.0"
 authors = ["PlenoraETL contributors"]
 repository = "https://github.com/PlenoraETL/plenora-rest-tools"
 
+# The ban on `unsafe` covers every target of every crate, tests and examples
+# included, not only the library roots that repeat it as a crate attribute.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
 [workspace.dependencies]
 # Every direct dependency is pinned to the exact version in Cargo.lock.
 #
