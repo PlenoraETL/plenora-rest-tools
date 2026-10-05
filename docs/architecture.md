@@ -225,9 +225,16 @@ che nessuna operazione ha prenotato, mai uno ancora prenotato, perché espellere
 un jar attivo dividerebbe una sessione fra richieste concorrenti. Le prenotazioni
 sono contate dal motore e non dedotte dal numero di riferimenti al jar: quanti
 ne tenga un client HTTP del pool è un dettaglio interno di quel client, e un
-client nel pool non è una prenotazione. Espellere un jar libero porta via anche
-i client costruiti su di esso — una riconnessione, non la perdita di una
-sessione — e nessun altro jar viene toccato. La richiesta viene rifiutata solo se
+client nel pool non è una prenotazione. Espellere un jar libero porta via i
+client costruiti su di esso e i cookie che conteneva: è la perdita della
+sessione, non una semplice riconnessione. Per questo il jar_id espulso viene
+ricordato e una richiesta successiva con lo stesso jar_id fallisce con
+POLICY_VIOLATION prima di qualunque attività di rete, invece di ripartire da un
+jar vuoto che disconnetterebbe il chiamante in silenzio; per una nuova sessione
+il chiamante usa un nuovo jar_id. Gli id ricordati sono al massimo 4096 e un
+jar_id è lungo al massimo 256 byte: raggiunto quel limite il motore non espelle
+più e rifiuta i nuovi jar_id per il resto della sua vita, invece di dimenticare
+un id espulso. Nessun altro jar viene toccato. La richiesta viene rifiutata solo se
 ogni jar è prenotato da un'operazione attiva, e il rifiuto avviene prima di
 qualunque attività di rete, inclusa l'acquisizione di un token OAuth: la
 prenotazione copre l'intera operazione, non la sola richiesta HTTP. Lo store

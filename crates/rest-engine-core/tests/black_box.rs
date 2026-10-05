@@ -3575,3 +3575,50 @@ async fn a_withheld_idempotency_header_also_withdraws_non_idempotent_retries() {
             .contains("x-deduplication-id")
     );
 }
+
+#[tokio::test]
+async fn a_request_on_an_evicted_cookie_jar_fails_instead_of_losing_the_session() {
+    // Past the jar bound the oldest idle jar is evicted, and its cookies with
+    // it. Coming back with the same `jar_id` must not start from an empty jar,
+    // which would log the caller out without a signal.
+    let engine = Engine::new(EngineConfig {
+        allow_private_networks: true,
+        allow_cookie_store: true,
+        max_pooled_origins: 0,
+        ..EngineConfig::default()
+    });
+    let session = |url: &str, jar: &str| {
+        json!({
+            "schema_version": 1,
+            "operation": "test",
+            "connection": {
+                "url": url,
+                "method": "GET",
+                "cookies": {"enabled": true, "jar_id": jar}
+            }
+        })
+    };
+    for index in 0..MAX_COOKIE_JARS_IN_TEST {
+        let (url, server, _) = recorded_server(vec![(
+            200,
+            r#"{"ok":true}"#,
+            vec![("Set-Cookie", "sid=login; Path=/")],
+        )])
+        .await;
+        let result = execute(&engine, session(&url, &format!("tenant-{index}"))).await;
+        server.await.unwrap();
+        assert_eq!(result["status"], "success", "session {index}: {result}");
+    }
+
+    // `tenant-0` was the oldest idle jar, so it is the one that went.
+    let returning = execute(&engine, session("http://127.0.0.1:9/", "tenant-0")).await;
+    assert_eq!(returning["status"], "failed", "{returning}");
+    assert_eq!(returning["errors"][0]["code"], "POLICY_VIOLATION");
+    assert_eq!(returning["metrics"]["requests"], 0);
+
+    let oversized = execute(&engine, session("http://127.0.0.1:9/", &"j".repeat(257))).await;
+    assert_eq!(
+        oversized["errors"][0]["code"], "INVALID_INPUT",
+        "{oversized}"
+    );
+}
