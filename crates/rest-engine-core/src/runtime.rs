@@ -7,15 +7,17 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::{
-    AuthConfig, CAPABILITY_NAME, CancellationToken, Engine, EngineError, ErrorPayload,
-    ExecutionControl, ExecutionOperation, ExecutionRequest, ExecutionResult, ExecutionStatus,
-    FILE_TRANSFER_INPUT_CONTRACT, FILE_TRANSFER_RESULT_CONTRACT, IdempotencyLocation,
-    ParameterLocation, REST_DOWNLOAD, REST_ENRICH, REST_GENERATE, REST_TEST, REST_UPLOAD,
-    RUNTIME_BINDING_VERSION,
+    AuthConfig, CAPABILITY_NAME, CancellationToken, Engine, EngineError, ErrorCategory,
+    ErrorPayload, ErrorPhase, ExecutionControl, ExecutionOperation, ExecutionRequest,
+    ExecutionResult, ExecutionStatus, FILE_TRANSFER_INPUT_CONTRACT, FILE_TRANSFER_RESULT_CONTRACT,
+    IdempotencyLocation, ParameterLocation, REST_DOWNLOAD, REST_ENRICH, REST_GENERATE, REST_TEST,
+    REST_UPLOAD, RUNTIME_BINDING_VERSION, RemoteEffect,
     capability::{
         EXECUTION_REQUEST_CONTRACT, EXECUTION_RESULT_CONTRACT, RUNTIME_INTERFACE_CONTRACT,
     },
+    control::is_canonical_deadline,
     engine::{is_disallowed_idempotency_header, is_sensitive_header_name},
+    error::RetryAdvice,
 };
 
 pub const RUNTIME_VECTOR_CONTRACT: &str = "plenora-runtime-vector-v1";
@@ -80,63 +82,85 @@ where
         request: RuntimeMessage,
         cancellation: CancellationToken,
     ) -> RuntimeMessage {
-        match self.prepare_request(&request) {
-            Ok((mut execution, operation, output_contract)) => {
-                let control = match ExecutionControl::new(cancellation).with_optional_deadline(
-                    request
-                        .metadata
-                        .get("plenora.execution.deadline")
-                        .map(String::as_str),
-                ) {
-                    Ok(control) => control,
-                    Err(error) => return error_message(&request, error.payload()),
-                };
-                if let Err(error) =
-                    resolve_runtime_inputs(&mut execution, operation, self.resources)
-                {
-                    return error_message(&request, error.payload());
-                }
-                let result = self.engine.execute_with_control(execution, control).await;
-                if result.status == ExecutionStatus::Failed {
-                    let mut error = result
-                        .errors
-                        .first()
-                        .map(execution_error_payload)
-                        .unwrap_or_else(|| {
-                            EngineError::Runtime(ErrorDetail::from(
-                                "execution failed without an error",
-                            ))
-                            .payload()
-                        });
-                    if !result.recoveries.is_empty() {
-                        error.details.insert(
-                            "async_jobs".to_owned(),
-                            serde_json::to_value(&result.recoveries)
-                                .unwrap_or_else(|_| Value::Array(Vec::new())),
-                        );
-                    }
-                    error_message(&request, error)
-                } else {
-                    success_message(&request, output_contract, result)
-                }
+        let (mut execution, operation, output_contract, control) =
+            match self.prepare_request(&request, cancellation) {
+                Ok(prepared) => prepared,
+                Err(error) => return error_message(&request, error),
+            };
+        // Checked before any resource is resolved: an expired deadline refuses
+        // the message with nothing done, local or remote.
+        if control.deadline_expired() {
+            return error_message(&request, EngineError::DeadlineExpired.payload());
+        }
+        if let Err(error) = resolve_runtime_inputs(&mut execution, operation, self.resources) {
+            return error_message(&request, error.payload());
+        }
+        let result = self.engine.execute_with_control(execution, control).await;
+        if result.status == ExecutionStatus::Failed {
+            let mut error = result
+                .errors
+                .first()
+                .map(execution_error_payload)
+                .unwrap_or_else(|| {
+                    EngineError::Runtime(ErrorDetail::from("execution failed without an error"))
+                        .payload()
+                });
+            if !result.recoveries.is_empty() {
+                error.details.insert(
+                    "async_jobs".to_owned(),
+                    serde_json::to_value(&result.recoveries)
+                        .unwrap_or_else(|_| Value::Array(Vec::new())),
+                );
             }
-            Err(error) => error_message(&request, error.payload()),
+            error_message(&request, error)
+        } else {
+            success_message(&request, output_contract, result)
         }
     }
 
+    /// Serialized form of [`RuntimeBinding::invoke`].
+    ///
+    /// Text that is not a JSON envelope at all has nothing to answer to and is
+    /// an `Err`. An envelope whose metadata carries a value that is not a
+    /// string (a `null` idempotency key, a numeric version) is answered with a
+    /// `protocol` refusal: the metadata of the binding are strings, and a
+    /// value of another type is neither absent nor valid.
     pub async fn invoke_json(
         &self,
         request_json: &str,
         cancellation: CancellationToken,
     ) -> Result<String, EngineError> {
-        let request = serde_json::from_str::<RuntimeMessage>(request_json).map_err(|error| {
+        let parsed = serde_json::from_str::<Value>(request_json).map_err(|error| {
             EngineError::InvalidInput(ErrorDetail::at(
                 "request is not valid JSON for the contract",
                 error.line(),
                 error.column(),
             ))
         })?;
-        let response = self.invoke(request, cancellation).await;
+        let response = match non_string_metadata(&parsed) {
+            Some(strings) => error_message(
+                &RuntimeMessage {
+                    schema_version: RUNTIME_BINDING_VERSION,
+                    contract: RUNTIME_INTERFACE_CONTRACT.to_owned(),
+                    kind: RuntimeMessageKind::Request,
+                    content_type: JSON_CONTENT_TYPE.to_owned(),
+                    metadata: strings,
+                    payload: Value::Null,
+                },
+                refusal(
+                    ErrorCategory::Protocol,
+                    "runtime metadata values must be strings",
+                ),
+            ),
+            None => {
+                let request = serde_json::from_value::<RuntimeMessage>(parsed).map_err(|_| {
+                    EngineError::InvalidInput(ErrorDetail::from(
+                        "request is not valid JSON for the contract",
+                    ))
+                })?;
+                self.invoke(request, cancellation).await
+            }
+        };
         serde_json::to_string(&response).map_err(|_| {
             EngineError::Runtime(ErrorDetail::from("response could not be serialized"))
         })
@@ -145,14 +169,37 @@ where
     fn prepare_request(
         &self,
         message: &RuntimeMessage,
-    ) -> Result<(ExecutionRequest, ExecutionOperation, &'static str), EngineError> {
+        cancellation: CancellationToken,
+    ) -> Result<
+        (
+            ExecutionRequest,
+            ExecutionOperation,
+            &'static str,
+            ExecutionControl,
+        ),
+        ErrorPayload,
+    > {
         validate_envelope(message)?;
-        let operation_id = required_metadata(message, "plenora.capability.operation")?;
-        let (operation, input_contract, output_contract) = operation_contracts(operation_id)?;
-        if required_metadata(message, "plenora.input.contract")? != input_contract {
-            return Err(EngineError::InvalidInput(ErrorDetail::from(
-                "runtime input contract does not match the operation",
-            )));
+        let (operation, output_contract) = validate_routing(message)?;
+        // The metadata deadline is checked for its spelling here, as routing:
+        // a malformed one is a protocol error, not a payload error.
+        let metadata_deadline = message.metadata.get(DEADLINE_KEY);
+        if metadata_deadline.is_some_and(|value| !is_canonical_deadline(value)) {
+            return Err(refusal(
+                ErrorCategory::Protocol,
+                "runtime deadline must be RFC 3339 in UTC with a Z suffix",
+            ));
+        }
+        if let Some(key) = message.metadata.get(IDEMPOTENCY_KEY) {
+            if key.is_empty()
+                || key.len() > 255
+                || !key.bytes().all(|byte| matches!(byte, 0x21..=0x7e))
+            {
+                return Err(refusal(
+                    ErrorCategory::Protocol,
+                    "runtime idempotency key must contain 1 to 255 visible ASCII bytes",
+                ));
+            }
         }
         // A JSON value has no line or column, and serde's message can quote
         // the payload, so only the fact is kept.
@@ -161,130 +208,356 @@ where
                 EngineError::InvalidInput(ErrorDetail::from(
                     "runtime payload does not match the execution request contract",
                 ))
+                .payload()
             })?;
         if execution.options.idempotency_key.is_some() {
             return Err(EngineError::InvalidInput(ErrorDetail::from(
                 "runtime idempotency key must use plenora.execution.idempotency_key metadata",
-            )));
-        }
-        if let Some(key) = message.metadata.get("plenora.execution.idempotency_key") {
-            execution.options.idempotency_key = Some(key.clone());
+            ))
+            .payload());
         }
         if execution.operation != operation {
             return Err(EngineError::InvalidInput(ErrorDetail::from(
                 "runtime selector and payload operation differ",
-            )));
+            ))
+            .payload());
         }
-        Ok((execution, operation, output_contract))
+        // One deadline, from one channel: with both present, neither wins
+        // silently, even when the two values are equal.
+        let deadline = match (metadata_deadline, execution.options.deadline.as_deref()) {
+            (Some(_), Some(_)) => {
+                return Err(refusal(
+                    ErrorCategory::InvalidConfiguration,
+                    "runtime deadline is given both in metadata and in the payload",
+                ));
+            }
+            (Some(metadata), None) => Some(metadata.clone()),
+            (None, payload) => payload.map(str::to_owned),
+        };
+        let control = ExecutionControl::new(cancellation)
+            .with_optional_deadline(deadline.as_deref())
+            .map_err(|error| error.payload())?;
+        if let Some(key) = message.metadata.get(IDEMPOTENCY_KEY) {
+            execution.options.idempotency_key = Some(key.clone());
+        }
+        Ok((execution, operation, output_contract, control))
     }
 }
 
-fn validate_envelope(message: &RuntimeMessage) -> Result<(), EngineError> {
-    if message.schema_version != RUNTIME_BINDING_VERSION {
-        return Err(EngineError::UnsupportedSchema {
-            received: message.schema_version,
-            supported: RUNTIME_BINDING_VERSION,
-        });
+const MESSAGE_ID_KEY: &str = "plenora.message.id";
+const CAUSATION_KEY: &str = "plenora.message.causation_id";
+const CORRELATION_KEY: &str = "plenora.trace.correlation_id";
+const CAPABILITY_NAME_KEY: &str = "plenora.capability.name";
+const CAPABILITY_VERSION_KEY: &str = "plenora.capability.version";
+const OPERATION_KEY: &str = "plenora.capability.operation";
+const OPERATION_VERSION_KEY: &str = "plenora.operation.version";
+const INPUT_CONTRACT_KEY: &str = "plenora.input.contract";
+const OUTPUT_CONTRACT_KEY: &str = "plenora.output.contract";
+const DEADLINE_KEY: &str = "plenora.execution.deadline";
+const IDEMPOTENCY_KEY: &str = "plenora.execution.idempotency_key";
+
+/// Metadata keys Runtime Binding 1.0 reserves. Any other `plenora.*` key is
+/// refused rather than ignored: a misspelled control (`plenora.deadline`,
+/// `plenora.idempotency_key`) would otherwise be lost without a trace.
+const RESERVED_KEYS: [&str; 11] = [
+    MESSAGE_ID_KEY,
+    CAUSATION_KEY,
+    CORRELATION_KEY,
+    CAPABILITY_NAME_KEY,
+    CAPABILITY_VERSION_KEY,
+    OPERATION_KEY,
+    OPERATION_VERSION_KEY,
+    INPUT_CONTRACT_KEY,
+    OUTPUT_CONTRACT_KEY,
+    DEADLINE_KEY,
+    IDEMPOTENCY_KEY,
+];
+
+/// A refusal before invocation: phase `validate`, no remote effect, and
+/// `never` retry, since the same message fails the same way again.
+///
+/// The category follows the rule the four Plenora libraries share pending
+/// ratification in plenora-contracts (R1): `unsupported` for a well-formed
+/// value this component does not advertise, `protocol` for a value that is
+/// absent, malformed or not canonical.
+fn refusal(category: ErrorCategory, message: &'static str) -> ErrorPayload {
+    let code = match category {
+        ErrorCategory::Unsupported => "RUNTIME_UNSUPPORTED",
+        ErrorCategory::Protocol => "RUNTIME_PROTOCOL_VIOLATION",
+        _ => "INVALID_INPUT",
+    };
+    ErrorPayload {
+        category,
+        phase: ErrorPhase::Validate,
+        remote_effect: RemoteEffect::None,
+        retry: RetryAdvice::NEVER,
+        code: code.to_owned(),
+        message: message.to_owned(),
+        details: BTreeMap::new(),
     }
-    if message.contract != RUNTIME_INTERFACE_CONTRACT && message.contract != RUNTIME_VECTOR_CONTRACT
-    {
-        return Err(EngineError::InvalidInput(ErrorDetail::from(
-            "runtime envelope contract is unsupported",
-        )));
-    }
-    if message.kind != RuntimeMessageKind::Request {
-        return Err(EngineError::InvalidInput(ErrorDetail::from(
-            "runtime invocation requires a request envelope",
-        )));
-    }
-    if message.content_type != JSON_CONTENT_TYPE || !message.payload.is_object() {
-        return Err(EngineError::InvalidInput(ErrorDetail::from(
-            "runtime request payload must be a JSON object",
-        )));
-    }
-    validate_uuid_metadata(message, "plenora.message.id")?;
-    validate_uuid_metadata(message, "plenora.trace.correlation_id")?;
-    if message
-        .metadata
-        .contains_key("plenora.message.causation_id")
-    {
-        validate_uuid_metadata(message, "plenora.message.causation_id")?;
-    }
-    if required_metadata(message, "plenora.capability.name")? != CAPABILITY_NAME {
-        return Err(EngineError::InvalidInput(ErrorDetail::from(
-            "runtime capability name is not plenora.rest-tools",
-        )));
-    }
-    if required_metadata(message, "plenora.capability.version")?
-        != RUNTIME_BINDING_VERSION.to_string()
-    {
-        return Err(EngineError::InvalidInput(ErrorDetail::from(
-            "runtime capability version is unsupported",
-        )));
-    }
-    if required_metadata(message, "plenora.operation.version")? != "1" {
-        return Err(EngineError::InvalidInput(ErrorDetail::from(
-            "runtime operation version is unsupported",
-        )));
-    }
-    Ok(())
 }
 
-fn required_metadata<'a>(message: &'a RuntimeMessage, key: &str) -> Result<&'a str, EngineError> {
-    message
-        .metadata
-        .get(key)
-        .map(String::as_str)
-        .ok_or_else(|| {
-            EngineError::InvalidInput(ErrorDetail::from("runtime metadata lacks a required key"))
+/// The string-valued metadata of an envelope that also carries other
+/// values, or `None` when every metadata value is a string (or there is no
+/// metadata object to judge).
+fn non_string_metadata(envelope: &Value) -> Option<BTreeMap<String, String>> {
+    let metadata = envelope.get("metadata")?.as_object()?;
+    if metadata.values().all(Value::is_string) {
+        return None;
+    }
+    Some(
+        metadata
+            .iter()
+            .filter_map(|(key, value)| value.as_str().map(|text| (key.clone(), text.to_owned())))
+            .collect(),
+    )
+}
+
+fn is_canonical_uuid(value: &str) -> bool {
+    Uuid::parse_str(value).is_ok_and(|parsed| parsed.hyphenated().to_string() == value)
+}
+
+/// `^[1-9][0-9]*$`, the version grammar of the runtime vectors.
+fn is_canonical_version(value: &str) -> bool {
+    let mut bytes = value.bytes();
+    bytes
+        .next()
+        .is_some_and(|first| matches!(first, b'1'..=b'9'))
+        && bytes.all(|byte| byte.is_ascii_digit())
+}
+
+/// `^[a-z][a-z0-9_-]*(\.[a-z][a-z0-9_-]*)+$`, the operation grammar.
+fn is_canonical_operation(value: &str) -> bool {
+    let mut segments = value.split('.');
+    let mut count = 0_usize;
+    let all = segments.all(|segment| {
+        count += 1;
+        let mut bytes = segment.bytes();
+        bytes.next().is_some_and(|first| first.is_ascii_lowercase())
+            && bytes.all(|byte| {
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-')
+            })
+    });
+    all && count >= 2
+}
+
+/// `^plenora-[a-z0-9-]+-v[1-9][0-9]*$`, the contract identifier grammar.
+fn is_canonical_contract(value: &str) -> bool {
+    let Some(rest) = value.strip_prefix("plenora-") else {
+        return false;
+    };
+    let Some((name, version)) = rest.rsplit_once("-v") else {
+        return false;
+    };
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        && is_canonical_version(version)
+}
+
+/// `^plenora\.[a-z][a-z0-9-]*-tools$`, the capability name grammar.
+fn is_canonical_capability_name(value: &str) -> bool {
+    value
+        .strip_prefix("plenora.")
+        .and_then(|rest| rest.strip_suffix("-tools"))
+        .is_some_and(|stem| {
+            let mut bytes = stem.bytes();
+            bytes.next().is_some_and(|first| first.is_ascii_lowercase())
+                && bytes
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
         })
 }
 
-fn validate_uuid_metadata(message: &RuntimeMessage, key: &str) -> Result<(), EngineError> {
-    let value = required_metadata(message, key)?;
-    let parsed = Uuid::parse_str(value).map_err(|_| {
-        EngineError::InvalidInput(ErrorDetail::from("runtime metadata UUID is not canonical"))
-    })?;
-    if parsed.hyphenated().to_string() != value {
-        return Err(EngineError::InvalidInput(ErrorDetail::from(
-            "runtime metadata UUID must be lowercase and hyphenated",
-        )));
+/// A routing value: absent or malformed is `protocol`, well-formed but not
+/// the one this component advertises is `unsupported` (R1).
+fn route<'a>(
+    message: &'a RuntimeMessage,
+    key: &str,
+    well_formed: fn(&str) -> bool,
+    malformed: &'static str,
+) -> Result<&'a str, ErrorPayload> {
+    match message.metadata.get(key) {
+        Some(value) if well_formed(value) => Ok(value),
+        _ => Err(refusal(ErrorCategory::Protocol, malformed)),
+    }
+}
+
+fn validate_envelope(message: &RuntimeMessage) -> Result<(), ErrorPayload> {
+    if message.schema_version != RUNTIME_BINDING_VERSION {
+        return Err(refusal(
+            ErrorCategory::Unsupported,
+            "runtime envelope schema version is unsupported",
+        ));
+    }
+    if message.contract != RUNTIME_INTERFACE_CONTRACT && message.contract != RUNTIME_VECTOR_CONTRACT
+    {
+        return Err(refusal(
+            if is_canonical_contract(&message.contract) {
+                ErrorCategory::Unsupported
+            } else {
+                ErrorCategory::Protocol
+            },
+            "runtime envelope contract is unsupported",
+        ));
+    }
+    if message.kind != RuntimeMessageKind::Request {
+        return Err(refusal(
+            ErrorCategory::Protocol,
+            "runtime invocation requires a request envelope",
+        ));
+    }
+    if message.content_type != JSON_CONTENT_TYPE {
+        let well_formed = message
+            .content_type
+            .split_once('/')
+            .is_some_and(|(kind, subtype)| !kind.is_empty() && !subtype.is_empty());
+        return Err(refusal(
+            if well_formed {
+                ErrorCategory::Unsupported
+            } else {
+                ErrorCategory::Protocol
+            },
+            "runtime request content type is not advertised",
+        ));
+    }
+    if !message.payload.is_object() {
+        return Err(refusal(
+            ErrorCategory::Protocol,
+            "runtime request payload must be a JSON object",
+        ));
+    }
+    for key in [MESSAGE_ID_KEY, CORRELATION_KEY] {
+        if !message
+            .metadata
+            .get(key)
+            .is_some_and(|value| is_canonical_uuid(value))
+        {
+            return Err(refusal(
+                ErrorCategory::Protocol,
+                "runtime identity metadata must be a canonical UUID",
+            ));
+        }
+    }
+    if message
+        .metadata
+        .get(CAUSATION_KEY)
+        .is_some_and(|value| !is_canonical_uuid(value))
+    {
+        return Err(refusal(
+            ErrorCategory::Protocol,
+            "runtime causation metadata must be a canonical UUID",
+        ));
+    }
+    if message
+        .metadata
+        .keys()
+        .any(|key| key.starts_with("plenora.") && !RESERVED_KEYS.contains(&key.as_str()))
+    {
+        return Err(refusal(
+            ErrorCategory::Protocol,
+            "runtime metadata contains a plenora key that the binding does not reserve",
+        ));
     }
     Ok(())
 }
 
-fn operation_contracts(
-    id: &str,
-) -> Result<(ExecutionOperation, &'static str, &'static str), EngineError> {
+/// Capability, versions, operation and input contract, in that order.
+fn validate_routing(
+    message: &RuntimeMessage,
+) -> Result<(ExecutionOperation, &'static str), ErrorPayload> {
+    let name = route(
+        message,
+        CAPABILITY_NAME_KEY,
+        is_canonical_capability_name,
+        "runtime capability name is missing or malformed",
+    )?;
+    if name != CAPABILITY_NAME {
+        return Err(refusal(
+            ErrorCategory::Unsupported,
+            "runtime capability name is not plenora.rest-tools",
+        ));
+    }
+    let version = route(
+        message,
+        CAPABILITY_VERSION_KEY,
+        is_canonical_version,
+        "runtime capability version is missing or not canonical",
+    )?;
+    if version != RUNTIME_BINDING_VERSION.to_string() {
+        return Err(refusal(
+            ErrorCategory::Unsupported,
+            "runtime capability version is unsupported",
+        ));
+    }
+    let operation_id = route(
+        message,
+        OPERATION_KEY,
+        is_canonical_operation,
+        "runtime operation is missing or malformed",
+    )?;
+    let operation_version = route(
+        message,
+        OPERATION_VERSION_KEY,
+        is_canonical_version,
+        "runtime operation version is missing or not canonical",
+    )?;
+    let (operation, input_contract, output_contract) = operation_contracts(operation_id)
+        .ok_or_else(|| {
+            refusal(
+                ErrorCategory::Unsupported,
+                "runtime operation is not advertised",
+            )
+        })?;
+    if operation_version != "1" {
+        return Err(refusal(
+            ErrorCategory::Unsupported,
+            "runtime operation version is not advertised",
+        ));
+    }
+    let requested_contract = route(
+        message,
+        INPUT_CONTRACT_KEY,
+        is_canonical_contract,
+        "runtime input contract is missing or malformed",
+    )?;
+    if requested_contract != input_contract {
+        return Err(refusal(
+            ErrorCategory::Unsupported,
+            "runtime input contract does not match the operation",
+        ));
+    }
+    Ok((operation, output_contract))
+}
+
+fn operation_contracts(id: &str) -> Option<(ExecutionOperation, &'static str, &'static str)> {
     match id {
-        REST_TEST => Ok((
+        REST_TEST => Some((
             ExecutionOperation::Test,
             EXECUTION_REQUEST_CONTRACT,
             EXECUTION_RESULT_CONTRACT,
         )),
-        REST_GENERATE => Ok((
+        REST_GENERATE => Some((
             ExecutionOperation::Generate,
             EXECUTION_REQUEST_CONTRACT,
             EXECUTION_RESULT_CONTRACT,
         )),
-        REST_ENRICH => Ok((
+        REST_ENRICH => Some((
             ExecutionOperation::Enrich,
             EXECUTION_REQUEST_CONTRACT,
             EXECUTION_RESULT_CONTRACT,
         )),
-        REST_DOWNLOAD => Ok((
+        REST_DOWNLOAD => Some((
             ExecutionOperation::Download,
             FILE_TRANSFER_INPUT_CONTRACT,
             FILE_TRANSFER_RESULT_CONTRACT,
         )),
-        REST_UPLOAD => Ok((
+        REST_UPLOAD => Some((
             ExecutionOperation::Upload,
             FILE_TRANSFER_INPUT_CONTRACT,
             FILE_TRANSFER_RESULT_CONTRACT,
         )),
-        _ => Err(EngineError::InvalidInput(ErrorDetail::from(
-            "runtime operation is unknown",
-        ))),
+        _ => None,
     }
 }
 
@@ -540,39 +813,51 @@ fn error_message(request: &RuntimeMessage, error: ErrorPayload) -> RuntimeMessag
     }
 }
 
+/// Metadata of a response, success or error.
+///
+/// The message identity is always new. The causation is the request's message
+/// identity, and correlation, operation and operation version are the
+/// request's, each copied byte for byte only when it is canonical: a value
+/// that is absent or not canonical is left out, never normalized, never
+/// invented (R2), so a refusal never puts an invalid value under a reserved
+/// key.
 fn response_metadata(request: &RuntimeMessage, output_contract: &str) -> BTreeMap<String, String> {
     let mut metadata = BTreeMap::from([
-        ("plenora.message.id".to_owned(), Uuid::new_v4().to_string()),
-        (
-            "plenora.trace.correlation_id".to_owned(),
-            request
-                .metadata
-                .get("plenora.trace.correlation_id")
-                .cloned()
-                .unwrap_or_else(|| Uuid::new_v4().to_string()),
-        ),
-        (
-            "plenora.operation.version".to_owned(),
-            request
-                .metadata
-                .get("plenora.operation.version")
-                .cloned()
-                .unwrap_or_else(|| "1".to_owned()),
-        ),
-        (
-            "plenora.output.contract".to_owned(),
-            output_contract.to_owned(),
-        ),
+        (MESSAGE_ID_KEY.to_owned(), Uuid::new_v4().to_string()),
+        (OUTPUT_CONTRACT_KEY.to_owned(), output_contract.to_owned()),
     ]);
-    if let Some(operation) = request.metadata.get("plenora.capability.operation") {
-        metadata.insert("plenora.capability.operation".to_owned(), operation.clone());
-    }
-    if let Some(message_id) = request.metadata.get("plenora.message.id") {
-        metadata.insert(
-            "plenora.message.causation_id".to_owned(),
-            message_id.clone(),
-        );
-    }
+    let copy = |metadata: &mut BTreeMap<String, String>,
+                from: &str,
+                to: &str,
+                canonical: fn(&str) -> bool| {
+        if let Some(value) = request.metadata.get(from).filter(|value| canonical(value)) {
+            metadata.insert(to.to_owned(), value.clone());
+        }
+    };
+    copy(
+        &mut metadata,
+        CORRELATION_KEY,
+        CORRELATION_KEY,
+        is_canonical_uuid,
+    );
+    copy(
+        &mut metadata,
+        MESSAGE_ID_KEY,
+        CAUSATION_KEY,
+        is_canonical_uuid,
+    );
+    copy(
+        &mut metadata,
+        OPERATION_KEY,
+        OPERATION_KEY,
+        is_canonical_operation,
+    );
+    copy(
+        &mut metadata,
+        OPERATION_VERSION_KEY,
+        OPERATION_VERSION_KEY,
+        is_canonical_version,
+    );
     metadata
 }
 

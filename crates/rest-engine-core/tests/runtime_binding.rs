@@ -424,7 +424,9 @@ async fn runtime_propagates_cancellation_and_engine_lifecycle() {
         .invoke(expired_request, CancellationToken::new())
         .await;
     assert_eq!(expired.kind, RuntimeMessageKind::Error);
-    assert_eq!(expired.payload["code"], "TIMEOUT");
+    assert_eq!(expired.payload["code"], "DEADLINE_EXPIRED");
+    assert_eq!(expired.payload["phase"], "validate");
+    assert_eq!(expired.payload["remote_effect"], "none");
 
     engine.close();
     let closed = binding
@@ -559,4 +561,316 @@ async fn runtime_requests_carry_cookie_session_handles_opened_by_the_host() {
     let response = invoke_serialized(&binding, malformed, CancellationToken::new()).await;
     assert_eq!(response.kind, RuntimeMessageKind::Error);
     assert_eq!(response.payload["code"], "INVALID_INPUT");
+}
+
+/// Resources that must never be asked anything: every probe below is refused
+/// before invocation.
+struct UntouchedResources(std::sync::Mutex<usize>);
+
+impl RuntimeResources for UntouchedResources {
+    fn resolve_credentials(&self, _reference: &str) -> Result<AuthConfig, EngineError> {
+        *self.0.lock().unwrap() += 1;
+        Ok(AuthConfig::None)
+    }
+
+    fn resolve_artifact_source(&self, _reference: &str) -> Result<PathBuf, EngineError> {
+        *self.0.lock().unwrap() += 1;
+        Err(EngineError::InvalidInput("unexpected".into()))
+    }
+
+    fn resolve_artifact_sink(&self, _reference: &str) -> Result<PathBuf, EngineError> {
+        *self.0.lock().unwrap() += 1;
+        Err(EngineError::InvalidInput("unexpected".into()))
+    }
+}
+
+/// Invokes `request` with a credential reference, so a request that got as
+/// far as resource resolution would be counted.
+async fn refused(request: RuntimeMessage) -> RuntimeMessage {
+    let engine = local_engine();
+    let resources = UntouchedResources(std::sync::Mutex::new(0));
+    let binding = RuntimeBinding::new(&engine, &resources);
+    let response = invoke_serialized(&binding, request, CancellationToken::new()).await;
+    assert_eq!(
+        *resources.0.lock().unwrap(),
+        0,
+        "a resource was resolved: {:?}",
+        response.payload
+    );
+    response
+}
+
+fn with_credential(mut request: RuntimeMessage) -> RuntimeMessage {
+    request.payload["connection"]["credential_ref"] = json!("secret://rest/vector");
+    request
+}
+
+fn assert_refusal(response: &RuntimeMessage, category: &str, label: &str) {
+    assert_eq!(response.kind, RuntimeMessageKind::Error, "{label}");
+    assert_eq!(
+        response.content_type, "application/vnd.plenora.error+json",
+        "{label}"
+    );
+    assert_eq!(
+        response.metadata["plenora.output.contract"], "plenora-error-v1",
+        "{label}"
+    );
+    assert_eq!(
+        response.payload["category"], category,
+        "{label}: {:?}",
+        response.payload
+    );
+    assert_eq!(response.payload["phase"], "validate", "{label}");
+    assert_eq!(response.payload["remote_effect"], "none", "{label}");
+    assert_eq!(
+        response.payload["retry"],
+        json!({"kind": "never"}),
+        "{label}"
+    );
+}
+
+#[tokio::test]
+async fn routing_refusals_follow_the_shared_matrix() {
+    // (key, value or None for absent, expected category)
+    let cases: [(&str, Option<&str>, &str); 17] = [
+        (
+            "plenora.capability.name",
+            Some("plenora.storage-tools"),
+            "unsupported",
+        ),
+        ("plenora.capability.name", Some("Plenora.REST"), "protocol"),
+        ("plenora.capability.name", None, "protocol"),
+        ("plenora.capability.version", Some("2"), "unsupported"),
+        ("plenora.capability.version", Some("01"), "protocol"),
+        ("plenora.capability.version", None, "protocol"),
+        (
+            "plenora.capability.operation",
+            Some("rest.delete"),
+            "unsupported",
+        ),
+        (
+            "plenora.capability.operation",
+            Some("REST.test"),
+            "protocol",
+        ),
+        ("plenora.capability.operation", None, "protocol"),
+        ("plenora.operation.version", Some("2"), "unsupported"),
+        ("plenora.operation.version", Some("01"), "protocol"),
+        ("plenora.operation.version", Some("+1"), "protocol"),
+        ("plenora.operation.version", Some(" 1"), "protocol"),
+        ("plenora.operation.version", Some("uno"), "protocol"),
+        (
+            "plenora.input.contract",
+            Some("plenora-rest-file-transfer-input-v1"),
+            "unsupported",
+        ),
+        ("plenora.input.contract", Some("rest input"), "protocol"),
+        ("plenora.input.contract", None, "protocol"),
+    ];
+    for (key, value, category) in cases {
+        let mut request = with_credential(runtime_request("http://127.0.0.1:9/"));
+        match value {
+            Some(value) => request.metadata.insert(key.to_owned(), value.to_owned()),
+            None => request.metadata.remove(key),
+        };
+        let label = format!("{key}={value:?}");
+        let response = refused(request).await;
+        assert_refusal(&response, category, &label);
+        // R2: a routing value is reflected only when canonical, byte for byte.
+        let version = response.metadata.get("plenora.operation.version");
+        match (key, value) {
+            ("plenora.operation.version", Some("2")) => {
+                assert_eq!(version.map(String::as_str), Some("2"), "{label}");
+            }
+            ("plenora.operation.version", _) => assert_eq!(version, None, "{label}"),
+            _ => assert_eq!(version.map(String::as_str), Some("1"), "{label}"),
+        }
+        let operation = response.metadata.get("plenora.capability.operation");
+        match (key, value) {
+            ("plenora.capability.operation", Some("rest.delete")) => {
+                assert_eq!(
+                    operation.map(String::as_str),
+                    Some("rest.delete"),
+                    "{label}"
+                );
+            }
+            ("plenora.capability.operation", _) => assert_eq!(operation, None, "{label}"),
+            _ => assert_eq!(operation.map(String::as_str), Some("rest.test"), "{label}"),
+        }
+        assert_eq!(
+            response.metadata["plenora.trace.correlation_id"], CORRELATION_ID,
+            "{label}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn non_canonical_identities_are_refused_and_never_reflected() {
+    // MESSAGE_ID has no letters, so its uppercase form would be identical.
+    let upper = "AAAAAAAA-1111-4111-8111-111111111111".to_owned();
+    let cases = [
+        ("plenora.message.id", Some(upper.as_str())),
+        ("plenora.message.id", None),
+        (
+            "plenora.trace.correlation_id",
+            Some("{22222222-2222-4222-8222-222222222222}"),
+        ),
+        ("plenora.trace.correlation_id", None),
+        ("plenora.message.causation_id", Some("not-a-uuid")),
+        // A misspelled reserved key is not an alias, and is not ignored.
+        ("plenora.correlation_id", Some(CORRELATION_ID)),
+        ("plenora.deadline", Some("2099-01-01T00:00:00Z")),
+        ("plenora.idempotency_key", Some("key-1")),
+    ];
+    for (key, value) in cases {
+        let mut request = with_credential(runtime_request("http://127.0.0.1:9/"));
+        match value {
+            Some(value) => request.metadata.insert(key.to_owned(), value.to_owned()),
+            None => request.metadata.remove(key),
+        };
+        let label = format!("{key}={value:?}");
+        let response = refused(request.clone()).await;
+        assert_refusal(&response, "protocol", &label);
+        // The result has its own identity; nothing non canonical is copied.
+        let id = response.metadata["plenora.message.id"].clone();
+        assert_ne!(
+            Some(&id),
+            request.metadata.get("plenora.message.id"),
+            "{label}"
+        );
+        assert_eq!(
+            uuid::Uuid::parse_str(&id).unwrap().hyphenated().to_string(),
+            id
+        );
+        let causation = response.metadata.get("plenora.message.causation_id");
+        let correlation = response.metadata.get("plenora.trace.correlation_id");
+        if key == "plenora.message.id" {
+            assert_eq!(causation, None, "{label}");
+        } else {
+            assert_eq!(causation.map(String::as_str), Some(MESSAGE_ID), "{label}");
+        }
+        if key == "plenora.trace.correlation_id" {
+            assert_eq!(correlation, None, "{label}");
+        } else {
+            assert_eq!(
+                correlation.map(String::as_str),
+                Some(CORRELATION_ID),
+                "{label}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn deadline_refusals_follow_the_shared_matrix() {
+    let deadline = "plenora.execution.deadline";
+    for malformed in [
+        "2099-01-01T02:00:00+02:00",
+        "2099-01-01T00:00:00+00:00",
+        "2099-01-01T00:00:00-00:00",
+        "2099-01-01t00:00:00z",
+        "2099-01-01T00:00:60Z",
+        "2099-01-01T00:00:00.1234567890Z",
+    ] {
+        let mut request = with_credential(runtime_request("http://127.0.0.1:9/"));
+        request
+            .metadata
+            .insert(deadline.to_owned(), malformed.to_owned());
+        assert_refusal(&refused(request).await, "protocol", malformed);
+    }
+
+    // Already expired, in either channel: timeout before any resource.
+    let mut in_metadata = with_credential(runtime_request("http://127.0.0.1:9/"));
+    in_metadata
+        .metadata
+        .insert(deadline.to_owned(), "2000-01-01T00:00:00Z".to_owned());
+    let mut in_payload = with_credential(runtime_request("http://127.0.0.1:9/"));
+    in_payload.payload["options"] = json!({"deadline": "2000-01-01T00:00:00Z"});
+    for (label, request) in [("metadata", in_metadata), ("payload", in_payload)] {
+        let response = refused(request).await;
+        assert_refusal(&response, "timeout", label);
+        assert_eq!(response.payload["code"], "DEADLINE_EXPIRED", "{label}");
+    }
+
+    // Both channels, even with the same value: refused, neither wins.
+    let mut both = with_credential(runtime_request("http://127.0.0.1:9/"));
+    both.metadata
+        .insert(deadline.to_owned(), "2099-01-01T00:00:00Z".to_owned());
+    both.payload["options"] = json!({"deadline": "2099-01-01T00:00:00Z"});
+    assert_refusal(&refused(both).await, "invalid_configuration", "both");
+}
+
+#[tokio::test]
+async fn idempotency_key_refusals_follow_the_shared_matrix() {
+    let key = "plenora.execution.idempotency_key";
+    for (label, value) in [("empty", ""), ("space", "a b"), ("long", &"k".repeat(256))] {
+        let mut request = with_credential(runtime_request("http://127.0.0.1:9/"));
+        request.metadata.insert(key.to_owned(), value.to_owned());
+        assert_refusal(&refused(request).await, "protocol", label);
+    }
+
+    // A JSON null is neither absent nor a key: protocol, through the
+    // serialized transport where it can occur.
+    let engine = local_engine();
+    let resources = UntouchedResources(std::sync::Mutex::new(0));
+    let binding = RuntimeBinding::new(&engine, &resources);
+    let mut envelope =
+        serde_json::to_value(with_credential(runtime_request("http://127.0.0.1:9/"))).unwrap();
+    envelope["metadata"][key] = Value::Null;
+    let response: RuntimeMessage = serde_json::from_str(
+        &binding
+            .invoke_json(&envelope.to_string(), CancellationToken::new())
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(*resources.0.lock().unwrap(), 0);
+    assert_refusal(&response, "protocol", "null");
+    assert_eq!(
+        response.metadata["plenora.trace.correlation_id"],
+        CORRELATION_ID
+    );
+}
+
+#[tokio::test]
+async fn a_success_has_a_new_identity_caused_by_the_request() {
+    let (url, server) = {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 2048];
+            let _ = stream.read(&mut request).await.unwrap();
+            let body = br#"{"ok":true}"#;
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(head.as_bytes()).await.unwrap();
+            stream.write_all(body).await.unwrap();
+            stream.shutdown().await.unwrap();
+        });
+        (format!("http://{address}/"), server)
+    };
+    let engine = local_engine();
+    let resources = EmptyResources;
+    let binding = RuntimeBinding::new(&engine, &resources);
+    let response =
+        invoke_serialized(&binding, runtime_request(&url), CancellationToken::new()).await;
+    server.await.unwrap();
+    assert_eq!(response.kind, RuntimeMessageKind::Success);
+    assert_ne!(response.metadata["plenora.message.id"], MESSAGE_ID);
+    assert_eq!(
+        response.metadata["plenora.message.causation_id"],
+        MESSAGE_ID
+    );
+    assert_eq!(
+        response.metadata["plenora.trace.correlation_id"],
+        CORRELATION_ID
+    );
+    assert_eq!(response.metadata["plenora.operation.version"], "1");
+    assert_eq!(
+        response.metadata["plenora.capability.operation"],
+        "rest.test"
+    );
 }

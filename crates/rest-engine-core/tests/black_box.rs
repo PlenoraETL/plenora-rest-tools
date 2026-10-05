@@ -4570,3 +4570,103 @@ async fn a_stale_session_is_refused_before_the_idempotency_key_is_recorded() {
     server.await.unwrap();
     assert_eq!(retried["status"], "success", "{retried}");
 }
+
+#[tokio::test]
+async fn a_download_that_cannot_be_written_after_a_post_reports_an_unknown_remote_effect() {
+    // The POST reaches the server, which also creates the destination before
+    // answering: publishing the download then fails locally. The POST may
+    // have changed something remotely, so the failure cannot say `none`.
+    let directory = transfer_directory("post-download-write");
+    let target = directory.join("export.bin");
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/export", listener.local_addr().unwrap());
+    let server = {
+        let target = target.clone();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request = read_request(&mut stream).await;
+            fs::write(&target, b"someone else").await.unwrap();
+            let body = b"payload";
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(head.as_bytes()).await.unwrap();
+            stream.write_all(body).await.unwrap();
+            stream.shutdown().await.unwrap();
+            request
+        })
+    };
+    let result = execute(
+        &transfer_engine(&directory, 1024, 1024),
+        json!({
+            "schema_version": 1,
+            "operation": "download",
+            "connection": {"url": url, "method": "POST"},
+            "input": {"file": {"path": "export.bin"}}
+        }),
+    )
+    .await;
+    assert!(server.await.unwrap().starts_with("POST /export "));
+    let error = &result["errors"][0];
+    assert_eq!(result["status"], "failed", "{result}");
+    assert_eq!(error["code"], "DOWNLOAD_WRITE_FAILED", "{result}");
+    assert_eq!(error["category"], "io");
+    assert_eq!(error["phase"], "write");
+    assert_eq!(error["remote_effect"], "unknown");
+    assert_eq!(error["retry"]["kind"], "requires_recovery");
+    // The other writer's file is left alone and no staging file remains.
+    assert_eq!(fs::read(&target).await.unwrap(), b"someone else");
+    assert_no_partial_files(&directory).await;
+    fs::remove_dir_all(directory).await.unwrap();
+}
+
+#[tokio::test]
+async fn an_expired_deadline_is_refused_before_anything_runs() {
+    let request: ExecutionRequest = serde_json::from_value(json!({
+        "schema_version": 1,
+        "operation": "test",
+        "connection": {"url": "http://127.0.0.1:9/", "method": "GET"},
+        "options": {"deadline": "2000-01-01T00:00:00Z"}
+    }))
+    .unwrap();
+    let result = serde_json::to_value(local_engine().execute(request).await).unwrap();
+    let error = &result["errors"][0];
+    assert_eq!(error["code"], "DEADLINE_EXPIRED", "{result}");
+    assert_eq!(error["category"], "timeout");
+    assert_eq!(error["phase"], "validate");
+    assert_eq!(error["remote_effect"], "none");
+    assert_eq!(error["retry"]["kind"], "never");
+    assert_eq!(result["metrics"]["requests"], 0);
+}
+
+#[test]
+fn a_deadline_must_be_utc_with_a_z_suffix() {
+    for accepted in [
+        "2099-01-01T00:00:00Z",
+        "2099-01-01T00:00:00.5Z",
+        "2099-01-01T00:00:00.123456789Z",
+    ] {
+        assert!(
+            ExecutionControl::default().with_deadline(accepted).is_ok(),
+            "{accepted}"
+        );
+    }
+    for refused in [
+        "2099-01-01T02:00:00+02:00",
+        "2099-01-01T00:00:00+00:00",
+        "2099-01-01T00:00:00-00:00",
+        "2099-01-01t00:00:00z",
+        "2099-01-01 00:00:00Z",
+        "2099-01-01T00:00:60Z",
+        "2099-01-01T00:00:00.1234567890Z",
+        "2099-01-01T00:00:00.Z",
+        "2099-13-01T00:00:00Z",
+        "2099-01-01",
+    ] {
+        let error = ExecutionControl::default()
+            .with_deadline(refused)
+            .unwrap_err();
+        assert_eq!(error.payload().code, "INVALID_INPUT", "{refused}");
+    }
+}

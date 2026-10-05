@@ -559,9 +559,19 @@ async fn upload_request_fixture_fails_closed_on_every_routing_mutation() {
         assert_eq!(response.payload["phase"], "validate", "{label}");
         assert_eq!(response.payload["remote_effect"], "none", "{label}");
         assert_eq!(response.payload["retry"]["kind"], "never", "{label}");
-        assert!(
-            ["INVALID_INPUT", "UNSUPPORTED_SCHEMA"]
-                .contains(&response.payload["code"].as_str().unwrap()),
+        // R1 of the shared runtime matrix: absent is `protocol`, a
+        // well-formed value this component does not advertise is
+        // `unsupported`; a payload that does not fit the routed operation is
+        // a payload error.
+        let expected = if label.starts_with("missing") {
+            "protocol"
+        } else if label.starts_with("upload payload") {
+            "invalid_configuration"
+        } else {
+            "unsupported"
+        };
+        assert_eq!(
+            response.payload["category"], expected,
             "{label}: {:?}",
             response.payload
         );

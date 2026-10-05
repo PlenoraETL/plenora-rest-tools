@@ -84,6 +84,44 @@ del contratto delle richieste, raccolte in un'unica rottura.
   contro lo schema runtime-vector-v1 e il manifesto di adozione contro lo
   schema v4 e le regole incrociate di ADOPTION.md.
 
+### Binding runtime allineato alla matrice comune (incompatibile)
+
+Le quattro librerie con superficie runtime rispondono ora allo stesso modo agli
+stessi casi. Le regole marcate (P) seguono le proposte comuni in attesa di
+ratifica in plenora-contracts.
+
+- Rifiuti prima dell'invocazione: fase validate, remote_effect none, retry
+  never (P). Categoria (P, R1): `unsupported` per un valore ben formato ma non
+  annunciato (capability, versione del binding, operazione, versione
+  dell'operazione, input contract, content type), `protocol` per un valore
+  assente, malformato o non canonico; codici RUNTIME_UNSUPPORTED e
+  RUNTIME_PROTOCOL_VIOLATION. Prima tutti erano INVALID_INPUT,
+  invalid_configuration.
+- Identità non canoniche (UUID maiuscoli, tra graffe, assenti), chiavi
+  `plenora.*` non riservate dal binding (es. `plenora.deadline`) e valori di
+  metadato non stringa (un `null` come idempotency key) sono `protocol`.
+- Metadati del risultato (P, R2): `plenora.message.id` sempre nuovo;
+  `plenora.message.causation_id` è il message id della richiesta;
+  correlazione, operazione e versione dell'operazione sono copiate byte per
+  byte solo se canoniche, altrimenti omesse. Prima un id non canonico veniva
+  riflesso (anche come causazione), una correlazione assente sostituita con
+  una nuova e una versione assente scritta come "1".
+- Deadline: solo RFC 3339 UTC con `Z` (anche per ExecutionControl e
+  `options.deadline`); offset, `+00:00`, minuscole, secondi intercalari e più
+  di 9 decimali sono rifiutati. Una deadline già scaduta è DEADLINE_EXPIRED
+  (timeout, validate, none, never) prima di risolvere credenziali o artefatti;
+  prima era TIMEOUT (read, unknown, quarantine) e arrivava dopo la
+  risoluzione. Sul runtime una deadline nel payload ora vale; nei metadati e
+  nel payload insieme è rifiutata (invalid_configuration).
+- Idempotency key vuota, oltre 255 byte o con caratteri non visibili:
+  `protocol` prima dell'invocazione.
+- Download: un errore di scrittura locale dopo l'invio della richiesta è
+  DOWNLOAD_WRITE_FAILED (io, write, unknown, requires_recovery), perché la
+  richiesta può aver avuto effetto remoto (un download può usare POST); prima
+  FILE_IO con remote_effect none. Se la pubblicazione nel sink è avvenuta e
+  fallisce solo la rimozione del file di staging: CLEANUP_AFTER_PUBLISH_FAILED
+  (io, cleanup, committed, never).
+
 ### API Rust (incompatibile)
 
 - EngineError non contiene più testo di terzi: i campi testuali delle varianti

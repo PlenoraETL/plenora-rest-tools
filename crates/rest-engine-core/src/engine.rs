@@ -154,11 +154,11 @@ impl Engine {
         if let Err(error) = self.admit_idempotency(&request) {
             return failed_result(error);
         }
-        if control
-            .deadline
-            .is_some_and(|deadline| deadline <= Instant::now())
-        {
-            return failed_result(EngineError::Timeout);
+        // An expired deadline refuses the operation before anything runs:
+        // nothing was sent, so the failure is in validation with no remote
+        // effect, unlike a deadline that fires during the execution.
+        if control.deadline_expired() {
+            return failed_result(EngineError::DeadlineExpired);
         }
         let active_jobs = Arc::new(Mutex::new(BTreeMap::new()));
         let deadline = control.deadline.map(tokio::time::Instant::from_std);
