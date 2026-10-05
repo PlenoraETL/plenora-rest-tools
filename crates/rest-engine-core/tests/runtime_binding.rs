@@ -560,3 +560,42 @@ async fn runtime_requests_carry_cookie_session_handles_opened_by_the_host() {
     assert_eq!(response.kind, RuntimeMessageKind::Error);
     assert_eq!(response.payload["code"], "INVALID_INPUT");
 }
+
+#[tokio::test]
+async fn runtime_honours_the_deadline_carried_in_the_payload() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut buffer = [0_u8; 2048];
+        while stream.read(&mut buffer).await.unwrap_or(0) > 0 {}
+    });
+    let soon = SystemTime::now() + Duration::from_millis(300);
+    let seconds = soon.duration_since(UNIX_EPOCH).unwrap().as_secs() + 1;
+    let at = time::OffsetDateTime::from_unix_timestamp(i64::try_from(seconds).unwrap()).unwrap();
+    let rfc3339 = format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        at.year(),
+        u8::from(at.month()),
+        at.day(),
+        at.hour(),
+        at.minute(),
+        at.second()
+    );
+    let engine = local_engine();
+    let resources = EmptyResources;
+    let binding = RuntimeBinding::new(&engine, &resources);
+    let mut request = runtime_request(&format!("http://{address}/"));
+    request.payload["options"] = json!({"deadline": rfc3339});
+    let started = std::time::Instant::now();
+    let response = tokio::time::timeout(
+        Duration::from_secs(10),
+        binding.invoke(request, CancellationToken::new()),
+    )
+    .await
+    .expect("the payload deadline ends the call");
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert_eq!(response.kind, RuntimeMessageKind::Error);
+    assert_eq!(response.payload["code"], "TIMEOUT");
+    server.abort();
+}

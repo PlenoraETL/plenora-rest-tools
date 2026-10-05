@@ -56,6 +56,27 @@ impl ExecutionControl {
     }
 }
 
+impl ExecutionControl {
+    /// Adds the request's own deadline: the earlier of the two applies.
+    ///
+    /// `options.deadline` is part of the execution request contract, so it
+    /// binds whichever entry point runs the request, not only
+    /// `Engine::execute`; a caller-supplied control can shorten it but never
+    /// lift it.
+    pub(crate) fn with_request_deadline(
+        mut self,
+        deadline: Option<&str>,
+    ) -> Result<Self, EngineError> {
+        if let Some(requested) = deadline.map(parse_deadline).transpose()? {
+            self.deadline = Some(match self.deadline {
+                Some(existing) => existing.min(requested),
+                None => requested,
+            });
+        }
+        Ok(self)
+    }
+}
+
 fn parse_deadline(value: &str) -> Result<Instant, EngineError> {
     let deadline = OffsetDateTime::parse(value, &Rfc3339)
         .map_err(|_| EngineError::InvalidInput(ErrorDetail::from("deadline must be RFC 3339")))?;

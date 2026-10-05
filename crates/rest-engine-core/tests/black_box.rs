@@ -4570,3 +4570,50 @@ async fn a_stale_session_is_refused_before_the_idempotency_key_is_recorded() {
     server.await.unwrap();
     assert_eq!(retried["status"], "success", "{retried}");
 }
+
+#[tokio::test]
+async fn the_request_deadline_binds_every_entry_point() {
+    // A server that accepts and never answers: only the deadline ends the call.
+    async fn silent() -> (String, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let _ = read_request(&mut stream).await;
+            let mut sink = [0_u8; 64];
+            while stream.read(&mut sink).await.unwrap_or(0) > 0 {}
+        });
+        (url, task)
+    }
+    let deadline = |millis: i64| {
+        let at = time::OffsetDateTime::now_utc() + time::Duration::milliseconds(millis);
+        format!(
+            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+            at.year(),
+            u8::from(at.month()),
+            at.day(),
+            at.hour(),
+            at.minute(),
+            at.second(),
+            at.millisecond()
+        )
+    };
+    let (url, server) = silent().await;
+    let request: ExecutionRequest = serde_json::from_value(json!({
+        "schema_version": 1,
+        "operation": "test",
+        "connection": {"url": url, "method": "GET"},
+        "options": {"deadline": deadline(300)}
+    }))
+    .unwrap();
+    let started = std::time::Instant::now();
+    let result = timeout(
+        Duration::from_secs(10),
+        local_engine().execute_with_control(request, ExecutionControl::default()),
+    )
+    .await
+    .expect("the request deadline ends the call");
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert_eq!(result.errors[0].code, "TIMEOUT");
+    server.abort();
+}

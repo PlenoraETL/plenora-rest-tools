@@ -120,13 +120,8 @@ impl Engine {
     }
 
     pub async fn execute(&self, request: ExecutionRequest) -> ExecutionResult {
-        let control = match ExecutionControl::default()
-            .with_optional_deadline(request.options.deadline.as_deref())
-        {
-            Ok(control) => control,
-            Err(error) => return failed_result(error),
-        };
-        self.execute_with_control(request, control).await
+        self.execute_with_control(request, ExecutionControl::default())
+            .await
     }
 
     pub async fn execute_with_control(
@@ -137,6 +132,10 @@ impl Engine {
         if self.is_closed() {
             return failed_result(EngineError::EngineClosed);
         }
+        let control = match control.with_request_deadline(request.options.deadline.as_deref()) {
+            Ok(control) => control,
+            Err(error) => return failed_result(error),
+        };
         if let Err(error) = validate_execution_configuration(&request) {
             return failed_result(error);
         }
@@ -444,9 +443,9 @@ impl Engine {
                 error.column(),
             ))
         })?;
-        let control = ExecutionControl::new(cancellation)
-            .with_optional_deadline(request.options.deadline.as_deref())?;
-        let result = self.execute_with_control(request, control).await;
+        let result = self
+            .execute_with_control(request, ExecutionControl::new(cancellation))
+            .await;
         serde_json::to_string(&result)
             .map_err(|_| EngineError::Runtime(ErrorDetail::from("result could not be serialized")))
     }
