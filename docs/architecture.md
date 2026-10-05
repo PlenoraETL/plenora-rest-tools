@@ -225,9 +225,16 @@ che nessuna operazione ha prenotato, mai uno ancora prenotato, perché espellere
 un jar attivo dividerebbe una sessione fra richieste concorrenti. Le prenotazioni
 sono contate dal motore e non dedotte dal numero di riferimenti al jar: quanti
 ne tenga un client HTTP del pool è un dettaglio interno di quel client, e un
-client nel pool non è una prenotazione. Espellere un jar libero porta via anche
-i client costruiti su di esso — una riconnessione, non la perdita di una
-sessione — e nessun altro jar viene toccato. La richiesta viene rifiutata solo se
+client nel pool non è una prenotazione. Espellere un jar libero porta via i
+client costruiti su di esso e i cookie che conteneva: è la perdita della
+sessione, non una semplice riconnessione. Per questo il jar_id espulso viene
+ricordato e una richiesta successiva con lo stesso jar_id fallisce con
+POLICY_VIOLATION prima di qualunque attività di rete, invece di ripartire da un
+jar vuoto che disconnetterebbe il chiamante in silenzio; per una nuova sessione
+il chiamante usa un nuovo jar_id. Gli id ricordati sono al massimo 4096 e un
+jar_id è lungo al massimo 256 byte: raggiunto quel limite il motore non espelle
+più e rifiuta i nuovi jar_id per il resto della sua vita, invece di dimenticare
+un id espulso. Nessun altro jar viene toccato. La richiesta viene rifiutata solo se
 ogni jar è prenotato da un'operazione attiva, e il rifiuto avviene prima di
 qualunque attività di rete, inclusa l'acquisizione di un token OAuth: la
 prenotazione copre l'intera operazione, non la sola richiesta HTTP. Lo store
@@ -260,6 +267,12 @@ a un nome che dichiara di trasportare una chiave di idempotenza. Un nome dalla
 semantica di credenziale non viene conservato e, sul confine runtime, viene
 rifiutato: altrimenti chiamare `Authorization` l'header di idempotenza sarebbe
 un modo per allargare la allowlist.
+
+Quando l'header di idempotenza non può attraversare l'origin, perché il suo
+nome non dichiara una chiave di idempotenza, anche i retry che la chiave aveva
+abilitato per i metodi non idempotenti vengono ritirati per quella richiesta:
+restano attivi solo se retry_non_idempotent è impostato esplicitamente nella
+policy di retry.
 
 L'autorizzazione è monotona. Una volta che una catena ha lasciato l'origin
 proprietaria, la revoca vale per ogni richiesta derivata, compresa una che

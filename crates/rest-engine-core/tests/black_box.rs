@@ -1086,7 +1086,7 @@ async fn pagination_keeps_restrictions_introduced_inside_polling() {
         owner,
         vec![
             format!(r#"{{"status":"pending","poll":"{poller_url}"}}"#),
-            format!(r#"{{"status":"completed","items":[{{"id":2}}]}}"#),
+            r#"{"status":"completed","items":[{"id":2}]}"#.to_string(),
         ],
         owner_requests.clone(),
     );
@@ -3522,3 +3522,103 @@ async fn read_request(stream: &mut TcpStream) -> String {
     String::from_utf8_lossy(&request).into_owned()
 }
 use std::sync::{Arc, Mutex as StdMutex};
+
+#[tokio::test]
+async fn a_withheld_idempotency_header_also_withdraws_non_idempotent_retries() {
+    // `X-Deduplication-ID` does not name an idempotency key, so it is not
+    // carried to another origin. The retries it enabled must not be carried
+    // either: a POST retried without its key can execute twice.
+    let (second_url, second_server, second_observed) = recorded_server(vec![
+        (503, r#"{"error":"busy"}"#, vec![]),
+        (200, r#"{"items":[{"id":2}]}"#, vec![]),
+    ])
+    .await;
+    let first_body = format!(r#"{{"items":[{{"id":1}}],"next":"{second_url}"}}"#);
+    let (first_url, first_server, _) = owned_recorded_server(vec![(
+        200,
+        first_body.into_bytes(),
+        vec![("Content-Type", "application/json")],
+    )])
+    .await;
+
+    let result = execute(
+        &local_engine(),
+        json!({
+            "schema_version": 1,
+            "operation": "generate",
+            "connection": {
+                "url": first_url,
+                "method": "POST",
+                "response": {"records_path": "items"},
+                "retry": {"max_attempts": 3, "backoff_base_ms": 1, "max_backoff_ms": 1},
+                "idempotency": {"name": "X-Deduplication-ID", "location": "header"},
+                "pagination": {
+                    "type": "link",
+                    "link_path": "next",
+                    "max_pages": 2,
+                    "allow_cross_origin": true
+                }
+            },
+            "options": {"idempotency_key": "page-key-1"}
+        }),
+    )
+    .await;
+    first_server.await.unwrap();
+    second_server.abort();
+
+    assert_eq!(result["status"], "failed", "{result}");
+    let second = second_observed.lock().unwrap().clone();
+    assert_eq!(second.len(), 1, "the unprotected POST must not be retried");
+    assert!(
+        !second[0]
+            .to_ascii_lowercase()
+            .contains("x-deduplication-id")
+    );
+}
+
+#[tokio::test]
+async fn a_request_on_an_evicted_cookie_jar_fails_instead_of_losing_the_session() {
+    // Past the jar bound the oldest idle jar is evicted, and its cookies with
+    // it. Coming back with the same `jar_id` must not start from an empty jar,
+    // which would log the caller out without a signal.
+    let engine = Engine::new(EngineConfig {
+        allow_private_networks: true,
+        allow_cookie_store: true,
+        max_pooled_origins: 0,
+        ..EngineConfig::default()
+    });
+    let session = |url: &str, jar: &str| {
+        json!({
+            "schema_version": 1,
+            "operation": "test",
+            "connection": {
+                "url": url,
+                "method": "GET",
+                "cookies": {"enabled": true, "jar_id": jar}
+            }
+        })
+    };
+    for index in 0..MAX_COOKIE_JARS_IN_TEST {
+        let (url, server, _) = recorded_server(vec![(
+            200,
+            r#"{"ok":true}"#,
+            vec![("Set-Cookie", "sid=login; Path=/")],
+        )])
+        .await;
+        let result = execute(&engine, session(&url, &format!("tenant-{index}"))).await;
+        server.await.unwrap();
+        assert_eq!(result["status"], "success", "session {index}: {result}");
+    }
+
+    // `tenant-0` was the oldest idle jar, so it is the one that went.
+    let returning = execute(&engine, session("http://127.0.0.1:9/", "tenant-0")).await;
+    assert_eq!(returning["status"], "failed", "{returning}");
+    assert_eq!(returning["errors"][0]["code"], "POLICY_VIOLATION");
+    assert_eq!(returning["metrics"]["requests"], 0);
+
+    let oversized = execute(&engine, session("http://127.0.0.1:9/", &"j".repeat(257))).await;
+    assert_eq!(
+        oversized["errors"][0]["code"], "INVALID_INPUT",
+        "{oversized}"
+    );
+}
