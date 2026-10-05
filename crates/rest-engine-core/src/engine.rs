@@ -402,25 +402,31 @@ impl Engine {
                 } else {
                     ExecutionStatus::Failed
                 };
+                with_recoveries(
+                    ExecutionResult {
+                        schema_version: SCHEMA_VERSION,
+                        status,
+                        output: operation.output,
+                        metrics,
+                        responses,
+                        errors: operation.errors,
+                        recoveries: Vec::new(),
+                    },
+                    active_recoveries(),
+                )
+            }
+            Err(error) => with_recoveries(
                 ExecutionResult {
                     schema_version: SCHEMA_VERSION,
-                    status,
-                    output: operation.output,
+                    status: ExecutionStatus::Failed,
+                    output: ExecutionOutput::None,
                     metrics,
                     responses,
-                    errors: operation.errors,
-                    recoveries: active_recoveries(),
-                }
-            }
-            Err(error) => ExecutionResult {
-                schema_version: SCHEMA_VERSION,
-                status: ExecutionStatus::Failed,
-                output: ExecutionOutput::None,
-                metrics,
-                responses,
-                errors: vec![error.execution_error(None)],
-                recoveries: active_recoveries(),
-            },
+                    errors: vec![error.execution_error(None)],
+                    recoveries: Vec::new(),
+                },
+                active_recoveries(),
+            ),
         }
     }
 
@@ -723,6 +729,7 @@ impl Engine {
         responses: &mut Vec<HttpResponseMetadata>,
     ) -> Result<OperationResult, EngineError> {
         let parameters = resolve_parameters(&request.connection, &request.input.params)?;
+        let mut limit = None;
         let values = match &request.connection.pagination {
             None => {
                 let (value, _, _, _) = self
@@ -738,22 +745,30 @@ impl Engine {
                 response_records(&request.connection, &value)?
             }
             Some(pagination) => {
-                self.paginated(
-                    &request.connection,
-                    &parameters,
-                    pagination,
-                    metrics,
-                    responses,
-                    &request.options,
-                )
-                .await?
+                let (values, stopped) = self
+                    .paginated(
+                        &request.connection,
+                        &parameters,
+                        pagination,
+                        metrics,
+                        responses,
+                        &request.options,
+                    )
+                    .await?;
+                limit = stopped;
+                values
             }
         };
         let records = map_records(values, &request.connection.response)?;
         let succeeded = records.len();
+        // Rows cut off by a pagination limit are not a complete result: the
+        // records read so far are returned with an error saying so, which
+        // makes the status partial (or failed with no rows).
         Ok(OperationResult {
             output: ExecutionOutput::Records { records },
-            errors: Vec::new(),
+            errors: limit
+                .map(|error| vec![error.execution_error(None)])
+                .unwrap_or_default(),
             succeeded,
         })
     }
@@ -1045,8 +1060,14 @@ impl Engine {
         metrics: &mut ExecutionMetrics,
         responses: &mut Vec<HttpResponseMetadata>,
         options: &crate::ExecutionOptions,
-    ) -> Result<Vec<Value>, EngineError> {
+    ) -> Result<(Vec<Value>, Option<EngineError>), EngineError> {
         let mut output = Vec::new();
+        // Set when the source itself says it has no more data: a short page,
+        // no next cursor or link, or one already followed. Leaving a loop for
+        // any other reason (max_rows, max_pages), or dropping rows of the last
+        // page to fit max_rows, means the source still had data.
+        let mut finished = false;
+        let mut dropped = false;
         // Origin that owns the credentials for the whole pagination run. It is
         // fixed by the first page and never re-derived, so no later page can
         // become the origin that owns them. Cursor, offset, and page values are
@@ -1085,8 +1106,9 @@ impl Engine {
                         .await?;
                     let page = response_records(connection, &value)?;
                     let page_len = page.len();
-                    append_limited(&mut output, page, *max_rows);
+                    dropped |= append_limited(&mut output, page, *max_rows);
                     if page_len < limit {
+                        finished = true;
                         break;
                     }
                     offset = offset.saturating_add(*page_size);
@@ -1122,8 +1144,9 @@ impl Engine {
                         .await?;
                     let page = response_records(connection, &value)?;
                     let page_len = page.len();
-                    append_limited(&mut output, page, *max_rows);
+                    dropped |= append_limited(&mut output, page, *max_rows);
                     if page_len < limit {
+                        finished = true;
                         break;
                     }
                     page_number = page_number.saturating_add(1);
@@ -1158,7 +1181,7 @@ impl Engine {
                             &scoped_options,
                         )
                         .await?;
-                    append_limited(
+                    dropped |= append_limited(
                         &mut output,
                         response_records(connection, &value)?,
                         *max_rows,
@@ -1166,7 +1189,10 @@ impl Engine {
                     cursor = json_path::get(&value, cursor_path).and_then(value_as_string);
                     match &cursor {
                         Some(value) if seen.insert(value.clone()) => {}
-                        _ => break,
+                        _ => {
+                            finished = true;
+                            break;
+                        }
                     }
                 }
             }
@@ -1200,18 +1226,20 @@ impl Engine {
                             &scoped_options,
                         )
                         .await?;
-                    append_limited(
+                    dropped |= append_limited(
                         &mut output,
                         response_records(connection, &value)?,
                         *max_rows,
                     );
                     let Some(link) = json_path::get(&value, link_path).and_then(Value::as_str)
                     else {
+                        finished = true;
                         break;
                     };
                     let resolved =
                         pagination_url(&final_url, link, *allow_cross_origin)?.to_string();
                     if !seen.insert(resolved.clone()) {
+                        finished = true;
                         break;
                     }
                     next_url = Some(resolved);
@@ -1252,17 +1280,19 @@ impl Engine {
                             &scoped_options,
                         )
                         .await?;
-                    append_limited(
+                    dropped |= append_limited(
                         &mut output,
                         response_records(connection, &value)?,
                         *max_rows,
                     );
                     let Some(link) = link_header_target(&headers, relation)? else {
+                        finished = true;
                         break;
                     };
                     let resolved =
                         pagination_url(&final_url, &link, *allow_cross_origin)?.to_string();
                     if !seen.insert(resolved.clone()) {
+                        finished = true;
                         break;
                     }
                     next_url = Some(resolved);
@@ -1270,7 +1300,8 @@ impl Engine {
             }
         }
 
-        Ok(output)
+        let stopped = (dropped || !finished).then(|| pagination_limit(pagination));
+        Ok((output, stopped))
     }
 
     async fn request_json(
@@ -3630,9 +3661,42 @@ fn ensure_page_size(page_size: usize) -> Result<(), EngineError> {
     }
 }
 
-fn append_limited(output: &mut Vec<Value>, values: Vec<Value>, max_rows: usize) {
+/// Appends at most `max_rows - output.len()` values; true when some were left
+/// out, which means the source had more rows than the limit admits.
+fn append_limited(output: &mut Vec<Value>, values: Vec<Value>, max_rows: usize) -> bool {
     let remaining = max_rows.saturating_sub(output.len());
+    let available = values.len();
     output.extend(values.into_iter().take(remaining));
+    available > remaining
+}
+
+fn pagination_limit(pagination: &PaginationConfig) -> EngineError {
+    match pagination {
+        PaginationConfig::Offset { max_rows, .. } | PaginationConfig::Page { max_rows, .. } => {
+            EngineError::PaginationLimit {
+                max_rows: *max_rows,
+                max_pages: None,
+            }
+        }
+        PaginationConfig::Cursor {
+            max_rows,
+            max_pages,
+            ..
+        }
+        | PaginationConfig::Link {
+            max_rows,
+            max_pages,
+            ..
+        }
+        | PaginationConfig::HeaderLink {
+            max_rows,
+            max_pages,
+            ..
+        } => EngineError::PaginationLimit {
+            max_rows: *max_rows,
+            max_pages: Some(*max_pages),
+        },
+    }
 }
 
 fn merge_execution_metrics(target: &mut ExecutionMetrics, source: &ExecutionMetrics) {
@@ -4254,22 +4318,57 @@ fn is_transferable_cross_origin_header(name: &str) -> bool {
 }
 
 fn failed_result(error: EngineError) -> ExecutionResult {
-    failed_result_with_recoveries(error, Vec::new())
+    failed_result_with_recoveries(error, RecoveryHandles::default())
 }
 
 fn failed_result_with_recoveries(
     error: EngineError,
-    recoveries: Vec<AsyncJobRecovery>,
+    recoveries: RecoveryHandles,
 ) -> ExecutionResult {
-    ExecutionResult {
-        schema_version: SCHEMA_VERSION,
-        status: ExecutionStatus::Failed,
-        output: ExecutionOutput::None,
-        metrics: ExecutionMetrics::default(),
-        responses: Vec::new(),
-        errors: vec![error.execution_error(None)],
+    with_recoveries(
+        ExecutionResult {
+            schema_version: SCHEMA_VERSION,
+            status: ExecutionStatus::Failed,
+            output: ExecutionOutput::None,
+            metrics: ExecutionMetrics::default(),
+            responses: Vec::new(),
+            errors: vec![error.execution_error(None)],
+            recoveries: Vec::new(),
+        },
         recoveries,
+    )
+}
+
+/// Puts the recovery handles into `result`, saying how many did not fit.
+///
+/// The contract caps `recoveries` at [`MAX_RECOVERIES`]. A handle left out is
+/// a remote job the caller can no longer resume, so the cut is never silent:
+/// the first error carries `recoveries_omitted` with the number left out. A
+/// result with omitted handles and no error cannot be produced by the engine
+/// (a job still running always comes with the failure that interrupted it);
+/// it is reported as an internal error rather than as a clean success.
+fn with_recoveries(mut result: ExecutionResult, recoveries: RecoveryHandles) -> ExecutionResult {
+    result.recoveries = recoveries.handles;
+    if recoveries.omitted > 0 {
+        let omitted = Value::from(u64::try_from(recoveries.omitted).unwrap_or(u64::MAX));
+        if result.errors.is_empty() {
+            result.errors.push(
+                EngineError::Runtime(ErrorDetail::from(
+                    "recovery handles were omitted without a failure",
+                ))
+                .execution_error(None),
+            );
+            if result.status == ExecutionStatus::Success {
+                result.status = ExecutionStatus::Partial;
+            }
+        }
+        if let Some(first) = result.errors.first_mut() {
+            first
+                .details
+                .insert("recoveries_omitted".to_owned(), omitted);
+        }
     }
+    result
 }
 
 fn validate_idempotency_key(key: &str) -> Result<(), EngineError> {
@@ -4401,7 +4500,7 @@ fn remove_active_job(key: &str) {
         .remove(key);
 }
 
-fn active_recoveries() -> Vec<AsyncJobRecovery> {
+fn active_recoveries() -> RecoveryHandles {
     active_jobs_handle()
         .map(|jobs| recoveries_from(&jobs))
         .unwrap_or_default()
@@ -4410,15 +4509,25 @@ fn active_recoveries() -> Vec<AsyncJobRecovery> {
 /// Contract bound on `recoveries` in the execution and file transfer results.
 const MAX_RECOVERIES: usize = 128;
 
-fn recoveries_from(jobs: &Arc<Mutex<BTreeMap<String, ActiveAsyncJob>>>) -> Vec<AsyncJobRecovery> {
-    // The map is keyed by poll URL, so truncation at the contract bound is
+/// The recovery handles a result can carry, and how many did not fit.
+#[derive(Default)]
+struct RecoveryHandles {
+    handles: Vec<AsyncJobRecovery>,
+    omitted: usize,
+}
+
+fn recoveries_from(jobs: &Arc<Mutex<BTreeMap<String, ActiveAsyncJob>>>) -> RecoveryHandles {
+    // The map is keyed by poll URL, so the cut at the contract bound is
     // deterministic rather than dependent on iteration order.
-    jobs.lock()
+    let mut handles = jobs
+        .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .values()
         .filter_map(|job| job.recovery.clone())
-        .take(MAX_RECOVERIES)
-        .collect()
+        .collect::<Vec<_>>();
+    let omitted = handles.len().saturating_sub(MAX_RECOVERIES);
+    handles.truncate(MAX_RECOVERIES);
+    RecoveryHandles { handles, omitted }
 }
 
 #[cfg(test)]

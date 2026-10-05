@@ -4570,3 +4570,294 @@ async fn a_stale_session_is_refused_before_the_idempotency_key_is_recorded() {
     server.await.unwrap();
     assert_eq!(retried["status"], "success", "{retried}");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn recovery_handles_beyond_the_contract_bound_are_counted_not_dropped() {
+    // 130 enrichment records each start a remote job that never finishes; the
+    // operation is then cancelled. The result may carry at most 128 recovery
+    // handles: the two that do not fit must be reported, since the caller can
+    // no longer resume those jobs.
+    const JOBS: usize = 130;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let cancellation = CancellationToken::new();
+    let submitted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let polled = std::sync::Arc::new(StdMutex::new(std::collections::BTreeSet::new()));
+    let server = {
+        let cancellation = cancellation.clone();
+        let submitted = submitted.clone();
+        let polled = polled.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let cancellation = cancellation.clone();
+                let submitted = submitted.clone();
+                let polled = polled.clone();
+                tokio::spawn(async move {
+                    let request = read_request(&mut stream).await;
+                    let (status, body, location) = if request.starts_with("POST /submit") {
+                        let job = submitted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        (
+                            "202 Accepted",
+                            format!(r#"{{"id":"job-{job:03}","status":"queued"}}"#),
+                            format!("Location: /jobs/job-{job:03}\r\n"),
+                        )
+                    } else {
+                        let path = request.split_whitespace().nth(1).unwrap_or_default();
+                        polled.lock().unwrap().insert(path.to_owned());
+                        (
+                            "200 OK",
+                            r#"{"status":"running"}"#.to_owned(),
+                            String::new(),
+                        )
+                    };
+                    let response = format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n{location}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                    let _ = stream.shutdown().await;
+                    // A job is registered for recovery before its first poll,
+                    // so once every job has been polled all of them are known.
+                    if polled.lock().unwrap().len() == JOBS {
+                        cancellation.cancel();
+                    }
+                });
+            }
+        })
+    };
+    let engine = Engine::new(EngineConfig {
+        allow_private_networks: true,
+        max_concurrent_requests: 256,
+        ..EngineConfig::default()
+    });
+    let records = (0..JOBS)
+        .map(|index| json!({"index": index}))
+        .collect::<Vec<_>>();
+    let request: ExecutionRequest = serde_json::from_value(json!({
+        "schema_version": 1,
+        "operation": "enrich",
+        "connection": {
+            "url": format!("http://{address}/submit"),
+            "method": "POST",
+            "polling": {"status_path": "status", "interval_ms": 50, "max_attempts": 100_000}
+        },
+        "input": {"records": records},
+        "options": {"enrichment_concurrency": JOBS}
+    }))
+    .unwrap();
+
+    let result = timeout(
+        Duration::from_secs(60),
+        engine.execute_with_control(request, ExecutionControl::new(cancellation)),
+    )
+    .await
+    .expect("the cancelled operation finishes");
+    server.abort();
+    let result = serde_json::to_value(result).unwrap();
+
+    assert_eq!(submitted.load(std::sync::atomic::Ordering::SeqCst), JOBS);
+    assert_eq!(result["status"], "failed", "{result}");
+    assert_eq!(result["errors"][0]["code"], "CANCELLED");
+    assert_eq!(result["recoveries"].as_array().unwrap().len(), 128);
+    assert_eq!(
+        result["errors"][0]["details"]["recoveries_omitted"], 2,
+        "{}",
+        result["errors"]
+    );
+}
+
+async fn paginate(pagination: Value, pages: Vec<TestResponse>) -> Value {
+    let count = pages.len();
+    let (url, server, observed) = recorded_server(pages).await;
+    let result = execute(
+        &local_engine(),
+        json!({
+            "schema_version": 1,
+            "operation": "generate",
+            "connection": {
+                "url": url,
+                "method": "GET",
+                "response": {"records_path": "items"},
+                "pagination": pagination
+            }
+        }),
+    )
+    .await;
+    server.await.unwrap();
+    assert_eq!(observed.lock().unwrap().len(), count, "{result}");
+    result
+}
+
+fn assert_limit(result: &Value, rows: Value, details: Value) {
+    assert_eq!(result["status"], "partial", "{result}");
+    assert_eq!(result["output"]["records"], rows, "{result}");
+    let error = &result["errors"][0];
+    assert_eq!(error["code"], "PAGINATION_LIMIT_REACHED", "{result}");
+    assert_eq!(error["category"], "resource_limit");
+    assert_eq!(error["remote_effect"], "none");
+    assert_eq!(error["retry"]["kind"], "never");
+    assert_eq!(error["details"], details);
+    assert_eq!(result["errors"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn rows_cut_by_max_rows_are_a_partial_result_not_a_success() {
+    // The second page has two rows but only one fits: the source had more.
+    let result = paginate(
+        json!({"type": "page", "page_size": 2, "max_rows": 3}),
+        vec![
+            (200, r#"{"items":[{"v":1},{"v":2}]}"#, vec![]),
+            (200, r#"{"items":[{"v":3},{"v":4}]}"#, vec![]),
+        ],
+    )
+    .await;
+    assert_limit(
+        &result,
+        json!([{"v": 1}, {"v": 2}, {"v": 3}]),
+        json!({"max_rows": 3}),
+    );
+
+    // Offset mode asks for exactly the rows that still fit; a page that fills
+    // the request at the limit may hide more rows, and the engine does not
+    // send a probe request to find out, so it says the limit was reached.
+    let result = paginate(
+        json!({"type": "offset", "page_size": 2, "max_rows": 4}),
+        vec![
+            (200, r#"{"items":[{"v":1},{"v":2}]}"#, vec![]),
+            (200, r#"{"items":[{"v":3},{"v":4}]}"#, vec![]),
+        ],
+    )
+    .await;
+    assert_limit(
+        &result,
+        json!([{"v": 1}, {"v": 2}, {"v": 3}, {"v": 4}]),
+        json!({"max_rows": 4}),
+    );
+
+    // A short page is the end of the data: a complete result.
+    let result = paginate(
+        json!({"type": "offset", "page_size": 2, "max_rows": 4}),
+        vec![
+            (200, r#"{"items":[{"v":1},{"v":2}]}"#, vec![]),
+            (200, r#"{"items":[{"v":3}]}"#, vec![]),
+        ],
+    )
+    .await;
+    assert_eq!(result["status"], "success", "{result}");
+    assert_eq!(result["errors"], json!([]));
+}
+
+#[tokio::test]
+async fn a_next_page_left_by_max_pages_is_a_partial_result() {
+    let result = paginate(
+        json!({"type": "cursor", "max_pages": 2}),
+        vec![
+            (200, r#"{"items":[{"v":1}],"next_cursor":"b"}"#, vec![]),
+            (200, r#"{"items":[{"v":2}],"next_cursor":"c"}"#, vec![]),
+        ],
+    )
+    .await;
+    assert_limit(
+        &result,
+        json!([{"v": 1}, {"v": 2}]),
+        json!({"max_rows": 10_000, "max_pages": 2}),
+    );
+
+    let result = paginate(
+        json!({"type": "link", "max_pages": 2}),
+        vec![
+            (200, r#"{"items":[{"v":1}],"next":"/p2"}"#, vec![]),
+            (200, r#"{"items":[{"v":2}],"next":"/p3"}"#, vec![]),
+        ],
+    )
+    .await;
+    assert_limit(
+        &result,
+        json!([{"v": 1}, {"v": 2}]),
+        json!({"max_rows": 10_000, "max_pages": 2}),
+    );
+
+    // max_rows reached with a next Link header still announced.
+    let result = paginate(
+        json!({"type": "header_link", "max_rows": 1}),
+        vec![(
+            200,
+            r#"{"items":[{"v":1},{"v":2}]}"#,
+            vec![("Link", "</p2>; rel=\"next\"")],
+        )],
+    )
+    .await;
+    assert_limit(
+        &result,
+        json!([{"v": 1}]),
+        json!({"max_rows": 1, "max_pages": 100}),
+    );
+
+    // No next cursor: the data is complete within the limits.
+    let result = paginate(
+        json!({"type": "cursor", "max_pages": 2}),
+        vec![
+            (200, r#"{"items":[{"v":1}],"next_cursor":"b"}"#, vec![]),
+            (200, r#"{"items":[{"v":2}]}"#, vec![]),
+        ],
+    )
+    .await;
+    assert_eq!(result["status"], "success", "{result}");
+    assert_eq!(result["output"]["records"], json!([{"v": 1}, {"v": 2}]));
+}
+
+#[tokio::test]
+async fn a_retry_after_beyond_the_cap_is_not_shortened_into_an_early_retry() {
+    // The server asks for 600 s; the policy accepts at most 1 s. Retrying after
+    // 1 s would ignore the server, so the 429 is the result.
+    let (url, server, observed) = recorded_server(vec![(
+        429,
+        r#"{"error":"slow down"}"#,
+        vec![("Retry-After", "600")],
+    )])
+    .await;
+    let result = execute(
+        &local_engine(),
+        json!({
+            "schema_version": 1,
+            "operation": "test",
+            "connection": {
+                "url": url,
+                "method": "GET",
+                "retry": {"max_attempts": 3, "max_retry_after_ms": 1000}
+            }
+        }),
+    )
+    .await;
+    server.await.unwrap();
+    assert_eq!(observed.lock().unwrap().len(), 1, "{result}");
+    assert_eq!(result["status"], "failed", "{result}");
+    assert_eq!(result["errors"][0]["code"], "HTTP_STATUS");
+    assert_eq!(result["errors"][0]["details"]["http_status"], 429);
+
+    // Within the cap the server's delay is honoured and the retry happens.
+    let (url, server, observed) = recorded_server(vec![
+        (429, r#"{"error":"slow down"}"#, vec![("Retry-After", "0")]),
+        (200, r#"{"ok":true}"#, vec![]),
+    ])
+    .await;
+    let result = execute(
+        &local_engine(),
+        json!({
+            "schema_version": 1,
+            "operation": "test",
+            "connection": {
+                "url": url,
+                "method": "GET",
+                "retry": {"max_attempts": 3, "max_retry_after_ms": 1000}
+            }
+        }),
+    )
+    .await;
+    server.await.unwrap();
+    assert_eq!(observed.lock().unwrap().len(), 2, "{result}");
+    assert_eq!(result["status"], "success", "{result}");
+}

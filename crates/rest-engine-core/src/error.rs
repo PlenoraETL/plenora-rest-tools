@@ -84,7 +84,10 @@ impl From<&'static str> for ErrorDetail {
 #[derive(Debug)]
 pub enum EngineError {
     InvalidInput(ErrorDetail),
-    UnsupportedSchema { received: u32, supported: u32 },
+    UnsupportedSchema {
+        received: u32,
+        supported: u32,
+    },
     InvalidUrl(ErrorDetail),
     UnsafeAddress(ErrorDetail),
     PolicyViolation(ErrorDetail),
@@ -95,18 +98,34 @@ pub enum EngineError {
     EngineClosed,
     CircuitOpen,
     Transport(ErrorDetail),
-    ResponseTooLarge { limit_bytes: usize },
-    RequestTooLarge { limit_bytes: usize },
-    FileTooLarge { limit_bytes: u64 },
+    ResponseTooLarge {
+        limit_bytes: usize,
+    },
+    RequestTooLarge {
+        limit_bytes: usize,
+    },
+    FileTooLarge {
+        limit_bytes: u64,
+    },
     FileIo(ErrorDetail),
     ChecksumMismatch,
-    HttpStatus { status: u16 },
+    HttpStatus {
+        status: u16,
+    },
     InvalidResponse(ErrorDetail),
     Application(ErrorDetail),
     MissingParameter(ErrorDetail),
     Authentication(ErrorDetail),
     IdempotencyConflict,
-    PollingTimeout { attempts: u32 },
+    PollingTimeout {
+        attempts: u32,
+    },
+    /// Pagination stopped at `max_rows` or `max_pages` while the source
+    /// still had data: the rows returned are a prefix, not the whole.
+    PaginationLimit {
+        max_rows: usize,
+        max_pages: Option<usize>,
+    },
     Runtime(ErrorDetail),
 }
 
@@ -253,6 +272,7 @@ impl EngineError {
             Self::Authentication(_) => "AUTHENTICATION_FAILED",
             Self::IdempotencyConflict => "IDEMPOTENCY_CONFLICT",
             Self::PollingTimeout { .. } => "POLLING_TIMEOUT",
+            Self::PaginationLimit { .. } => "PAGINATION_LIMIT_REACHED",
             Self::Runtime(_) => "RUNTIME_ERROR",
         }
     }
@@ -283,6 +303,9 @@ impl EngineError {
             Self::Authentication(_) => "Authentication failed",
             Self::IdempotencyConflict => "Idempotency key conflicts with prior input",
             Self::PollingTimeout { .. } => "Asynchronous operation did not complete",
+            Self::PaginationLimit { .. } => {
+                "Pagination stopped at a configured limit with data remaining"
+            }
             Self::Runtime(_) => "REST engine failed internally",
         }
     }
@@ -303,7 +326,8 @@ impl EngineError {
             Self::EngineClosed => ErrorCategory::Execution,
             Self::ResponseTooLarge { .. }
             | Self::RequestTooLarge { .. }
-            | Self::FileTooLarge { .. } => ErrorCategory::ResourceLimit,
+            | Self::FileTooLarge { .. }
+            | Self::PaginationLimit { .. } => ErrorCategory::ResourceLimit,
             Self::FileIo(_) => ErrorCategory::Io,
             Self::ChecksumMismatch { .. } | Self::InvalidResponse(_) => ErrorCategory::Protocol,
             Self::HttpStatus { .. } | Self::Application(_) => ErrorCategory::Execution,
@@ -338,7 +362,8 @@ impl EngineError {
             | Self::HttpStatus { .. }
             | Self::InvalidResponse(_)
             | Self::Application(_)
-            | Self::PollingTimeout { .. } => ErrorPhase::Read,
+            | Self::PollingTimeout { .. }
+            | Self::PaginationLimit { .. } => ErrorPhase::Read,
             Self::Runtime(_) => ErrorPhase::Cleanup,
         }
     }
@@ -388,6 +413,16 @@ impl EngineError {
             }
             Self::PollingTimeout { attempts } => {
                 BTreeMap::from([("poll_attempts".to_owned(), json!(attempts))])
+            }
+            Self::PaginationLimit {
+                max_rows,
+                max_pages,
+            } => {
+                let mut details = BTreeMap::from([("max_rows".to_owned(), json!(max_rows))]);
+                if let Some(max_pages) = max_pages {
+                    details.insert("max_pages".to_owned(), json!(max_pages));
+                }
+                details
             }
             _ => BTreeMap::new(),
         }
