@@ -2254,6 +2254,13 @@ fn poll_state(response: &Value, polling: &PollingConfig) -> Result<Option<PollSt
     let Some(value) = json_path::get(response, &polling.status_path) else {
         return Ok(None);
     };
+    // A null status is not the empty string: it matches no configured value,
+    // even an empty one, and is reported instead of being guessed.
+    if value.is_null() {
+        return Err(EngineError::InvalidResponse(
+            "asynchronous status is null".to_owned(),
+        ));
+    }
     let status = value_as_text(value);
     if polling
         .pending_values
@@ -2424,7 +2431,10 @@ fn polling_job_id(
             .cloned()
             .map(Value::String)
     } else {
-        json_path::get(response, &polling.id_path).cloned()
+        // A null id is no id: rendered into a URL it would become "".
+        json_path::get(response, &polling.id_path)
+            .filter(|value| !value.is_null())
+            .cloned()
     }
 }
 

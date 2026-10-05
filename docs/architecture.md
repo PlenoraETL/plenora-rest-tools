@@ -149,6 +149,15 @@ no.
   un oggetto, rifiuta la richiesta con INVALID_INPUT prima di qualunque attività
   di rete, invece di inviare una stringa vuota.
 
+Lo stesso vale per i valori della risposta. Una trasformazione prefix, suffix
+o replace su una sorgente null restituisce null, non una stringa costruita da
+""; una condition su una colonna assente o null non è soddisfatta né da `==`
+né da `!=`; uno status di polling null è un errore INVALID_RESPONSE invece di
+coincidere con un valore vuoto configurato; un job id null equivale a un job id
+assente e non viene inserito in un URL. Un value null in una trasformazione è
+ammesso solo per default_if_null: altrove la richiesta è rifiutata con
+INVALID_INPUT prima della rete.
+
 Nei campi opzionali con un tipo proprio (per esempio request.timeout_ms,
 response.records_path, response.error_path, response.success_when) null
 equivale all'assenza del campo, come negli schemi v1 che dichiarano quei campi

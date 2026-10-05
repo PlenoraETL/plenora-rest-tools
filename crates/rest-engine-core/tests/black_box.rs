@@ -3884,3 +3884,131 @@ async fn a_flat_array_batch_refuses_records_without_exactly_one_value() {
     let request = observed.lock().unwrap()[0].clone();
     assert!(request.contains(r#"{"ids":[1]}"#), "{request}");
 }
+
+#[tokio::test]
+async fn a_null_transform_argument_is_rejected_before_any_request() {
+    for transform in [
+        json!({"source": "a", "column": "c", "operation": "prefix", "value": null}),
+        json!({"source": "a", "column": "c", "operation": "suffix", "value": null}),
+        json!({"source": "a", "column": "c", "operation": "add", "value": null}),
+    ] {
+        let result = execute(
+            &local_engine(),
+            json!({
+                "schema_version": 1,
+                "operation": "generate",
+                "connection": {
+                    "url": "http://127.0.0.1:9/",
+                    "method": "GET",
+                    "response": {"transforms": [transform]}
+                }
+            }),
+        )
+        .await;
+        assert_eq!(
+            result["errors"][0]["code"], "INVALID_INPUT",
+            "{transform}: {result}"
+        );
+        assert_eq!(result["metrics"]["requests"], 0, "{transform}");
+    }
+}
+
+#[tokio::test]
+async fn null_is_not_read_as_empty_text_in_transforms() {
+    let (url, server, _) = recorded_server(vec![(200, r#"{"a":null,"b":"ABC"}"#, vec![])]).await;
+    let result = execute(
+        &local_engine(),
+        json!({
+            "schema_version": 1,
+            "operation": "generate",
+            "connection": {
+                "url": url,
+                "method": "GET",
+                "response": {
+                    "output_mapping": [
+                        {"path": "a", "column": "a"},
+                        {"path": "b", "column": "b"}
+                    ],
+                    "transforms": [
+                        {"source": "a", "column": "prefixed", "operation": "prefix", "value": "id-"},
+                        {"source": "a", "column": "suffixed", "operation": "suffix", "value": "-x"},
+                        {"source": "a", "column": "replaced", "operation": "replace",
+                         "value": {"find": "x", "replace": "y"}},
+                        {"source": "b", "column": "matched", "operation": "uppercase",
+                         "condition": "a == ''"}
+                    ]
+                }
+            }
+        }),
+    )
+    .await;
+    server.await.unwrap();
+    assert_eq!(result["status"], "success", "{result}");
+    let record = &result["output"]["records"][0];
+    assert_eq!(record["prefixed"], Value::Null, "{record}");
+    assert_eq!(record["suffixed"], Value::Null, "{record}");
+    assert_eq!(record["replaced"], Value::Null, "{record}");
+    assert_eq!(record.get("matched"), None, "{record}");
+}
+
+#[tokio::test]
+async fn a_null_poll_status_is_not_read_as_an_empty_status() {
+    // An empty pending value is legal on the Rust surface; a null status must
+    // not match it as if null were "".
+    let (base_url, server, _) = recorded_server(vec![
+        (202, r#"{"accepted":true}"#, vec![("Location", "/jobs/1")]),
+        (200, r#"{"status":null}"#, vec![]),
+    ])
+    .await;
+    let result = execute(
+        &local_engine(),
+        json!({
+            "schema_version": 1,
+            "operation": "test",
+            "connection": {
+                "url": format!("{base_url}jobs"),
+                "method": "POST",
+                "polling": {
+                    "pending_values": [""],
+                    "interval_ms": 0,
+                    "max_attempts": 3
+                }
+            }
+        }),
+    )
+    .await;
+    server.await.unwrap();
+    assert_eq!(result["errors"][0]["code"], "INVALID_RESPONSE", "{result}");
+    assert_eq!(result["metrics"]["poll_requests"], 1);
+}
+
+#[tokio::test]
+async fn a_null_job_id_is_not_rendered_into_the_poll_url() {
+    let (base_url, server, observed) =
+        recorded_server(vec![(202, r#"{"id":null,"status":"queued"}"#, vec![])]).await;
+    let result = execute(
+        &local_engine(),
+        json!({
+            "schema_version": 1,
+            "operation": "test",
+            "connection": {
+                "url": format!("{base_url}jobs"),
+                "method": "POST",
+                "polling": {
+                    "url_template": "{base}/jobs/{id}",
+                    "location_header": null,
+                    "interval_ms": 0,
+                    "max_attempts": 3
+                }
+            }
+        }),
+    )
+    .await;
+    server.await.unwrap();
+    assert_eq!(result["errors"][0]["code"], "INVALID_RESPONSE", "{result}");
+    assert_eq!(
+        observed.lock().unwrap().len(),
+        1,
+        "no poll may reach /jobs/"
+    );
+}
