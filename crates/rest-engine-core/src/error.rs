@@ -5,42 +5,63 @@ use serde_json::{Value, json};
 
 use crate::ExecutionError;
 
-/// Diagnostic text carried by an [`EngineError`] variant.
+/// Diagnostic carried by an [`EngineError`] variant.
 ///
-/// The text routinely contains what a remote party or the environment said:
-/// a response body excerpt, a remote error message, an address, a domain, an
-/// `io::Error`, a checksum of the caller's data. None of it may leave the
-/// engine, so the type is opaque: it can be built from a string (`.into()`),
-/// it is never displayed, its `Debug` is redacted, and no accessor returns
-/// it. Errors are described to callers only by [`EngineError::payload`] and by
-/// the static `Display`.
-pub struct ErrorDetail(
-    // Kept for in-crate diagnostics in tests; never formatted or returned.
-    #[cfg_attr(not(test), allow(dead_code))] String,
-);
+/// Only engine-authored text can be stored: the type is built from a
+/// `&'static str`, so a remote message, a response body excerpt, an address, a
+/// domain, an `io::Error`, a parser message or a checksum of the caller's data
+/// cannot enter an error at all, rather than being carried and then hidden.
+/// The only other content is a position (line and column) for a response that
+/// failed to parse, which locates the failure without quoting it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ErrorDetail {
+    text: &'static str,
+    position: Option<(u64, u64)>,
+}
 
 impl ErrorDetail {
-    #[cfg(test)]
-    pub(crate) fn text(&self) -> &str {
-        &self.0
+    /// A parse failure at a one-based line and column of the response.
+    pub(crate) fn at(text: &'static str, line: usize, column: usize) -> Self {
+        let to_u64 = |value: usize| u64::try_from(value).unwrap_or(u64::MAX);
+        Self {
+            text,
+            position: Some((to_u64(line), to_u64(column))),
+        }
+    }
+
+    /// The engine-authored description.
+    pub fn text(&self) -> &'static str {
+        self.text
+    }
+
+    /// Line and column of a response parse failure, when there is one.
+    pub fn position(&self) -> Option<(u64, u64)> {
+        self.position
     }
 }
 
-impl From<String> for ErrorDetail {
-    fn from(value: String) -> Self {
-        Self(value)
-    }
+/// The kind of an I/O failure, never its message: `io::Error`'s text can name
+/// local paths and comes from the operating system.
+pub(crate) fn io_detail(error: &std::io::Error) -> ErrorDetail {
+    use std::io::ErrorKind;
+    ErrorDetail::from(match error.kind() {
+        ErrorKind::NotFound => "file or directory not found",
+        ErrorKind::PermissionDenied => "permission denied",
+        ErrorKind::AlreadyExists => "file already exists",
+        ErrorKind::InvalidInput | ErrorKind::InvalidData => "invalid file data or argument",
+        ErrorKind::UnexpectedEof => "unexpected end of file",
+        ErrorKind::WriteZero | ErrorKind::StorageFull => "storage is full or not writable",
+        ErrorKind::Interrupted => "file operation was interrupted",
+        _ => "file operation failed",
+    })
 }
 
-impl From<&str> for ErrorDetail {
-    fn from(value: &str) -> Self {
-        Self(value.to_owned())
-    }
-}
-
-impl fmt::Debug for ErrorDetail {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("<redacted>")
+impl From<&'static str> for ErrorDetail {
+    fn from(text: &'static str) -> Self {
+        Self {
+            text,
+            position: None,
+        }
     }
 }
 
@@ -52,13 +73,18 @@ impl fmt::Debug for ErrorDetail {
 /// `Display` is the static public message of the variant, the same text as
 /// `payload().message`, so formatting an error never prints remote or local
 /// data.
+///
+/// A detail is engine-authored text only; a `String` built from remote or
+/// local data does not convert into one:
+///
+/// ```compile_fail
+/// let remote = String::from("message chosen by the remote service");
+/// let _ = plenora_rest_core::EngineError::Application(remote.into());
+/// ```
 #[derive(Debug)]
 pub enum EngineError {
     InvalidInput(ErrorDetail),
-    UnsupportedSchema {
-        received: u32,
-        supported: u32,
-    },
+    UnsupportedSchema { received: u32, supported: u32 },
     InvalidUrl(ErrorDetail),
     UnsafeAddress(ErrorDetail),
     PolicyViolation(ErrorDetail),
@@ -67,35 +93,20 @@ pub enum EngineError {
     Timeout,
     Cancelled,
     EngineClosed,
-    CircuitOpen {
-        origin: ErrorDetail,
-    },
+    CircuitOpen,
     Transport(ErrorDetail),
-    ResponseTooLarge {
-        limit_bytes: usize,
-    },
-    RequestTooLarge {
-        limit_bytes: usize,
-    },
-    FileTooLarge {
-        limit_bytes: u64,
-    },
+    ResponseTooLarge { limit_bytes: usize },
+    RequestTooLarge { limit_bytes: usize },
+    FileTooLarge { limit_bytes: u64 },
     FileIo(ErrorDetail),
-    ChecksumMismatch {
-        expected: ErrorDetail,
-        actual: ErrorDetail,
-    },
-    HttpStatus {
-        status: u16,
-    },
+    ChecksumMismatch,
+    HttpStatus { status: u16 },
     InvalidResponse(ErrorDetail),
     Application(ErrorDetail),
     MissingParameter(ErrorDetail),
     Authentication(ErrorDetail),
     IdempotencyConflict,
-    PollingTimeout {
-        attempts: u32,
-    },
+    PollingTimeout { attempts: u32 },
     Runtime(ErrorDetail),
 }
 
@@ -388,35 +399,24 @@ mod tests {
     use super::{EngineError, ErrorDetail};
 
     #[test]
-    fn formatting_an_error_never_prints_its_detail() {
-        let secret = "remote said: token=abc123 from 10.0.0.7";
+    fn display_is_the_static_public_message() {
         let errors = [
-            EngineError::Transport(ErrorDetail::from(secret)),
-            EngineError::Application(ErrorDetail::from(secret)),
-            EngineError::FileIo(ErrorDetail::from(secret)),
-            EngineError::CircuitOpen {
-                origin: ErrorDetail::from(secret),
-            },
-            EngineError::ChecksumMismatch {
-                expected: ErrorDetail::from(secret),
-                actual: ErrorDetail::from(secret),
-            },
+            EngineError::Transport(ErrorDetail::from("connection reset")),
+            EngineError::Application(ErrorDetail::from("error_path reported a failure")),
+            EngineError::InvalidResponse(ErrorDetail::at("response body is not valid JSON", 3, 7)),
+            EngineError::CircuitOpen,
+            EngineError::ChecksumMismatch,
         ];
         for error in errors {
-            let display = error.to_string();
-            let debug = format!("{error:?}");
-            let alternate = format!("{error:#?}");
-            for rendered in [&display, &debug, &alternate] {
-                assert!(!rendered.contains("abc123"), "{rendered}");
-                assert!(!rendered.contains("10.0.0.7"), "{rendered}");
-            }
-            assert_eq!(display, error.payload().message);
+            assert_eq!(error.to_string(), error.payload().message);
         }
     }
 
     #[test]
-    fn the_detail_stays_available_inside_the_crate() {
-        let detail = ErrorDetail::from(String::from("diagnostic"));
-        assert_eq!(detail.text(), "diagnostic");
+    fn a_parse_detail_carries_only_its_position() {
+        let detail = ErrorDetail::at("response body is not valid JSON", 3, 7);
+        assert_eq!(detail.text(), "response body is not valid JSON");
+        assert_eq!(detail.position(), Some((3, 7)));
+        assert_eq!(ErrorDetail::from("x").position(), None);
     }
 }

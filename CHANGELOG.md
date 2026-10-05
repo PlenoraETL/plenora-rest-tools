@@ -38,12 +38,19 @@ release finché una release non viene preparata.
 
 ### API Rust (incompatibile)
 
-- EngineError non espone più testo di terzi: i campi testuali delle varianti
-  sono ErrorDetail opachi (costruibili con `.into()`, mai formattati, Debug
-  redatto) e Display restituisce il messaggio pubblico statico, uguale a
+- EngineError non contiene più testo di terzi: i campi testuali delle varianti
+  sono ErrorDetail, costruibili soltanto da stringhe statiche del motore
+  (`"...".into()`); per i body illeggibili conservano solo riga e colonna, per
+  l'I/O solo il tipo di errore. CircuitOpen e ChecksumMismatch non hanno più
+  campi. Display restituisce il messaggio pubblico statico, uguale a
   payload().message. I nomi esportati e il wire contract non cambiano. Per
   semver 0.x la prossima versione deve essere 0.3.0. Vedi
   [Errori ed effetti remoti](docs/architecture.md#errori-ed-effetti-remoti).
+- Il messaggio remoto al percorso error_path e lo status remoto di un job
+  fallito non vengono più acquisiti nell'errore. Non erano consegnati al
+  chiamante da alcun contratto (il message pubblico era già statico); se
+  servissero, andrebbero consegnati come dato remoto in un campo dichiarato del
+  risultato, non nell'errore.
 
 ### Dipendenze
 

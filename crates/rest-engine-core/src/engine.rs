@@ -208,7 +208,7 @@ impl Engine {
         validate_idempotency_key(key)?;
         if self.config.max_idempotency_keys == 0 {
             return Err(EngineError::PolicyViolation(ErrorDetail::from(
-                "max_idempotency_keys must be greater than zero when a key is used".to_owned(),
+                "max_idempotency_keys must be greater than zero when a key is used",
             )));
         }
         let fingerprint = execution_fingerprint(request)?;
@@ -332,7 +332,7 @@ impl Engine {
 
         let result = if request.connection.credential_ref.is_some() {
             Err(EngineError::InvalidInput(ErrorDetail::from(
-                "credential_ref requires an authorized runtime resolver".to_owned(),
+                "credential_ref requires an authorized runtime resolver",
             )))
         } else if request.schema_version != SCHEMA_VERSION {
             Err(EngineError::UnsupportedSchema {
@@ -403,13 +403,18 @@ impl Engine {
         if self.is_closed() {
             return Err(EngineError::EngineClosed);
         }
-        let request = serde_json::from_str::<ExecutionRequest>(request_json)
-            .map_err(|error| EngineError::InvalidInput(ErrorDetail::from(error.to_string())))?;
+        let request = serde_json::from_str::<ExecutionRequest>(request_json).map_err(|error| {
+            EngineError::InvalidInput(ErrorDetail::at(
+                "request is not valid JSON for the contract",
+                error.line(),
+                error.column(),
+            ))
+        })?;
         let control = ExecutionControl::new(cancellation)
             .with_optional_deadline(request.options.deadline.as_deref())?;
         let result = self.execute_with_control(request, control).await;
         serde_json::to_string(&result)
-            .map_err(|error| EngineError::Runtime(ErrorDetail::from(error.to_string())))
+            .map_err(|_| EngineError::Runtime(ErrorDetail::from("result could not be serialized")))
     }
 
     async fn test(
@@ -564,10 +569,9 @@ impl Engine {
         let limit = transfer_limit(&self.config, file)?;
         let metadata = fs::metadata(&source).await.map_err(file_io)?;
         if !metadata.is_file() {
-            return Err(EngineError::FileIo(ErrorDetail::from(format!(
-                "upload source '{}' is not a regular file",
-                source.display()
-            ))));
+            return Err(EngineError::FileIo(ErrorDetail::from(
+                "upload source is not a regular file",
+            )));
         }
         let length = metadata.len();
         if length > limit {
@@ -583,10 +587,7 @@ impl Engine {
         let sha256 = hash_file(&source, limit).await?;
         if let Some(expected) = validated_checksum(file.expected_sha256.as_deref())? {
             if !sha256.eq_ignore_ascii_case(&expected) {
-                return Err(EngineError::ChecksumMismatch {
-                    expected: ErrorDetail::from(expected),
-                    actual: ErrorDetail::from(sha256),
-                });
+                return Err(EngineError::ChecksumMismatch);
             }
         }
 
@@ -607,7 +608,7 @@ impl Engine {
                 });
             }
             PreparedBody::Multipart { files, .. } => {
-                validate_multipart_name(&file.field_name, "field_name")?;
+                validate_multipart_name(&file.field_name)?;
                 let filename = file
                     .filename
                     .clone()
@@ -618,10 +619,10 @@ impl Engine {
                     })
                     .ok_or_else(|| {
                         EngineError::InvalidInput(ErrorDetail::from(
-                            "upload file requires an explicit filename".to_owned(),
+                            "upload file requires an explicit filename",
                         ))
                     })?;
-                validate_multipart_name(&filename, "filename")?;
+                validate_multipart_name(&filename)?;
                 files.push(PreparedFile {
                     field_name: file.field_name.clone(),
                     filename,
@@ -634,7 +635,7 @@ impl Engine {
             }
             _ => {
                 return Err(EngineError::InvalidInput(ErrorDetail::from(
-                    "upload requires request.body_type 'raw' or 'multipart'".to_owned(),
+                    "upload requires request.body_type 'raw' or 'multipart'",
                 )));
             }
         }
@@ -653,18 +654,11 @@ impl Engine {
         // must say the remote effect is unknown and the failure belongs to the
         // finalize phase. `FileIo` would claim `remote_effect: none` and tell
         // the caller nothing happened remotely, which is exactly wrong here.
-        let transferred =
-            hash_file(&source, limit)
-                .await
-                .map_err(|_| EngineError::ChecksumMismatch {
-                    expected: ErrorDetail::from(sha256.clone()),
-                    actual: ErrorDetail::from("unreadable"),
-                })?;
+        let transferred = hash_file(&source, limit)
+            .await
+            .map_err(|_| EngineError::ChecksumMismatch)?;
         if transferred != sha256 {
-            return Err(EngineError::ChecksumMismatch {
-                expected: ErrorDetail::from(sha256),
-                actual: ErrorDetail::from(transferred),
-            });
+            return Err(EngineError::ChecksumMismatch);
         }
         metrics.bytes_uploaded = metrics.bytes_uploaded.saturating_add(length);
         Ok(OperationResult {
@@ -746,7 +740,7 @@ impl Engine {
         }
         if request.options.enrichment_concurrency == 0 {
             return Err(EngineError::InvalidInput(ErrorDetail::from(
-                "enrichment_concurrency must be greater than zero".to_owned(),
+                "enrichment_concurrency must be greater than zero",
             )));
         }
         if request.options.enrichment_concurrency > 1 && request.options.continue_on_error {
@@ -905,7 +899,7 @@ impl Engine {
     ) -> Result<OperationResult, EngineError> {
         if batch.max_size == 0 {
             return Err(EngineError::InvalidInput(ErrorDetail::from(
-                "batch max_size must be greater than zero".to_owned(),
+                "batch max_size must be greater than zero",
             )));
         }
         let mut connection = request.connection.clone();
@@ -962,12 +956,10 @@ impl Engine {
             };
             let mapped = match batch_result {
                 Ok(mapped) if mapped.len() == valid.len() => Some(mapped),
-                Ok(mapped) => {
-                    let error = EngineError::InvalidResponse(ErrorDetail::from(format!(
-                        "batch returned {} results for {} input records",
-                        mapped.len(),
-                        valid.len()
-                    )));
+                Ok(_) => {
+                    let error = EngineError::InvalidResponse(ErrorDetail::from(
+                        "batch returned a different number of results than input records",
+                    ));
                     for offset in &valid {
                         errors.push(error.execution_error(Some(base_index + offset)));
                     }
@@ -1199,7 +1191,7 @@ impl Engine {
             } => {
                 if relation.trim().is_empty() {
                     return Err(EngineError::InvalidInput(ErrorDetail::from(
-                        "pagination Link relation cannot be empty".to_owned(),
+                        "pagination Link relation cannot be empty",
                     )));
                 }
                 let mut next_url: Option<String> = None;
@@ -1508,17 +1500,17 @@ impl Engine {
                     active_key: None,
                 });
             }
-            Some(PollState::Failure(status)) => {
-                return Err(EngineError::InvalidResponse(ErrorDetail::from(format!(
-                    "asynchronous operation failed with status '{status}'"
-                ))));
+            Some(PollState::Failure) => {
+                return Err(EngineError::InvalidResponse(ErrorDetail::from(
+                    "asynchronous operation reported a failure status",
+                )));
             }
             Some(PollState::Pending) | None => {}
         }
         let poll_url = poll_url(&initial_value, &initial_response, polling)?;
         if !polling.allow_cross_origin && !same_origin(&initial_response.final_url, &poll_url) {
             return Err(EngineError::UnsafeAddress(ErrorDetail::from(
-                "cross-origin polling is blocked".to_owned(),
+                "cross-origin polling is blocked",
             )));
         }
 
@@ -1554,25 +1546,22 @@ impl Engine {
     ) -> Result<PollCompletion, EngineError> {
         let base_url = &credential_scope.origin.clone();
         let resume = polling.resume.as_ref().ok_or_else(|| {
-            EngineError::InvalidInput(ErrorDetail::from(
-                "polling resume configuration is missing".to_owned(),
-            ))
+            EngineError::InvalidInput(ErrorDetail::from("polling resume configuration is missing"))
         })?;
         validate_job_id(&resume.job_id)?;
         let job_id = Value::String(resume.job_id.clone());
         let template = polling.url_template.as_deref().ok_or_else(|| {
             EngineError::InvalidInput(ErrorDetail::from(
-                "polling resume requires url_template and cannot infer a prior Location URL"
-                    .to_owned(),
+                "polling resume requires url_template and cannot infer a prior Location URL",
             ))
         })?;
         let target = render_poll_template_from_base(template, base_url, Some(&job_id))?;
-        let poll_url = base_url.join(&target).map_err(|error| {
-            EngineError::InvalidUrl(ErrorDetail::from(format!("polling resume URL: {error}")))
+        let poll_url = base_url.join(&target).map_err(|_| {
+            EngineError::InvalidUrl(ErrorDetail::from("polling resume URL is invalid"))
         })?;
         if !polling.allow_cross_origin && !same_origin(base_url, &poll_url) {
             return Err(EngineError::UnsafeAddress(ErrorDetail::from(
-                "cross-origin polling is blocked".to_owned(),
+                "cross-origin polling is blocked",
             )));
         }
         credential_scope.narrow(&poll_url);
@@ -1609,7 +1598,7 @@ impl Engine {
         if polling.max_attempts == 0 {
             remove_active_job(&active_key);
             return Err(EngineError::InvalidInput(ErrorDetail::from(
-                "polling max_attempts must be greater than zero".to_owned(),
+                "polling max_attempts must be greater than zero",
             )));
         }
         let poll_started = Instant::now();
@@ -1665,18 +1654,17 @@ impl Engine {
                         active_key: Some(active_key),
                     });
                 }
-                Some(PollState::Failure(status)) => {
+                Some(PollState::Failure) => {
                     remove_active_job(&active_key);
-                    return Err(EngineError::InvalidResponse(ErrorDetail::from(format!(
-                        "asynchronous operation failed with status '{status}'"
-                    ))));
+                    return Err(EngineError::InvalidResponse(ErrorDetail::from(
+                        "asynchronous operation reported a failure status",
+                    )));
                 }
                 Some(PollState::Pending) => {}
                 None => {
-                    return Err(EngineError::InvalidResponse(ErrorDetail::from(format!(
-                        "poll response has no status at '{}'",
-                        polling.status_path
-                    ))));
+                    return Err(EngineError::InvalidResponse(ErrorDetail::from(
+                        "poll response has no status at status_path",
+                    )));
                 }
             }
             interval_ms = ((interval_ms as f64 * polling.interval_backoff.max(1.0))
@@ -1736,23 +1724,21 @@ impl Engine {
     ) -> Result<ActiveRemoteCancel, EngineError> {
         if cancel.timeout_ms == 0 {
             return Err(EngineError::InvalidInput(ErrorDetail::from(
-                "polling cancel timeout_ms must be greater than zero".to_owned(),
+                "polling cancel timeout_ms must be greater than zero",
             )));
         }
         let target = match cancel.url_template.as_deref() {
             Some(template) => {
                 let rendered = render_poll_template_from_base(template, poll_url, job_id)?;
-                poll_url.join(&rendered).map_err(|error| {
-                    EngineError::InvalidUrl(ErrorDetail::from(format!(
-                        "polling cancel URL: {error}"
-                    )))
+                poll_url.join(&rendered).map_err(|_| {
+                    EngineError::InvalidUrl(ErrorDetail::from("polling cancel URL is invalid"))
                 })?
             }
             None => poll_url.clone(),
         };
         if !polling.allow_cross_origin && !same_origin(poll_url, &target) {
             return Err(EngineError::UnsafeAddress(ErrorDetail::from(
-                "cross-origin polling cancellation is blocked".to_owned(),
+                "cross-origin polling cancellation is blocked",
             )));
         }
         let mut request = self.prepare_followup_request(
@@ -1852,7 +1838,7 @@ impl Engine {
         let target = polling_result_url(status_value, status_response, polling, job_id)?;
         if !polling.allow_cross_origin && !same_origin(&status_response.final_url, &target) {
             return Err(EngineError::UnsafeAddress(ErrorDetail::from(
-                "cross-origin polling result URL is blocked".to_owned(),
+                "cross-origin polling result URL is blocked",
             )));
         }
         let mut request = PreparedRequest {
@@ -1910,14 +1896,10 @@ impl Engine {
             root.join(requested)
         };
         let filename = candidate.file_name().ok_or_else(|| {
-            EngineError::InvalidInput(ErrorDetail::from(
-                "download path must include a filename".to_owned(),
-            ))
+            EngineError::InvalidInput(ErrorDetail::from("download path must include a filename"))
         })?;
         let parent = candidate.parent().ok_or_else(|| {
-            EngineError::InvalidInput(ErrorDetail::from(
-                "download path has no parent directory".to_owned(),
-            ))
+            EngineError::InvalidInput(ErrorDetail::from("download path has no parent directory"))
         })?;
         let parent = fs::canonicalize(parent).await.map_err(file_io)?;
         ensure_within_root(&parent, &root)?;
@@ -1925,16 +1907,14 @@ impl Engine {
         if fs::try_exists(&target).await.map_err(file_io)? {
             let metadata = fs::symlink_metadata(&target).await.map_err(file_io)?;
             if metadata.is_dir() {
-                return Err(EngineError::FileIo(ErrorDetail::from(format!(
-                    "download destination '{}' is a directory",
-                    target.display()
-                ))));
+                return Err(EngineError::FileIo(ErrorDetail::from(
+                    "download destination is a directory",
+                )));
             }
             if !file.overwrite {
-                return Err(EngineError::FileIo(ErrorDetail::from(format!(
-                    "download destination '{}' already exists",
-                    target.display()
-                ))));
+                return Err(EngineError::FileIo(ErrorDetail::from(
+                    "download destination already exists",
+                )));
             }
         }
         Ok(target)
@@ -1945,7 +1925,7 @@ impl Engine {
             Ok(())
         } else {
             Err(EngineError::PolicyViolation(ErrorDetail::from(
-                "file transfers are not enabled for this engine".to_owned(),
+                "file transfers are not enabled for this engine",
             )))
         }
     }
@@ -1960,7 +1940,7 @@ impl Engine {
         self.ensure_file_transfers_allowed()?;
         self.canonical_file_root().await?.ok_or_else(|| {
             EngineError::PolicyViolation(ErrorDetail::from(
-                "file transfers require a configured file_root".to_owned(),
+                "file transfers require a configured file_root",
             ))
         })
     }
@@ -1977,10 +1957,9 @@ impl Engine {
         };
         let root = fs::canonicalize(root).await.map_err(file_io)?;
         if !fs::metadata(&root).await.map_err(file_io)?.is_dir() {
-            return Err(EngineError::FileIo(ErrorDetail::from(format!(
-                "configured file_root '{}' is not a directory",
-                root.display()
-            ))));
+            return Err(EngineError::FileIo(ErrorDetail::from(
+                "configured file_root is not a directory",
+            )));
         }
         Ok(Some(root))
     }
@@ -1994,13 +1973,11 @@ impl Engine {
     ) -> Result<PreparedRequest, EngineError> {
         let template = url_override.unwrap_or(&connection.url);
         if template.trim().is_empty() {
-            return Err(EngineError::InvalidUrl(ErrorDetail::from(
-                "URL is empty".to_owned(),
-            )));
+            return Err(EngineError::InvalidUrl(ErrorDetail::from("URL is empty")));
         }
         let (rendered_url, consumed) = render_template(template, parameters, true);
         let mut url = Url::parse(&rendered_url)
-            .map_err(|error| EngineError::InvalidUrl(ErrorDetail::from(error.to_string())))?;
+            .map_err(|_| EngineError::InvalidUrl(ErrorDetail::from("rendered URL is not valid")))?;
         let legacy_query_only = matches!(
             &connection.method,
             HttpMethod::Get | HttpMethod::Head | HttpMethod::Delete | HttpMethod::Options
@@ -2014,37 +1991,37 @@ impl Engine {
             let location = spec.map_or(ParameterLocation::Auto, |spec| spec.location);
             if consumed.contains(name) {
                 if !matches!(location, ParameterLocation::Auto | ParameterLocation::Path) {
-                    return Err(EngineError::InvalidInput(ErrorDetail::from(format!(
-                        "parameter '{name}' is used in the URL but has location '{location:?}'"
-                    ))));
+                    return Err(EngineError::InvalidInput(ErrorDetail::from(
+                        "parameter is used in the URL but has a non-path location",
+                    )));
                 }
-                refuse_null_in_text(name, value)?;
+                refuse_null_in_text(value)?;
                 continue;
             }
             match location {
                 ParameterLocation::Path => {
-                    return Err(EngineError::InvalidInput(ErrorDetail::from(format!(
-                        "path parameter '{name}' has no matching URL placeholder"
-                    ))));
+                    return Err(EngineError::InvalidInput(ErrorDetail::from(
+                        "path parameter has no matching URL placeholder",
+                    )));
                 }
                 ParameterLocation::Query => {
-                    refuse_null_in_text(name, value)?;
+                    refuse_null_in_text(value)?;
                     query_parameters.insert(name.clone(), value.clone());
                 }
                 ParameterLocation::Header => {
-                    refuse_null_in_text(name, value)?;
+                    refuse_null_in_text(value)?;
                     insert_header(&mut headers, name, parameter_header_value(value));
                 }
                 ParameterLocation::Body => {
                     body_parameters.insert(name.clone(), value.clone());
                 }
                 ParameterLocation::Cookie => {
-                    refuse_null_in_text(name, value)?;
+                    refuse_null_in_text(value)?;
                     validate_cookie_name(name)?;
                     cookies.push((name.clone(), cookie_value(value)?));
                 }
                 ParameterLocation::Auto if legacy_query_only => {
-                    refuse_null_in_text(name, value)?;
+                    refuse_null_in_text(value)?;
                     query_parameters.insert(name.clone(), value.clone());
                 }
                 ParameterLocation::Auto => {
@@ -2074,8 +2051,8 @@ impl Engine {
             match connection.request.body_type {
                 BodyType::Json => PreparedBody::Json(Value::Object(body_parameters)),
                 BodyType::FormUrlencoded => {
-                    for (name, value) in &body_parameters {
-                        refuse_null_in_text(name, value)?;
+                    for value in body_parameters.values() {
+                        refuse_null_in_text(value)?;
                     }
                     PreparedBody::Form(
                         body_parameters
@@ -2085,8 +2062,8 @@ impl Engine {
                     )
                 }
                 BodyType::Multipart => {
-                    for (name, value) in &body_parameters {
-                        refuse_null_in_text(name, value)?;
+                    for value in body_parameters.values() {
+                        refuse_null_in_text(value)?;
                     }
                     multipart_body(&body_parameters, self.config.max_request_bytes)?
                 }
@@ -2095,7 +2072,7 @@ impl Engine {
                     let (rendered, consumed) = render_template(raw, parameters, false);
                     for name in &consumed {
                         if let Some(value) = parameters.get(name) {
-                            refuse_null_in_text(name, value)?;
+                            refuse_null_in_text(value)?;
                         }
                     }
                     ensure_request_size(rendered.len(), self.config.max_request_bytes)?;
@@ -2107,8 +2084,10 @@ impl Engine {
         match &body {
             PreparedBody::Json(value) => {
                 let size = serde_json::to_vec(value)
-                    .map_err(|error| {
-                        EngineError::InvalidInput(ErrorDetail::from(error.to_string()))
+                    .map_err(|_| {
+                        EngineError::InvalidInput(ErrorDetail::from(
+                            "JSON body could not be serialized",
+                        ))
                     })?
                     .len();
                 ensure_request_size(size, self.config.max_request_bytes)?;
@@ -2163,16 +2142,14 @@ impl Default for Engine {
 
 fn required_file_input(request: &ExecutionRequest) -> Result<&FileTransferInput, EngineError> {
     request.input.file.as_ref().ok_or_else(|| {
-        EngineError::InvalidInput(ErrorDetail::from(
-            "operation requires input.file".to_owned(),
-        ))
+        EngineError::InvalidInput(ErrorDetail::from("operation requires input.file"))
     })
 }
 
 fn required_path(value: &str) -> Result<PathBuf, EngineError> {
     if value.trim().is_empty() {
         Err(EngineError::InvalidInput(ErrorDetail::from(
-            "file path cannot be empty".to_owned(),
+            "file path cannot be empty",
         )))
     } else {
         Ok(PathBuf::from(value))
@@ -2182,12 +2159,12 @@ fn required_path(value: &str) -> Result<PathBuf, EngineError> {
 fn transfer_limit(config: &EngineConfig, file: &FileTransferInput) -> Result<u64, EngineError> {
     if config.max_file_transfer_bytes == 0 {
         return Err(EngineError::PolicyViolation(ErrorDetail::from(
-            "max_file_transfer_bytes must be greater than zero".to_owned(),
+            "max_file_transfer_bytes must be greater than zero",
         )));
     }
     match file.max_bytes {
         Some(0) => Err(EngineError::InvalidInput(ErrorDetail::from(
-            "input.file.max_bytes must be greater than zero".to_owned(),
+            "input.file.max_bytes must be greater than zero",
         ))),
         Some(limit) => Ok(limit.min(config.max_file_transfer_bytes)),
         None => Ok(config.max_file_transfer_bytes),
@@ -2200,7 +2177,7 @@ fn validated_checksum(value: Option<&str>) -> Result<Option<String>, EngineError
     };
     if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(EngineError::InvalidInput(ErrorDetail::from(
-            "expected_sha256 must contain exactly 64 hexadecimal characters".to_owned(),
+            "expected_sha256 must contain exactly 64 hexadecimal characters",
         )));
     }
     Ok(Some(value.to_ascii_lowercase()))
@@ -2211,7 +2188,7 @@ fn ensure_within_root(path: &Path, root: &Path) -> Result<(), EngineError> {
         Ok(())
     } else {
         Err(EngineError::PolicyViolation(ErrorDetail::from(
-            "file path is outside the configured file_root".to_owned(),
+            "file path is outside the configured file_root",
         )))
     }
 }
@@ -2232,18 +2209,14 @@ async fn hash_file(path: &Path, limit: u64) -> Result<String, EngineError> {
             break;
         }
         let read = u64::try_from(read).map_err(|_| {
-            EngineError::Runtime(ErrorDetail::from(
-                "file read length overflowed u64".to_owned(),
-            ))
+            EngineError::Runtime(ErrorDetail::from("file read length overflowed u64"))
         })?;
         if total.saturating_add(read) > limit {
             return Err(EngineError::FileTooLarge { limit_bytes: limit });
         }
         digest.update(
             &buffer[..usize::try_from(read).map_err(|_| {
-                EngineError::Runtime(ErrorDetail::from(
-                    "file read length overflowed usize".to_owned(),
-                ))
+                EngineError::Runtime(ErrorDetail::from("file read length overflowed usize"))
             })?],
         );
         total = total.saturating_add(read);
@@ -2251,24 +2224,25 @@ async fn hash_file(path: &Path, limit: u64) -> Result<String, EngineError> {
     Ok(format!("{:x}", digest.finalize()))
 }
 
-fn validate_multipart_name(value: &str, name: &str) -> Result<(), EngineError> {
+fn validate_multipart_name(value: &str) -> Result<(), EngineError> {
     if value.trim().is_empty() || value.contains(['\r', '\n', '\0']) {
-        Err(EngineError::InvalidInput(ErrorDetail::from(format!(
-            "upload {name} is empty or contains unsupported characters"
-        ))))
+        Err(EngineError::InvalidInput(ErrorDetail::from(
+            "upload multipart name is empty or contains unsupported characters",
+        )))
     } else {
         Ok(())
     }
 }
 
 fn file_io(error: std::io::Error) -> EngineError {
-    EngineError::FileIo(ErrorDetail::from(error.to_string()))
+    EngineError::FileIo(crate::error::io_detail(&error))
 }
 
 enum PollState {
     Pending,
     Success,
-    Failure(String),
+    /// The remote status is not kept: it is third-party text.
+    Failure,
 }
 
 fn poll_state(response: &Value, polling: &PollingConfig) -> Result<Option<PollState>, EngineError> {
@@ -2278,9 +2252,9 @@ fn poll_state(response: &Value, polling: &PollingConfig) -> Result<Option<PollSt
     // A null status is not the empty string: it matches no configured value,
     // even an empty one, and is reported instead of being guessed.
     if value.is_null() {
-        return Err(EngineError::InvalidResponse(
-            ErrorDetail::from("asynchronous status is null"),
-        ));
+        return Err(EngineError::InvalidResponse(ErrorDetail::from(
+            "asynchronous status is null",
+        )));
     }
     let status = value_as_text(value);
     if polling
@@ -2302,11 +2276,11 @@ fn poll_state(response: &Value, polling: &PollingConfig) -> Result<Option<PollSt
         .iter()
         .any(|value| value.eq_ignore_ascii_case(&status))
     {
-        return Ok(Some(PollState::Failure(status)));
+        return Ok(Some(PollState::Failure));
     }
-    Err(EngineError::InvalidResponse(ErrorDetail::from(format!(
-        "unknown asynchronous status '{status}'"
-    ))))
+    Err(EngineError::InvalidResponse(ErrorDetail::from(
+        "unknown asynchronous status",
+    )))
 }
 
 fn evaluate_application_success(
@@ -2314,18 +2288,20 @@ fn evaluate_application_success(
     connection: &ConnectionConfig,
 ) -> Result<(), EngineError> {
     if let Some(path) = &connection.response.error_path {
-        if let Some(value) = json_path::get(response, path)
-            .filter(|value| !value.is_null() && value.as_str() != Some(""))
+        if json_path::get(response, path)
+            .is_some_and(|value| !value.is_null() && value.as_str() != Some(""))
         {
+            // The remote message at error_path is not captured: it is
+            // third-party text, and the error contract carries none.
             return Err(EngineError::Application(ErrorDetail::from(
-                application_error_text(value),
+                "the response reports an error at error_path",
             )));
         }
     }
     if let Some(condition) = &connection.response.success_when {
         if !matches_success_condition(response, condition) {
             return Err(EngineError::Application(ErrorDetail::from(
-                "success_when condition was not satisfied".to_owned(),
+                "success_when condition was not satisfied",
             )));
         }
     }
@@ -2383,24 +2359,10 @@ fn json_truthy(value: &Value) -> bool {
     }
 }
 
-fn application_error_text(value: &Value) -> String {
-    value
-        .as_object()
-        .and_then(|object| {
-            ["detail", "error", "message"]
-                .into_iter()
-                .find_map(|key| object.get(key))
-        })
-        .map(value_as_text)
-        .unwrap_or_else(|| value_as_text(value))
-}
-
 fn poll_result(response: Value, polling: &PollingConfig) -> Result<Value, EngineError> {
     match &polling.result_path {
         Some(path) => json_path::get(&response, path).cloned().ok_or_else(|| {
-            EngineError::InvalidResponse(ErrorDetail::from(format!(
-                "polling result path '{path}' was not found"
-            )))
+            EngineError::InvalidResponse(ErrorDetail::from("polling result path was not found"))
         }),
         None => Ok(response),
     }
@@ -2415,17 +2377,12 @@ fn poll_url(
         json_path::get(response, path)
             .and_then(Value::as_str)
             .ok_or_else(|| {
-                EngineError::InvalidResponse(ErrorDetail::from(format!(
-                    "polling URL path '{path}' was not found"
-                )))
+                EngineError::InvalidResponse(ErrorDetail::from("polling URL path was not found"))
             })?
             .to_owned()
     } else if let Some(template) = &polling.url_template {
         let job_id = polling_job_id(response, response_data, polling).ok_or_else(|| {
-            let source = polling.id_header.as_deref().unwrap_or(&polling.id_path);
-            EngineError::InvalidResponse(ErrorDetail::from(format!(
-                "polling job id '{source}' was not found"
-            )))
+            EngineError::InvalidResponse(ErrorDetail::from("polling job id was not found"))
         })?;
         render_poll_template(template, response_data, Some(&job_id))?
     } else if let Some(header) = &polling.location_header {
@@ -2434,19 +2391,20 @@ fn poll_url(
             .get(&header.to_ascii_lowercase())
             .cloned()
             .ok_or_else(|| {
-                EngineError::InvalidResponse(ErrorDetail::from(format!(
-                    "polling response has no '{header}' header"
-                )))
+                EngineError::InvalidResponse(ErrorDetail::from(
+                    "polling response has no location header",
+                ))
             })?
     } else {
         return Err(EngineError::InvalidInput(ErrorDetail::from(
-            "polling requires url_path, url_template, or location_header".to_owned(),
+            "polling requires url_path, url_template, or location_header",
         )));
     };
 
-    response_data.final_url.join(&target).map_err(|error| {
-        EngineError::InvalidUrl(ErrorDetail::from(format!("polling URL: {error}")))
-    })
+    response_data
+        .final_url
+        .join(&target)
+        .map_err(|_| EngineError::InvalidUrl(ErrorDetail::from("polling URL is invalid")))
 }
 
 fn polling_job_id(
@@ -2478,22 +2436,21 @@ fn polling_result_url(
         render_poll_template(template, response_data, job_id)?
     } else {
         let path = polling.result_url_path.as_deref().ok_or_else(|| {
-            EngineError::InvalidInput(ErrorDetail::from(
-                "polling result URL is not configured".to_owned(),
-            ))
+            EngineError::InvalidInput(ErrorDetail::from("polling result URL is not configured"))
         })?;
         let template = json_path::get(response, path)
             .and_then(Value::as_str)
             .ok_or_else(|| {
-                EngineError::InvalidResponse(ErrorDetail::from(format!(
-                    "polling result URL path '{path}' was not found"
-                )))
+                EngineError::InvalidResponse(ErrorDetail::from(
+                    "polling result URL path was not found",
+                ))
             })?;
         render_poll_template(template, response_data, job_id)?
     };
-    response_data.final_url.join(&target).map_err(|error| {
-        EngineError::InvalidUrl(ErrorDetail::from(format!("polling result URL: {error}")))
-    })
+    response_data
+        .final_url
+        .join(&target)
+        .map_err(|_| EngineError::InvalidUrl(ErrorDetail::from("polling result URL is invalid")))
 }
 
 fn render_poll_template(
@@ -2515,9 +2472,7 @@ fn render_poll_template_from_base(
         return Ok(template);
     }
     let job_id = job_id.ok_or_else(|| {
-        EngineError::InvalidResponse(ErrorDetail::from(
-            "polling result URL requires a job id".to_owned(),
-        ))
+        EngineError::InvalidResponse(ErrorDetail::from("polling result URL requires a job id"))
     })?;
     let parameters = Map::from_iter([
         ("id".to_owned(), job_id.clone()),
@@ -2541,7 +2496,7 @@ fn validate_job_id(value: &str) -> Result<(), EngineError> {
         || value.chars().any(|character| character.is_control())
     {
         return Err(EngineError::InvalidInput(ErrorDetail::from(
-            "polling job_id must contain 1 to 512 non-control characters".to_owned(),
+            "polling job_id must contain 1 to 512 non-control characters",
         )));
     }
     Ok(())
@@ -2561,10 +2516,9 @@ fn resolve_parameters(
             // it would make a configuration mistake indistinguishable from an
             // optional parameter that is legitimately absent.
             ParameterMode::Fixed if parameter.value.is_none() => {
-                return Err(EngineError::InvalidInput(ErrorDetail::from(format!(
-                    "fixed parameter '{}' has no value",
-                    parameter.name
-                ))));
+                return Err(EngineError::InvalidInput(ErrorDetail::from(
+                    "fixed parameter has no value",
+                )));
             }
             ParameterMode::Fixed => parameter.value.clone(),
             ParameterMode::Mapped => {
@@ -2582,7 +2536,7 @@ fn resolve_parameters(
             }
             None if parameter.required => {
                 return Err(EngineError::MissingParameter(ErrorDetail::from(
-                    parameter.name.clone(),
+                    "a required parameter has no value",
                 )));
             }
             None => {}
@@ -2597,9 +2551,7 @@ fn response_records(
 ) -> Result<Vec<Value>, EngineError> {
     let selected = match &connection.response.records_path {
         Some(path) => json_path::get(response, path).ok_or_else(|| {
-            EngineError::InvalidResponse(ErrorDetail::from(format!(
-                "records path '{path}' was not found"
-            )))
+            EngineError::InvalidResponse(ErrorDetail::from("records path was not found"))
         })?,
         None => response,
     };
@@ -2609,7 +2561,7 @@ fn response_records(
             Value::Object(_) => Ok(vec![selected.clone()]),
             Value::Null => Ok(Vec::new()),
             _ => Err(EngineError::InvalidResponse(ErrorDetail::from(
-                "records value must be an array, object, or null".to_owned(),
+                "records value must be an array, object, or null",
             ))),
         };
     }
@@ -2652,7 +2604,7 @@ fn flat_batch_item(parameters: &JsonObject) -> Result<&Value, EngineError> {
     match (values.next(), values.next()) {
         (Some(value), None) if !value.is_null() => Ok(value),
         _ => Err(EngineError::InvalidInput(ErrorDetail::from(
-            "a flat_array batch record must resolve to exactly one non-null parameter".to_owned(),
+            "a flat_array batch record must resolve to exactly one non-null parameter",
         ))),
     }
 }
@@ -2666,16 +2618,11 @@ fn batch_response(
         response
     } else {
         json_path::get(response, &batch.output_path).ok_or_else(|| {
-            EngineError::InvalidResponse(ErrorDetail::from(format!(
-                "batch output path '{}' was not found",
-                batch.output_path
-            )))
+            EngineError::InvalidResponse(ErrorDetail::from("batch output path was not found"))
         })?
     };
     let values = selected.as_array().ok_or_else(|| {
-        EngineError::InvalidResponse(ErrorDetail::from(
-            "batch output must be an array".to_owned(),
-        ))
+        EngineError::InvalidResponse(ErrorDetail::from("batch output must be an array"))
     })?;
     values
         .iter()
@@ -2789,12 +2736,7 @@ fn apply_transforms(
         }
         let source = row.get(&transform.source).cloned().unwrap_or(Value::Null);
         let value = transform_value(&source, transform).map_err(|failure| {
-            EngineError::InvalidResponse(ErrorDetail::from(format!(
-                "transform '{}' for column '{}' {}",
-                transform.operation,
-                transform.column,
-                failure.describe()
-            )))
+            EngineError::InvalidResponse(ErrorDetail::from(failure.describe()))
         })?;
         row.insert(transform.column.clone(), value);
     }
@@ -2873,12 +2815,8 @@ const MAX_ROUND_DECIMALS: u64 = 15;
 /// is indistinguishable from data. They are configuration errors.
 fn validate_transforms(response: &ResponseConfig) -> Result<(), EngineError> {
     for transform in &response.transforms {
-        let invalid = |reason: &str| {
-            Err(EngineError::InvalidInput(ErrorDetail::from(format!(
-                "transform '{}' for column '{}' {reason}",
-                transform.operation, transform.column
-            ))))
-        };
+        let invalid =
+            |reason: &'static str| Err(EngineError::InvalidInput(ErrorDetail::from(reason)));
         if transform.column.is_empty() {
             return invalid("has an empty column");
         }
@@ -2947,10 +2885,9 @@ fn validate_transforms(response: &ResponseConfig) -> Result<(), EngineError> {
                 }
             }
             _ => {
-                return Err(EngineError::InvalidInput(ErrorDetail::from(format!(
-                    "transform for column '{}' has an unknown operation",
-                    transform.column
-                ))));
+                return Err(EngineError::InvalidInput(ErrorDetail::from(
+                    "transform for column has an unknown operation",
+                )));
             }
         }
     }
@@ -3397,9 +3334,9 @@ fn serialize_query_parameter(
             );
         }
         (QueryStyle::DeepObject, _) => {
-            return Err(EngineError::InvalidInput(ErrorDetail::from(format!(
-                "deep_object query parameter '{name}' must be an object"
-            ))));
+            return Err(EngineError::InvalidInput(ErrorDetail::from(
+                "deep_object query parameter must be an object",
+            )));
         }
         (_, value) => pairs.push((name.to_owned(), value_as_text(value))),
     }
@@ -3452,7 +3389,7 @@ fn cookie_value(value: &Value) -> Result<String, EngineError> {
         .any(|byte| byte <= 0x20 || byte >= 0x7f || matches!(byte, b';' | b','))
     {
         return Err(EngineError::InvalidInput(ErrorDetail::from(
-            "cookie parameter contains unsupported characters".to_owned(),
+            "cookie parameter contains unsupported characters",
         )));
     }
     Ok(value)
@@ -3485,9 +3422,9 @@ fn validate_cookie_name(name: &str) -> Result<(), EngineError> {
     if valid {
         Ok(())
     } else {
-        Err(EngineError::InvalidInput(ErrorDetail::from(format!(
-            "invalid cookie parameter name '{name}'"
-        ))))
+        Err(EngineError::InvalidInput(ErrorDetail::from(
+            "invalid cookie parameter name",
+        )))
     }
 }
 
@@ -3531,14 +3468,12 @@ fn multipart_body(
                 .get("data_base64")
                 .and_then(Value::as_str)
                 .ok_or_else(|| {
-                    EngineError::InvalidInput(ErrorDetail::from(format!(
-                        "multipart file '{name}' has invalid data_base64"
-                    )))
+                    EngineError::InvalidInput(ErrorDetail::from(
+                        "multipart file has invalid data_base64",
+                    ))
                 })?;
             let data = STANDARD.decode(encoded).map_err(|_| {
-                EngineError::InvalidInput(ErrorDetail::from(format!(
-                    "multipart file '{name}' is not valid base64"
-                )))
+                EngineError::InvalidInput(ErrorDetail::from("multipart file is not valid base64"))
             })?;
             let filename = file
                 .get("filename")
@@ -3549,9 +3484,9 @@ fn multipart_body(
                 .get("content_type")
                 .map(|value| {
                     value.as_str().map(ToOwned::to_owned).ok_or_else(|| {
-                        EngineError::InvalidInput(ErrorDetail::from(format!(
-                            "multipart file '{name}' has invalid content_type"
-                        )))
+                        EngineError::InvalidInput(ErrorDetail::from(
+                            "multipart file has invalid content_type",
+                        ))
                     })
                 })
                 .transpose()?;
@@ -3596,7 +3531,7 @@ fn ensure_request_size(size: usize, limit: usize) -> Result<(), EngineError> {
 /// Text has no spelling for `null`. Rendering it as an empty string would send
 /// a value the caller never gave, and dropping it would make it absent, so the
 /// request is rejected before any network activity. A JSON body keeps `null`.
-fn refuse_null_in_text(name: &str, value: &Value) -> Result<(), EngineError> {
+fn refuse_null_in_text(value: &Value) -> Result<(), EngineError> {
     fn contains_null(value: &Value) -> bool {
         match value {
             Value::Null => true,
@@ -3606,9 +3541,9 @@ fn refuse_null_in_text(name: &str, value: &Value) -> Result<(), EngineError> {
         }
     }
     if contains_null(value) {
-        return Err(EngineError::InvalidInput(ErrorDetail::from(format!(
-            "parameter '{name}' is null in a location rendered as text"
-        ))));
+        return Err(EngineError::InvalidInput(ErrorDetail::from(
+            "parameter is null in a location rendered as text",
+        )));
     }
     Ok(())
 }
@@ -3629,16 +3564,15 @@ fn value_as_string(value: &Value) -> Option<String> {
 }
 
 fn usize_value(value: usize) -> Result<Value, EngineError> {
-    let value = u64::try_from(value).map_err(|_| {
-        EngineError::InvalidInput(ErrorDetail::from("numeric value is too large".to_owned()))
-    })?;
+    let value = u64::try_from(value)
+        .map_err(|_| EngineError::InvalidInput(ErrorDetail::from("numeric value is too large")))?;
     Ok(Value::Number(Number::from(value)))
 }
 
 fn ensure_page_size(page_size: usize) -> Result<(), EngineError> {
     if page_size == 0 {
         Err(EngineError::InvalidInput(ErrorDetail::from(
-            "pagination page_size must be greater than zero".to_owned(),
+            "pagination page_size must be greater than zero",
         )))
     } else {
         Ok(())
@@ -3665,14 +3599,12 @@ fn merge_execution_metrics(target: &mut ExecutionMetrics, source: &ExecutionMetr
 }
 
 fn pagination_url(base: &Url, target: &str, allow_cross_origin: bool) -> Result<Url, EngineError> {
-    let resolved = base.join(target).map_err(|error| {
-        EngineError::InvalidResponse(ErrorDetail::from(format!(
-            "invalid pagination link: {error}"
-        )))
-    })?;
+    let resolved = base
+        .join(target)
+        .map_err(|_| EngineError::InvalidResponse(ErrorDetail::from("invalid pagination link")))?;
     if !allow_cross_origin && !same_origin(base, &resolved) {
         return Err(EngineError::UnsafeAddress(ErrorDetail::from(
-            "cross-origin pagination is blocked".to_owned(),
+            "cross-origin pagination is blocked",
         )));
     }
     Ok(resolved)
@@ -3689,7 +3621,7 @@ fn link_header_target(
         let entry = entry.trim();
         let Some(target_end) = entry.strip_prefix('<').and_then(|value| value.find('>')) else {
             return Err(EngineError::InvalidResponse(ErrorDetail::from(
-                "Link header contains an invalid target".to_owned(),
+                "Link header contains an invalid target",
             )));
         };
         let target = &entry[1..=target_end];
@@ -3741,7 +3673,7 @@ fn split_link_header(value: &str) -> Result<Vec<&str>, EngineError> {
     }
     if in_target || in_quotes || escaped {
         return Err(EngineError::InvalidResponse(ErrorDetail::from(
-            "Link header is not well formed".to_owned(),
+            "Link header is not well formed",
         )));
     }
     entries.push(&value[start..]);
@@ -3769,7 +3701,7 @@ fn split_quoted(value: &str, separator: char) -> Result<Vec<&str>, EngineError> 
     }
     if in_quotes || escaped {
         return Err(EngineError::InvalidResponse(ErrorDetail::from(
-            "Link header parameter is not well formed".to_owned(),
+            "Link header parameter is not well formed",
         )));
     }
     values.push(&value[start..]);
@@ -3781,7 +3713,7 @@ fn unquote_header_value(value: &str) -> Result<&str, EngineError> {
         (Some(value), Some(_)) if value.ends_with('"') => Ok(&value[..value.len() - 1]),
         (None, None) => Ok(value),
         _ => Err(EngineError::InvalidResponse(ErrorDetail::from(
-            "Link header contains an invalid quoted value".to_owned(),
+            "Link header contains an invalid quoted value",
         ))),
     }
 }
@@ -3837,7 +3769,7 @@ fn apply_idempotency(
     let name = connection.idempotency.name.trim();
     if name.is_empty() || name.len() > 256 || name.chars().any(char::is_control) {
         return Err(EngineError::InvalidInput(ErrorDetail::from(
-            "idempotency field name must contain 1 to 256 non-control characters".to_owned(),
+            "idempotency field name must contain 1 to 256 non-control characters",
         )));
     }
     match connection.idempotency.location {
@@ -3849,22 +3781,22 @@ fn apply_idempotency(
             {
                 if existing != key {
                     return Err(EngineError::InvalidInput(ErrorDetail::from(
-                        "idempotency header conflicts with a configured header".to_owned(),
+                        "idempotency header conflicts with a configured header",
                     )));
                 }
             }
             insert_header(headers, name, key.to_owned());
         }
         IdempotencyLocation::Query => {
-            insert_idempotency_field(query, name, key, "query")?;
+            insert_idempotency_field(query, name, key)?;
         }
         IdempotencyLocation::Body => {
             if matches!(connection.request.body_type, BodyType::None | BodyType::Raw) {
                 return Err(EngineError::InvalidInput(ErrorDetail::from(
-                    "body idempotency requires json, form_urlencoded, or multipart body".to_owned(),
+                    "body idempotency requires json, form_urlencoded, or multipart body",
                 )));
             }
-            insert_idempotency_field(body, name, key, "body")?;
+            insert_idempotency_field(body, name, key)?;
         }
     }
     Ok(())
@@ -3874,13 +3806,12 @@ fn insert_idempotency_field(
     target: &mut JsonObject,
     name: &str,
     key: &str,
-    location: &str,
 ) -> Result<(), EngineError> {
     if let Some(existing) = target.get(name) {
         if existing.as_str() != Some(key) {
-            return Err(EngineError::InvalidInput(ErrorDetail::from(format!(
-                "idempotency {location} field conflicts with a configured parameter"
-            ))));
+            return Err(EngineError::InvalidInput(ErrorDetail::from(
+                "idempotency field conflicts with a configured parameter",
+            )));
         }
     }
     target.insert(name.to_owned(), Value::String(key.to_owned()));
@@ -4262,7 +4193,7 @@ fn failed_result_with_recoveries(
 fn validate_idempotency_key(key: &str) -> Result<(), EngineError> {
     if key.is_empty() || key.len() > 255 || !key.bytes().all(|byte| matches!(byte, 0x21..=0x7e)) {
         return Err(EngineError::InvalidInput(ErrorDetail::from(
-            "idempotency_key must contain 1 to 255 visible ASCII bytes".to_owned(),
+            "idempotency_key must contain 1 to 255 visible ASCII bytes",
         )));
     }
     Ok(())
@@ -4275,17 +4206,17 @@ fn validate_execution_configuration(request: &ExecutionRequest) -> Result<(), En
     };
     if polling.max_attempts == 0 {
         return Err(EngineError::InvalidInput(ErrorDetail::from(
-            "polling max_attempts must be greater than zero".to_owned(),
+            "polling max_attempts must be greater than zero",
         )));
     }
     if polling.max_wait_ms == Some(0) {
         return Err(EngineError::InvalidInput(ErrorDetail::from(
-            "polling max_wait_ms must be greater than zero when configured".to_owned(),
+            "polling max_wait_ms must be greater than zero when configured",
         )));
     }
     if !polling.interval_backoff.is_finite() || polling.interval_backoff < 1.0 {
         return Err(EngineError::InvalidInput(ErrorDetail::from(
-            "polling interval_backoff must be finite and at least one".to_owned(),
+            "polling interval_backoff must be finite and at least one",
         )));
     }
     if polling
@@ -4294,7 +4225,7 @@ fn validate_execution_configuration(request: &ExecutionRequest) -> Result<(), En
         .is_some_and(|cancel| cancel.timeout_ms == 0)
     {
         return Err(EngineError::InvalidInput(ErrorDetail::from(
-            "polling cancel timeout_ms must be greater than zero".to_owned(),
+            "polling cancel timeout_ms must be greater than zero",
         )));
     }
 
@@ -4304,12 +4235,12 @@ fn validate_execution_configuration(request: &ExecutionRequest) -> Result<(), En
     validate_job_id(&resume.job_id)?;
     if polling.url_template.is_none() {
         return Err(EngineError::InvalidInput(ErrorDetail::from(
-            "polling resume requires url_template and cannot infer a prior Location URL".to_owned(),
+            "polling resume requires url_template and cannot infer a prior Location URL",
         )));
     }
     if request.connection.pagination.is_some() {
         return Err(EngineError::InvalidInput(ErrorDetail::from(
-            "polling resume cannot be combined with pagination".to_owned(),
+            "polling resume cannot be combined with pagination",
         )));
     }
     if request
@@ -4319,12 +4250,12 @@ fn validate_execution_configuration(request: &ExecutionRequest) -> Result<(), En
         .is_some_and(|batch| batch.enabled)
     {
         return Err(EngineError::InvalidInput(ErrorDetail::from(
-            "polling resume cannot be combined with batch execution".to_owned(),
+            "polling resume cannot be combined with batch execution",
         )));
     }
     if request.operation == ExecutionOperation::Enrich && request.input.records.len() != 1 {
         return Err(EngineError::InvalidInput(ErrorDetail::from(
-            "polling resume for enrichment requires exactly one input record".to_owned(),
+            "polling resume for enrichment requires exactly one input record",
         )));
     }
     Ok(())
@@ -4334,8 +4265,11 @@ fn execution_fingerprint(request: &ExecutionRequest) -> Result<String, EngineErr
     let mut normalized = request.clone();
     normalized.options.deadline = None;
     normalized.options.idempotency_key = None;
-    let bytes = serde_json::to_vec(&normalized)
-        .map_err(|error| EngineError::Runtime(ErrorDetail::from(error.to_string())))?;
+    let bytes = serde_json::to_vec(&normalized).map_err(|_| {
+        EngineError::Runtime(ErrorDetail::from(
+            "request could not be serialized for its fingerprint",
+        ))
+    })?;
     Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
@@ -4412,8 +4346,9 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        is_disallowed_idempotency_header, is_sensitive_header_name, link_header_target, map_value,
-        names_an_idempotency_key, render_template, resolve_parameters, selected_response_headers,
+        evaluate_application_success, is_disallowed_idempotency_header, is_sensitive_header_name,
+        link_header_target, map_value, names_an_idempotency_key, render_template,
+        resolve_parameters, selected_response_headers,
     };
     use crate::{ConnectionConfig, OutputMapping, ParameterLocation, ParameterMode, ParameterSpec};
 
@@ -4674,6 +4609,29 @@ mod tests {
         assert_eq!(
             selected_response_headers(&headers, &["*".to_owned()]),
             BTreeMap::from([("etag".to_owned(), "abc".to_owned())])
+        );
+    }
+
+    #[test]
+    fn the_remote_message_at_error_path_is_not_captured() {
+        let connection = ConnectionConfig {
+            response: crate::ResponseConfig {
+                error_path: Some("error".to_owned()),
+                ..crate::ResponseConfig::default()
+            },
+            ..ConnectionConfig::default()
+        };
+        let response = json!({"error": {"message": "user abc123 not found at 10.0.0.7"}});
+        let Err(crate::EngineError::Application(detail)) =
+            evaluate_application_success(&response, &connection)
+        else {
+            panic!("an error at error_path must fail the request");
+        };
+        assert_eq!(detail.text(), "the response reports an error at error_path");
+        let debug = format!("{detail:?}");
+        assert!(
+            !debug.contains("abc123") && !debug.contains("10.0.0.7"),
+            "{debug}"
         );
     }
 }

@@ -414,7 +414,7 @@ impl Transport {
             .map(|(_, lease)| Some(lease))
             .ok_or_else(|| {
                 EngineError::PolicyViolation(ErrorDetail::from(
-                    "the engine is holding the maximum number of cookie jars".to_owned(),
+                    "the engine is holding the maximum number of cookie jars",
                 ))
             })
     }
@@ -523,7 +523,7 @@ impl Transport {
         if target.resume {
             if request.method != HttpMethod::Get {
                 return Err(EngineError::InvalidInput(ErrorDetail::from(
-                    "resumable downloads require the GET method".to_owned(),
+                    "resumable downloads require the GET method",
                 )));
             }
             if request
@@ -536,7 +536,7 @@ impl Transport {
                     .any(|name| name.eq_ignore_ascii_case(IF_RANGE.as_str()))
             {
                 return Err(EngineError::InvalidInput(ErrorDetail::from(
-                    "managed resume cannot be combined with Range or If-Range headers".to_owned(),
+                    "managed resume cannot be combined with Range or If-Range headers",
                 )));
             }
             set_request_header(
@@ -568,10 +568,9 @@ impl Transport {
                 .iter()
                 .any(|allowed| allowed == request.method.as_str())
         {
-            return Err(EngineError::PolicyViolation(ErrorDetail::from(format!(
-                "custom HTTP method '{}' is not in allowed_custom_methods",
-                request.method.as_str()
-            ))));
+            return Err(EngineError::PolicyViolation(ErrorDetail::from(
+                "custom HTTP method is not in allowed_custom_methods",
+            )));
         }
         // Refused rather than approximated, and refused here so that a request
         // that cannot run produces no effect at all — not even an OAuth token
@@ -585,18 +584,18 @@ impl Transport {
         // session that may not be the one that answered.
         if request.cookies.enabled && request.cache.enabled {
             return Err(EngineError::PolicyViolation(ErrorDetail::from(
-                "the HTTP cache cannot be combined with the cookie store".to_owned(),
+                "the HTTP cache cannot be combined with the cookie store",
             )));
         }
         if request.cookies.enabled {
             if !self.config.allow_cookie_store {
                 return Err(EngineError::PolicyViolation(ErrorDetail::from(
-                    "cookie storage is not enabled for this engine".to_owned(),
+                    "cookie storage is not enabled for this engine",
                 )));
             }
             if request.cookies.jar_id.trim().is_empty() {
                 return Err(EngineError::InvalidInput(ErrorDetail::from(
-                    "cookie jar_id cannot be empty".to_owned(),
+                    "cookie jar_id cannot be empty",
                 )));
             }
         }
@@ -627,19 +626,19 @@ impl Transport {
         }
         if !matches!(request.method, HttpMethod::Get | HttpMethod::Head) {
             return Err(EngineError::InvalidInput(ErrorDetail::from(
-                "HTTP cache is supported only for GET and HEAD".to_owned(),
+                "HTTP cache is supported only for GET and HEAD",
             )));
         }
         if self.config.max_cache_entries == 0 || self.config.max_cache_bytes == 0 {
             return Err(EngineError::PolicyViolation(ErrorDetail::from(
-                "HTTP cache capacity is disabled by this engine".to_owned(),
+                "HTTP cache capacity is disabled by this engine",
             )));
         }
         // Defensive: `validate_request` already refused this combination before
         // anything reached the network.
         if request.cookies.enabled {
             return Err(EngineError::PolicyViolation(ErrorDetail::from(
-                "the HTTP cache cannot be combined with the cookie store".to_owned(),
+                "the HTTP cache cannot be combined with the cookie store",
             )));
         }
         // A client certificate authenticates the request just as much as a
@@ -653,7 +652,7 @@ impl Transport {
             || request.tls.client_identity_pem.is_some();
         if authenticated && !request.cache.allow_authenticated {
             return Err(EngineError::PolicyViolation(ErrorDetail::from(
-                "authenticated HTTP caching requires allow_authenticated".to_owned(),
+                "authenticated HTTP caching requires allow_authenticated",
             )));
         }
 
@@ -788,17 +787,17 @@ impl Transport {
         }
         if policy.failure_threshold == 0 {
             return Err(EngineError::InvalidInput(ErrorDetail::from(
-                "circuit breaker failure_threshold must be greater than zero".to_owned(),
+                "circuit breaker failure_threshold must be greater than zero",
             )));
         }
         if policy.group.trim().is_empty() {
             return Err(EngineError::InvalidInput(ErrorDetail::from(
-                "circuit breaker group cannot be empty".to_owned(),
+                "circuit breaker group cannot be empty",
             )));
         }
         if self.config.max_circuit_origins == 0 {
             return Err(EngineError::PolicyViolation(ErrorDetail::from(
-                "circuit breaker state is disabled by this engine".to_owned(),
+                "circuit breaker state is disabled by this engine",
             )));
         }
         let key = CircuitKey {
@@ -854,9 +853,7 @@ impl Transport {
                 .half_open_probe
                 .is_some_and(|(_, started)| started.elapsed() < probe_lease);
             if opened_at.elapsed() < recovery || probing {
-                return Err(EngineError::CircuitOpen {
-                    origin: ErrorDetail::from(key.origin),
-                });
+                return Err(EngineError::CircuitOpen);
             }
             let generation = self.next_sequence();
             state.half_open_probe = Some((generation, Instant::now()));
@@ -955,7 +952,7 @@ impl Transport {
         }
 
         Err(EngineError::Runtime(ErrorDetail::from(
-            "retry loop terminated unexpectedly".to_owned(),
+            "retry loop terminated unexpectedly",
         )))
     }
 
@@ -993,10 +990,9 @@ impl Transport {
         success_statuses: &[u16],
     ) -> Result<DownloadData, EngineError> {
         if !target.overwrite && fs::try_exists(&target.path).await.map_err(file_io)? {
-            return Err(EngineError::FileIo(ErrorDetail::from(format!(
-                "destination '{}' already exists",
-                target.path.display()
-            ))));
+            return Err(EngineError::FileIo(ErrorDetail::from(
+                "destination already exists",
+            )));
         }
         let mut state = create_download_state(&target.path).await?;
         let result = self
@@ -1088,7 +1084,7 @@ impl Transport {
         }
 
         Err(EngineError::Runtime(ErrorDetail::from(
-            "download retry loop terminated unexpectedly".to_owned(),
+            "download retry loop terminated unexpectedly",
         )))
     }
 
@@ -1125,8 +1121,8 @@ impl Transport {
             return Ok((token, RequestStats::default()));
         }
 
-        let url = Url::parse(&token_url).map_err(|error| {
-            EngineError::InvalidUrl(ErrorDetail::from(format!("OAuth token URL: {error}")))
+        let url = Url::parse(&token_url).map_err(|_| {
+            EngineError::InvalidUrl(ErrorDetail::from("OAuth token URL is invalid"))
         })?;
         let token_request = PreparedRequest {
             url,
@@ -1156,20 +1152,17 @@ impl Transport {
             rate_limit_wait_ms: response.rate_limit_wait_ms,
         };
         if !(200..300).contains(&response.status) {
-            return Err(EngineError::Authentication(ErrorDetail::from(format!(
-                "token endpoint returned HTTP {}",
-                response.status
-            ))));
+            return Err(EngineError::Authentication(ErrorDetail::from(
+                "token endpoint returned an unsuccessful HTTP status",
+            )));
         }
 
         let payload: Value = serde_json::from_slice(&response.body).map_err(|_| {
-            EngineError::Authentication(ErrorDetail::from(
-                "token endpoint returned invalid JSON".to_owned(),
-            ))
+            EngineError::Authentication(ErrorDetail::from("token endpoint returned invalid JSON"))
         })?;
         if is_arcgis && payload.get("error").is_some() {
             return Err(EngineError::Authentication(ErrorDetail::from(
-                "ArcGIS token endpoint returned an error".to_owned(),
+                "ArcGIS token endpoint returned an error",
             )));
         }
         let token_field = if is_arcgis { "token" } else { "access_token" };
@@ -1178,9 +1171,7 @@ impl Transport {
             .and_then(Value::as_str)
             .filter(|token| !token.is_empty())
             .ok_or_else(|| {
-                EngineError::Authentication(ErrorDetail::from(format!(
-                    "token response has no {token_field}"
-                )))
+                EngineError::Authentication(ErrorDetail::from("token response has no token field"))
             })?
             .to_owned();
         if !is_arcgis
@@ -1190,7 +1181,7 @@ impl Transport {
                 .is_some_and(|token_type| !token_type.eq_ignore_ascii_case("bearer"))
         {
             return Err(EngineError::Authentication(ErrorDetail::from(
-                "only bearer OAuth tokens are supported".to_owned(),
+                "only bearer OAuth tokens are supported",
             )));
         }
         let expires_in = if is_arcgis {
@@ -1276,7 +1267,7 @@ impl Transport {
                 | AuthConfig::OAuth2Password { .. }
                 | AuthConfig::ArcgisToken { .. } => {
                     return Err(EngineError::Runtime(ErrorDetail::from(
-                        "OAuth authentication was not resolved".to_owned(),
+                        "OAuth authentication was not resolved",
                     )));
                 }
             };
@@ -1297,33 +1288,30 @@ impl Transport {
             let response = builder.send().await.map_err(map_reqwest_error)?;
             if response.status().is_redirection() && request.allow_redirects {
                 if redirects == request.max_redirects {
-                    return Err(EngineError::InvalidResponse(ErrorDetail::from(format!(
-                        "redirect limit ({}) exceeded",
-                        request.max_redirects
-                    ))));
+                    return Err(EngineError::InvalidResponse(ErrorDetail::from(
+                        "redirect limit exceeded",
+                    )));
                 }
                 let location = response
                     .headers()
                     .get(LOCATION)
                     .ok_or_else(|| {
                         EngineError::InvalidResponse(ErrorDetail::from(
-                            "redirect response has no Location header".to_owned(),
+                            "redirect response has no Location header",
                         ))
                     })?
                     .to_str()
                     .map_err(|_| {
                         EngineError::InvalidResponse(ErrorDetail::from(
-                            "redirect Location is not valid text".to_owned(),
+                            "redirect Location is not valid text",
                         ))
                     })?;
-                let next = url.join(location).map_err(|error| {
-                    EngineError::InvalidUrl(ErrorDetail::from(format!(
-                        "invalid redirect target: {error}"
-                    )))
+                let next = url.join(location).map_err(|_| {
+                    EngineError::InvalidUrl(ErrorDetail::from("invalid redirect target"))
                 })?;
                 if !same_origin(&origin, &next) {
                     return Err(EngineError::UnsafeAddress(ErrorDetail::from(
-                        "cross-origin redirects are blocked".to_owned(),
+                        "cross-origin redirects are blocked",
                     )));
                 }
                 url = next;
@@ -1340,7 +1328,7 @@ impl Transport {
         }
 
         Err(EngineError::Runtime(ErrorDetail::from(
-            "redirect loop terminated unexpectedly".to_owned(),
+            "redirect loop terminated unexpectedly",
         )))
     }
 
@@ -1416,9 +1404,9 @@ impl Transport {
             return Err(EngineError::HttpStatus { status });
         }
         if resumed && !matches!(status, 200 | 206) {
-            return Err(EngineError::InvalidResponse(ErrorDetail::from(format!(
-                "resumed download returned HTTP {status}; expected 200 or 206"
-            ))));
+            return Err(EngineError::InvalidResponse(ErrorDetail::from(
+                "resumed download returned a status other than 200 or 206",
+            )));
         }
         let content_length = response_content_length(&response);
         let response_etag = strong_response_etag(&response);
@@ -1431,24 +1419,23 @@ impl Transport {
                 .and_then(|length| length.checked_add(1))
                 .ok_or_else(|| {
                     EngineError::InvalidResponse(ErrorDetail::from(
-                        "download Content-Range has invalid bounds".to_owned(),
+                        "download Content-Range has invalid bounds",
                     ))
                 })?;
             if content_length.is_some_and(|length| length != segment_length) {
                 return Err(EngineError::InvalidResponse(ErrorDetail::from(
-                    "download Content-Length does not match Content-Range".to_owned(),
+                    "download Content-Length does not match Content-Range",
                 )));
             }
             if resumed {
                 if content_range.start != state.bytes_written {
-                    return Err(EngineError::InvalidResponse(ErrorDetail::from(format!(
-                        "resumed download started at byte {}, expected {}",
-                        content_range.start, state.bytes_written
-                    ))));
+                    return Err(EngineError::InvalidResponse(ErrorDetail::from(
+                        "resumed download started at an unexpected byte",
+                    )));
                 }
                 if response_etag.as_deref() != state.etag.as_deref() {
                     return Err(EngineError::InvalidResponse(ErrorDetail::from(
-                        "resumed download returned a missing or different strong ETag".to_owned(),
+                        "resumed download returned a missing or different strong ETag",
                     )));
                 }
                 if state
@@ -1456,12 +1443,12 @@ impl Transport {
                     .is_some_and(|expected| expected != total)
                 {
                     return Err(EngineError::InvalidResponse(ErrorDetail::from(
-                        "resumed download changed the complete representation length".to_owned(),
+                        "resumed download changed the complete representation length",
                     )));
                 }
             } else if content_range.start != 0 || content_range.end.checked_add(1) != Some(total) {
                 return Err(EngineError::InvalidResponse(ErrorDetail::from(
-                    "partial response cannot be promoted as a complete download".to_owned(),
+                    "partial response cannot be promoted as a complete download",
                 )));
             } else {
                 state.etag = response_etag;
@@ -1487,9 +1474,7 @@ impl Transport {
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(map_reqwest_error)?;
             let chunk_length = u64::try_from(chunk.len()).map_err(|_| {
-                EngineError::Runtime(ErrorDetail::from(
-                    "download chunk length overflowed u64".to_owned(),
-                ))
+                EngineError::Runtime(ErrorDetail::from("download chunk length overflowed u64"))
             })?;
             if state.bytes_written.saturating_add(chunk_length) > target.max_bytes {
                 return Err(EngineError::FileTooLarge {
@@ -1500,9 +1485,7 @@ impl Transport {
                 .file
                 .as_mut()
                 .ok_or_else(|| {
-                    EngineError::Runtime(ErrorDetail::from(
-                        "download staging file is closed".to_owned(),
-                    ))
+                    EngineError::Runtime(ErrorDetail::from("download staging file is closed"))
                 })?
                 .write_all(&chunk)
                 .await
@@ -1514,18 +1497,16 @@ impl Transport {
         let attempt_bytes = state.bytes_written.saturating_sub(attempt_start);
         if content_length.is_some_and(|length| length != attempt_bytes) {
             return Err(EngineError::InvalidResponse(ErrorDetail::from(
-                "download body length does not match Content-Length".to_owned(),
+                "download body length does not match Content-Length",
             )));
         }
         if expected_total.is_some_and(|total| state.bytes_written != total) {
             return Err(EngineError::InvalidResponse(ErrorDetail::from(
-                "download body length does not match the complete representation".to_owned(),
+                "download body length does not match the complete representation",
             )));
         }
         let file = state.file.as_mut().ok_or_else(|| {
-            EngineError::Runtime(ErrorDetail::from(
-                "download staging file is closed".to_owned(),
-            ))
+            EngineError::Runtime(ErrorDetail::from("download staging file is closed"))
         })?;
         file.flush().await.map_err(file_io)?;
         file.sync_all().await.map_err(file_io)?;
@@ -1534,10 +1515,7 @@ impl Transport {
         let sha256 = format!("{:x}", state.digest.clone().finalize());
         if let Some(expected) = &target.expected_sha256 {
             if !sha256.eq_ignore_ascii_case(expected) {
-                return Err(EngineError::ChecksumMismatch {
-                    expected: ErrorDetail::from(expected.clone()),
-                    actual: ErrorDetail::from(sha256),
-                });
+                return Err(EngineError::ChecksumMismatch);
             }
         }
         persist_download(&state.temporary, &target.path, target.overwrite).await?;
@@ -1584,9 +1562,7 @@ impl Transport {
             .clone()
             .acquire_owned()
             .await
-            .map_err(|_| {
-                EngineError::Runtime(ErrorDetail::from("request limiter is closed".to_owned()))
-            })?;
+            .map_err(|_| EngineError::Runtime(ErrorDetail::from("request limiter is closed")))?;
         Ok((permit, wait.as_millis().min(u128::from(u64::MAX)) as u64))
     }
 
@@ -1599,12 +1575,12 @@ impl Transport {
     ) -> Result<Client, EngineError> {
         if !tls.verify && !self.config.allow_insecure_tls {
             return Err(EngineError::PolicyViolation(ErrorDetail::from(
-                "TLS verification cannot be disabled by this engine".to_owned(),
+                "TLS verification cannot be disabled by this engine",
             )));
         }
         if proxy.is_some() && !self.config.allow_proxies {
             return Err(EngineError::PolicyViolation(ErrorDetail::from(
-                "proxies are not enabled for this engine".to_owned(),
+                "proxies are not enabled for this engine",
             )));
         }
 
@@ -1612,7 +1588,7 @@ impl Transport {
         let proxy_endpoint = match proxy {
             Some(proxy) => {
                 let url = Url::parse(&proxy.url).map_err(|_| {
-                    EngineError::InvalidInput(ErrorDetail::from("invalid proxy URL".to_owned()))
+                    EngineError::InvalidInput(ErrorDetail::from("invalid proxy URL"))
                 })?;
                 Some((proxy, url.clone(), self.resolve_endpoint(&url).await?))
             }
@@ -1625,7 +1601,7 @@ impl Transport {
         let jar = leased.as_ref().map(|(jar, _)| jar);
         if cookies.enabled && jar.is_none() {
             return Err(EngineError::PolicyViolation(ErrorDetail::from(
-                "the engine is holding the maximum number of cookie jars".to_owned(),
+                "the engine is holding the maximum number of cookie jars",
             )));
         }
         let key = ClientKey {
@@ -1657,15 +1633,13 @@ impl Transport {
         }
         if let Some(pem) = &tls.ca_bundle_pem {
             let certificate = Certificate::from_pem(pem.as_bytes()).map_err(|_| {
-                EngineError::InvalidInput(ErrorDetail::from("invalid TLS CA bundle PEM".to_owned()))
+                EngineError::InvalidInput(ErrorDetail::from("invalid TLS CA bundle PEM"))
             })?;
             builder = builder.add_root_certificate(certificate);
         }
         if let Some(pem) = &tls.client_identity_pem {
             let identity = Identity::from_pem(pem.as_bytes()).map_err(|_| {
-                EngineError::InvalidInput(ErrorDetail::from(
-                    "invalid TLS client identity PEM".to_owned(),
-                ))
+                EngineError::InvalidInput(ErrorDetail::from("invalid TLS client identity PEM"))
             })?;
             builder = builder.identity(identity);
         }
@@ -1675,16 +1649,15 @@ impl Transport {
         if let Some((config, _, (proxy_host, proxy_address, proxy_pin, proxy_port))) =
             proxy_endpoint
         {
-            let mut configured = Proxy::all(&config.url).map_err(|_| {
-                EngineError::InvalidInput(ErrorDetail::from("invalid proxy URL".to_owned()))
-            })?;
+            let mut configured = Proxy::all(&config.url)
+                .map_err(|_| EngineError::InvalidInput(ErrorDetail::from("invalid proxy URL")))?;
             match (&config.username, &config.password) {
                 (Some(username), password) => {
                     configured = configured.basic_auth(username, password.as_deref().unwrap_or(""));
                 }
                 (None, Some(_)) => {
                     return Err(EngineError::InvalidInput(ErrorDetail::from(
-                        "proxy password requires a username".to_owned(),
+                        "proxy password requires a username",
                     )));
                 }
                 (None, None) => {}
@@ -1694,9 +1667,9 @@ impl Transport {
                 builder = builder.resolve(&proxy_host, SocketAddr::new(proxy_address, proxy_port));
             }
         }
-        let client = builder
-            .build()
-            .map_err(|error| EngineError::Runtime(ErrorDetail::from(error.to_string())))?;
+        let client = builder.build().map_err(|_| {
+            EngineError::Runtime(ErrorDetail::from("HTTP client could not be built"))
+        })?;
         if self.config.max_pooled_origins > 0 {
             let sequence = self.next_sequence();
             let mut clients = self.clients.lock().await;
@@ -1725,12 +1698,13 @@ impl Transport {
         url: &Url,
     ) -> Result<(String, IpAddr, bool, u16), EngineError> {
         validate_url(url)?;
-        let port = url.port_or_known_default().ok_or_else(|| {
-            EngineError::InvalidUrl(ErrorDetail::from("URL has no usable port".to_owned()))
-        })?;
-        let (host, address, should_pin) = match url.host().ok_or_else(|| {
-            EngineError::InvalidUrl(ErrorDetail::from("URL must include a host".to_owned()))
-        })? {
+        let port = url
+            .port_or_known_default()
+            .ok_or_else(|| EngineError::InvalidUrl(ErrorDetail::from("URL has no usable port")))?;
+        let (host, address, should_pin) = match url
+            .host()
+            .ok_or_else(|| EngineError::InvalidUrl(ErrorDetail::from("URL must include a host")))?
+        {
             Host::Ipv4(address) => {
                 let address = IpAddr::V4(address);
                 self.validate_address(address)?;
@@ -1744,15 +1718,15 @@ impl Transport {
             Host::Domain(domain) => {
                 let addresses: Vec<IpAddr> = lookup_host((domain, port))
                     .await
-                    .map_err(|error| {
-                        EngineError::DnsResolution(ErrorDetail::from(format!("{domain}: {error}")))
+                    .map_err(|_| {
+                        EngineError::DnsResolution(ErrorDetail::from("DNS resolution failed"))
                     })?
                     .map(|socket| socket.ip())
                     .collect();
                 if addresses.is_empty() {
-                    return Err(EngineError::DnsResolution(ErrorDetail::from(format!(
-                        "{domain}: no addresses returned"
-                    ))));
+                    return Err(EngineError::DnsResolution(ErrorDetail::from(
+                        "no addresses returned",
+                    )));
                 }
                 for address in &addresses {
                     self.validate_address(*address)?;
@@ -1768,7 +1742,7 @@ impl Transport {
             return Ok(());
         }
         Err(EngineError::UnsafeAddress(ErrorDetail::from(
-            address.to_string(),
+            "the resolved address is private, loopback, or otherwise not public",
         )))
     }
 }
@@ -1776,12 +1750,12 @@ impl Transport {
 fn validate_url(url: &Url) -> Result<(), EngineError> {
     if !matches!(url.scheme(), "http" | "https") {
         return Err(EngineError::InvalidUrl(ErrorDetail::from(
-            "only http and https URLs are supported".to_owned(),
+            "only http and https URLs are supported",
         )));
     }
     if !url.username().is_empty() || url.password().is_some() {
         return Err(EngineError::InvalidUrl(ErrorDetail::from(
-            "credentials embedded in URLs are not allowed".to_owned(),
+            "credentials embedded in URLs are not allowed",
         )));
     }
     Ok(())
@@ -1796,9 +1770,10 @@ fn request_headers(request: &PreparedRequest) -> Result<HeaderMap, EngineError> 
     let mut headers = HeaderMap::new();
     for (name, value) in &request.headers {
         let name = HeaderName::from_bytes(name.as_bytes())
-            .map_err(|_| EngineError::InvalidHeader(ErrorDetail::from(name.clone())))?;
-        let value = HeaderValue::from_str(value)
-            .map_err(|_| EngineError::InvalidHeader(ErrorDetail::from(name.to_string())))?;
+            .map_err(|_| EngineError::InvalidHeader(ErrorDetail::from("header name is invalid")))?;
+        let value = HeaderValue::from_str(value).map_err(|_| {
+            EngineError::InvalidHeader(ErrorDetail::from("header value is invalid"))
+        })?;
         headers.insert(name, value);
     }
 
@@ -1808,17 +1783,19 @@ fn request_headers(request: &PreparedRequest) -> Result<HeaderMap, EngineError> 
         location: ApiKeyLocation::Header,
     } = &request.auth
     {
-        let name = HeaderName::from_bytes(key_name.as_bytes())
-            .map_err(|_| EngineError::InvalidHeader(ErrorDetail::from(key_name.clone())))?;
-        let value = HeaderValue::from_str(key_value)
-            .map_err(|_| EngineError::InvalidHeader(ErrorDetail::from(key_name.clone())))?;
+        let name = HeaderName::from_bytes(key_name.as_bytes()).map_err(|_| {
+            EngineError::InvalidHeader(ErrorDetail::from("API key header name is invalid"))
+        })?;
+        let value = HeaderValue::from_str(key_value).map_err(|_| {
+            EngineError::InvalidHeader(ErrorDetail::from("API key header value is invalid"))
+        })?;
         headers.insert(name, value);
     }
 
     if matches!(request.body, PreparedBody::Multipart { .. }) && headers.contains_key(CONTENT_TYPE)
     {
         return Err(EngineError::InvalidHeader(ErrorDetail::from(
-            "Content-Type must be generated by the multipart encoder".to_owned(),
+            "Content-Type must be generated by the multipart encoder",
         )));
     }
     if matches!(
@@ -1827,7 +1804,7 @@ fn request_headers(request: &PreparedRequest) -> Result<HeaderMap, EngineError> 
     ) && headers.contains_key(CONTENT_LENGTH)
     {
         return Err(EngineError::InvalidHeader(ErrorDetail::from(
-            "Content-Length must be generated by the streaming encoder".to_owned(),
+            "Content-Length must be generated by the streaming encoder",
         )));
     }
     if !headers.contains_key(CONTENT_TYPE) {
@@ -1839,9 +1816,8 @@ fn request_headers(request: &PreparedRequest) -> Result<HeaderMap, EngineError> 
             PreparedBody::Raw(_) | PreparedBody::None => None,
         };
         if let Some(content_type) = content_type {
-            let content_type = HeaderValue::from_str(content_type).map_err(|_| {
-                EngineError::InvalidHeader(ErrorDetail::from("content-type".to_owned()))
-            })?;
+            let content_type = HeaderValue::from_str(content_type)
+                .map_err(|_| EngineError::InvalidHeader(ErrorDetail::from("content-type")))?;
             headers.insert(CONTENT_TYPE, content_type);
         }
     }
@@ -1879,10 +1855,7 @@ async fn multipart_form(
         let mut part = part.file_name(file.filename.clone());
         if let Some(content_type) = &file.content_type {
             part = part.mime_str(content_type).map_err(|_| {
-                EngineError::InvalidInput(ErrorDetail::from(format!(
-                    "invalid multipart content type for '{}'",
-                    file.field_name
-                )))
+                EngineError::InvalidInput(ErrorDetail::from("invalid multipart content type"))
             })?;
         }
         form = form.part(file.field_name.clone(), part);
@@ -1957,53 +1930,43 @@ fn satisfied_content_range(response: &reqwest::Response) -> Result<ContentRange,
         .get(CONTENT_RANGE)
         .ok_or_else(|| {
             EngineError::InvalidResponse(ErrorDetail::from(
-                "206 response has no Content-Range header".to_owned(),
+                "206 response has no Content-Range header",
             ))
         })?
         .to_str()
         .map_err(|_| {
             EngineError::InvalidResponse(ErrorDetail::from(
-                "download Content-Range is not valid text".to_owned(),
+                "download Content-Range is not valid text",
             ))
         })?;
     let (unit, range_and_total) = value.trim().split_once(' ').ok_or_else(|| {
-        EngineError::InvalidResponse(ErrorDetail::from(
-            "download Content-Range is malformed".to_owned(),
-        ))
+        EngineError::InvalidResponse(ErrorDetail::from("download Content-Range is malformed"))
     })?;
     if !unit.eq_ignore_ascii_case("bytes") {
         return Err(EngineError::InvalidResponse(ErrorDetail::from(
-            "download Content-Range must use byte units".to_owned(),
+            "download Content-Range must use byte units",
         )));
     }
     let (range, total) = range_and_total.split_once('/').ok_or_else(|| {
-        EngineError::InvalidResponse(ErrorDetail::from(
-            "download Content-Range is malformed".to_owned(),
-        ))
+        EngineError::InvalidResponse(ErrorDetail::from("download Content-Range is malformed"))
     })?;
     let (start, end) = range.split_once('-').ok_or_else(|| {
         EngineError::InvalidResponse(ErrorDetail::from(
-            "download Content-Range does not describe a satisfied range".to_owned(),
+            "download Content-Range does not describe a satisfied range",
         ))
     })?;
     let start = start.parse::<u64>().map_err(|_| {
-        EngineError::InvalidResponse(ErrorDetail::from(
-            "download Content-Range start is invalid".to_owned(),
-        ))
+        EngineError::InvalidResponse(ErrorDetail::from("download Content-Range start is invalid"))
     })?;
     let end = end.parse::<u64>().map_err(|_| {
-        EngineError::InvalidResponse(ErrorDetail::from(
-            "download Content-Range end is invalid".to_owned(),
-        ))
+        EngineError::InvalidResponse(ErrorDetail::from("download Content-Range end is invalid"))
     })?;
     let total = total.parse::<u64>().map_err(|_| {
-        EngineError::InvalidResponse(ErrorDetail::from(
-            "download Content-Range total is invalid".to_owned(),
-        ))
+        EngineError::InvalidResponse(ErrorDetail::from("download Content-Range total is invalid"))
     })?;
     if start > end || end >= total {
         return Err(EngineError::InvalidResponse(ErrorDetail::from(
-            "download Content-Range bounds are invalid".to_owned(),
+            "download Content-Range bounds are invalid",
         )));
     }
     Ok(ContentRange { start, end, total })
@@ -2075,7 +2038,7 @@ async fn create_download_file(target: &Path) -> Result<(PathBuf, fs::File), Engi
         }
     }
     Err(EngineError::FileIo(ErrorDetail::from(
-        "could not allocate a unique temporary download file".to_owned(),
+        "could not allocate a unique temporary download file",
     )))
 }
 
@@ -2105,7 +2068,7 @@ async fn persist_download(
 }
 
 fn file_io(error: std::io::Error) -> EngineError {
-    EngineError::FileIo(ErrorDetail::from(error.to_string()))
+    EngineError::FileIo(crate::error::io_detail(&error))
 }
 
 type TokenRequestParts = (String, BTreeMap<String, String>, AuthConfig, bool, u64);
@@ -2177,7 +2140,7 @@ fn token_request_parts(auth: &AuthConfig) -> Result<TokenRequestParts, EngineErr
         } => {
             if !matches!(client.as_str(), "requestip" | "referer" | "ip") {
                 return Err(EngineError::InvalidInput(ErrorDetail::from(
-                    "ArcGIS client must be requestip, referer, or ip".to_owned(),
+                    "ArcGIS client must be requestip, referer, or ip",
                 )));
             }
             let mut form = BTreeMap::from([
@@ -2192,7 +2155,7 @@ fn token_request_parts(auth: &AuthConfig) -> Result<TokenRequestParts, EngineErr
                     "referer".to_owned(),
                     referer.clone().ok_or_else(|| {
                         EngineError::InvalidInput(ErrorDetail::from(
-                            "ArcGIS referer client requires referer".to_owned(),
+                            "ArcGIS referer client requires referer",
                         ))
                     })?,
                 );
@@ -2200,9 +2163,7 @@ fn token_request_parts(auth: &AuthConfig) -> Result<TokenRequestParts, EngineErr
                 form.insert(
                     "ip".to_owned(),
                     ip.clone().ok_or_else(|| {
-                        EngineError::InvalidInput(ErrorDetail::from(
-                            "ArcGIS ip client requires ip".to_owned(),
-                        ))
+                        EngineError::InvalidInput(ErrorDetail::from("ArcGIS ip client requires ip"))
                     })?,
                 );
             }
@@ -2215,7 +2176,7 @@ fn token_request_parts(auth: &AuthConfig) -> Result<TokenRequestParts, EngineErr
             ))
         }
         _ => Err(EngineError::Runtime(ErrorDetail::from(
-            "token requested for non-token authentication".to_owned(),
+            "token requested for non-token authentication",
         ))),
     }
 }
@@ -2284,7 +2245,11 @@ fn cache_key(request: &PreparedRequest) -> Result<CacheKey, EngineError> {
         PreparedBody::Json(value) => {
             1_u8.hash(&mut hasher);
             serde_json::to_vec(value)
-                .map_err(|error| EngineError::InvalidInput(ErrorDetail::from(error.to_string())))?
+                .map_err(|_| {
+                    EngineError::InvalidInput(ErrorDetail::from(
+                        "JSON body could not be serialized for the cache key",
+                    ))
+                })?
                 .hash(&mut hasher);
         }
         PreparedBody::Form(values) => {
@@ -2302,7 +2267,7 @@ fn cache_key(request: &PreparedRequest) -> Result<CacheKey, EngineError> {
                     PreparedFileSource::Bytes(data) => data.hash(&mut hasher),
                     PreparedFileSource::Path { .. } => {
                         return Err(EngineError::InvalidInput(ErrorDetail::from(
-                            "HTTP cache cannot fingerprint streaming multipart files".to_owned(),
+                            "HTTP cache cannot fingerprint streaming multipart files",
                         )));
                     }
                 }
@@ -2314,7 +2279,7 @@ fn cache_key(request: &PreparedRequest) -> Result<CacheKey, EngineError> {
         }
         PreparedBody::Stream(_) => {
             return Err(EngineError::InvalidInput(ErrorDetail::from(
-                "HTTP cache cannot fingerprint streaming request bodies".to_owned(),
+                "HTTP cache cannot fingerprint streaming request bodies",
             )));
         }
     }
@@ -2434,7 +2399,7 @@ fn method(method: &HttpMethod) -> Result<Method, EngineError> {
         HttpMethod::Delete => Ok(Method::DELETE),
         HttpMethod::Options => Ok(Method::OPTIONS),
         HttpMethod::Custom(value) => Method::from_bytes(value.as_bytes()).map_err(|_| {
-            EngineError::InvalidInput(ErrorDetail::from("invalid custom HTTP method".to_owned()))
+            EngineError::InvalidInput(ErrorDetail::from("invalid custom HTTP method"))
         }),
     }
 }
@@ -2443,11 +2408,11 @@ fn map_reqwest_error(error: reqwest::Error) -> EngineError {
     if error.is_timeout() {
         EngineError::Timeout
     } else if error.is_connect() {
-        EngineError::Transport(ErrorDetail::from("connection failed".to_owned()))
+        EngineError::Transport(ErrorDetail::from("connection failed"))
     } else if error.is_body() || error.is_decode() {
-        EngineError::Transport(ErrorDetail::from("response transfer failed".to_owned()))
+        EngineError::Transport(ErrorDetail::from("response transfer failed"))
     } else {
-        EngineError::Transport(ErrorDetail::from("request failed".to_owned()))
+        EngineError::Transport(ErrorDetail::from("request failed"))
     }
 }
 
