@@ -116,8 +116,11 @@ struct XmlNode {
 }
 
 fn parse_xml(body: &[u8]) -> Result<Value, EngineError> {
+    // The reader does not trim text events: it reports every `&...;` as an
+    // event of its own, so trimming each piece dropped the spaces around a
+    // reference (`Fish &amp; Chips` read as `Fish&Chips`). The text of an
+    // element is trimmed once, whole, when the element is attached.
     let mut reader = Reader::from_reader(body);
-    reader.config_mut().trim_text(true);
     let mut stack: Vec<XmlNode> = Vec::new();
     let mut root: Option<(String, Value)> = None;
 
@@ -337,6 +340,29 @@ mod tests {
     fn parses_xml_repeated_elements_and_attributes() {
         let value = parse_xml(b"<root id=\"1\"><item>A</item><item>B</item></root>").unwrap();
         assert_eq!(value, json!({"root": {"@id": "1", "item": ["A", "B"]}}));
+    }
+
+    #[test]
+    fn xml_text_keeps_the_spaces_around_references() {
+        // Found by the property test of the XML writer: each piece of text
+        // between references was trimmed on its own.
+        assert_eq!(
+            parse_xml(b"<a>Fish &amp; Chips</a>").unwrap(),
+            json!({"a": "Fish & Chips"})
+        );
+        assert_eq!(
+            parse_xml(b"<a> 1 &#x3C; 2 </a>").unwrap(),
+            json!({"a": "1 < 2"})
+        );
+        // Mixed content keeps the text as written, trimmed only at the ends.
+        assert_eq!(
+            parse_xml(b"<a id=\"1\"> x <b/> y </a>").unwrap(),
+            json!({"a": {"@id": "1", "b": "", "#text": "x  y"}})
+        );
+        assert_eq!(
+            parse_xml(b"<a>\n  <b>1</b>\n  <b>2</b>\n</a>").unwrap(),
+            json!({"a": {"b": ["1", "2"]}})
+        );
     }
 
     #[test]
