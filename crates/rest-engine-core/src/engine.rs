@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
     sync::{
@@ -3759,13 +3760,34 @@ fn split_quoted(value: &str, separator: char) -> Result<Vec<&str>, EngineError> 
     Ok(values)
 }
 
-fn unquote_header_value(value: &str) -> Result<&str, EngineError> {
-    match (value.strip_prefix('"'), value.strip_suffix('"')) {
-        (Some(value), Some(_)) if value.ends_with('"') => Ok(&value[..value.len() - 1]),
-        (None, None) => Ok(value),
-        _ => Err(EngineError::InvalidResponse(ErrorDetail::from(
+/// The value of a Link parameter: a token as written, or a quoted-string with
+/// its quoted-pairs resolved (RFC 9110, 5.6.4). Comparing the escaped text
+/// would make `rel="n\ext"` miss `next` and end the pagination silently.
+fn unquote_header_value(value: &str) -> Result<Cow<'_, str>, EngineError> {
+    let invalid = || {
+        EngineError::InvalidResponse(ErrorDetail::from(
             "Link header contains an invalid quoted value",
-        ))),
+        ))
+    };
+    match (value.strip_prefix('"'), value.strip_suffix('"')) {
+        (Some(inner), Some(_)) if inner.ends_with('"') => {
+            let inner = &inner[..inner.len() - 1];
+            if !inner.contains('\\') {
+                return Ok(Cow::Borrowed(inner));
+            }
+            let mut unescaped = String::with_capacity(inner.len());
+            let mut characters = inner.chars();
+            while let Some(character) = characters.next() {
+                if character == '\\' {
+                    unescaped.push(characters.next().ok_or_else(invalid)?);
+                } else {
+                    unescaped.push(character);
+                }
+            }
+            Ok(Cow::Owned(unescaped))
+        }
+        (None, None) => Ok(Cow::Borrowed(value)),
+        _ => Err(invalid()),
     }
 }
 
@@ -4502,6 +4524,27 @@ mod tests {
         assert_eq!(
             link_header_target(&headers, "last").unwrap().as_deref(),
             Some("/last")
+        );
+    }
+
+    #[test]
+    fn a_quoted_relation_is_compared_without_its_escapes() {
+        // Found by the property test against RFC 8288: the quoted-pair was
+        // compared as written, so the next page was never found and the
+        // pagination ended as if the service had no more pages.
+        let headers = BTreeMap::from([(
+            "link".to_owned(),
+            r#"</a>; rel="n\ext", </b>; rel="http://example.com/\Rel""#.to_owned(),
+        )]);
+        assert_eq!(
+            link_header_target(&headers, "next").unwrap().as_deref(),
+            Some("/a")
+        );
+        assert_eq!(
+            link_header_target(&headers, "http://example.com/Rel")
+                .unwrap()
+                .as_deref(),
+            Some("/b")
         );
     }
 
