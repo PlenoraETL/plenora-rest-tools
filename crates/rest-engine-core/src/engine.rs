@@ -191,12 +191,22 @@ impl Engine {
         let mut result = match outcome {
             Controlled::Finished(result) => result,
             Controlled::Cancelled => {
-                self.cancel_active_jobs(&active_jobs, RemoteCancelTrigger::Cancellation)
+                // The remote cancellation is a request of this execution too.
+                EXECUTION_TALLY
+                    .scope(
+                        tally.clone(),
+                        self.cancel_active_jobs(&active_jobs, RemoteCancelTrigger::Cancellation),
+                    )
                     .await;
                 failed_result_with_recoveries(EngineError::Cancelled, recoveries_from(&active_jobs))
             }
             Controlled::Deadline => {
-                self.cancel_active_jobs(&active_jobs, RemoteCancelTrigger::Deadline)
+                // The remote cancellation is a request of this execution too.
+                EXECUTION_TALLY
+                    .scope(
+                        tally.clone(),
+                        self.cancel_active_jobs(&active_jobs, RemoteCancelTrigger::Deadline),
+                    )
                     .await;
                 failed_result_with_recoveries(EngineError::Timeout, recoveries_from(&active_jobs))
             }
