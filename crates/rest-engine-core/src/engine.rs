@@ -2778,12 +2778,27 @@ fn parse_transform_condition(condition: &str) -> Option<TransformCondition<'_>> 
         return None;
     };
     let column = left.trim();
-    if column.is_empty() || right.contains("==") || right.contains("!=") {
+    let is_operator_or_quote = |character: char| matches!(character, '=' | '!' | '\'' | '"');
+    if column.is_empty() || column.contains(is_operator_or_quote) {
         return None;
     }
-    let expected = right
-        .trim()
-        .trim_matches(|character| character == '\'' || character == '"');
+    // The literal is either quoted with one matching pair, or bare. Trimming
+    // quote characters from both ends would accept `'active` or `active"` and
+    // compare against a value the author never wrote.
+    let right = right.trim();
+    let expected = match right.chars().next() {
+        Some(quote @ ('\'' | '"')) => {
+            let inner = right
+                .strip_prefix(quote)
+                .and_then(|rest| rest.strip_suffix(quote))?;
+            if inner.contains(quote) {
+                return None;
+            }
+            inner
+        }
+        _ if right.is_empty() || right.contains(is_operator_or_quote) => return None,
+        _ => right,
+    };
     Some(TransformCondition {
         column,
         expected,

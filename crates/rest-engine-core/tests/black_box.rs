@@ -3817,6 +3817,14 @@ async fn invalid_transforms_are_rejected_before_any_request() {
         json!({"source": "a", "column": "c", "operation": "replace", "value": {"find": ""}}),
         json!({"source": "a", "column": "c", "operation": "default_if_null"}),
         json!({"source": "a", "column": "c", "operation": "uppercase", "condition": "a"}),
+        json!({"source": "a", "column": "c", "operation": "uppercase", "condition": "status == 'active"}),
+        json!({"source": "a", "column": "c", "operation": "uppercase", "condition": "status == active'"}),
+        json!({"source": "a", "column": "c", "operation": "uppercase", "condition": "status == 'a'b'"}),
+        json!({"source": "a", "column": "c", "operation": "uppercase", "condition": "status == 'a\""}),
+        json!({"source": "a", "column": "c", "operation": "uppercase", "condition": "status =="}),
+        json!({"source": "a", "column": "c", "operation": "uppercase", "condition": "== 'x'"}),
+        json!({"source": "a", "column": "c", "operation": "uppercase", "condition": "a == b == c"}),
+        json!({"source": "a", "column": "c", "operation": "uppercase", "condition": "a != b == c"}),
     ];
     for transform in invalid {
         // Port 9 is never contacted: validation fails first.
@@ -4011,4 +4019,22 @@ async fn a_null_job_id_is_not_rendered_into_the_poll_url() {
         1,
         "no poll may reach /jobs/"
     );
+}
+
+#[tokio::test]
+async fn well_formed_conditions_still_apply() {
+    let transforms = json!([
+        {"source": "b", "column": "single", "operation": "uppercase", "condition": "a == 'on'"},
+        {"source": "b", "column": "double", "operation": "uppercase", "condition": "a == \"on\""},
+        {"source": "b", "column": "bare", "operation": "uppercase", "condition": "a==on"},
+        {"source": "b", "column": "empty", "operation": "uppercase", "condition": "a != ''"},
+        {"source": "b", "column": "skipped", "operation": "uppercase", "condition": "a != 'on'"}
+    ]);
+    let result = transform_result(r#"{"a":"on","b":"x"}"#, transforms).await;
+    assert_eq!(result["status"], "success", "{result}");
+    let record = &result["output"]["records"][0];
+    for column in ["single", "double", "bare", "empty"] {
+        assert_eq!(record[column], json!("X"), "{column}: {record}");
+    }
+    assert_eq!(record.get("skipped"), None, "{record}");
 }

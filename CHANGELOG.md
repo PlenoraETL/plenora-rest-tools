@@ -22,7 +22,8 @@ release finché una release non viene preparata.
   diversa da default_if_null è INVALID_INPUT.
 - Le trasformazioni della risposta sono validate prima dell'esecuzione:
   un'operazione sconosciuta, un argomento mancante o di tipo sbagliato, una
-  divisione per zero costante o una condition non riconosciuta sono
+  divisione per zero costante o una condition non riconosciuta (compresi
+  apici non chiusi o in eccesso, come `status == 'active`) sono
   INVALID_INPUT. Prima l'operazione sconosciuta lasciava il valore invariato e
   una condition senza operatore applicava sempre la trasformazione.
 - Un valore che una trasformazione non sa trattare, o un risultato senza

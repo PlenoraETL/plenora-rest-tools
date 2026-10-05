@@ -176,8 +176,11 @@ multiply e divide richiedono un numero; divide non accetta zero; round accetta
 un intero di decimali da 0 a 15; prefix e suffix una stringa, un numero o un
 booleano; replace un oggetto con find non vuoto e replace stringa;
 default_if_null un valore; le conversioni di temperatura, uppercase e lowercase
-nessun valore) e una condition che non sia `colonna == 'valore'` o
-`colonna != 'valore'`.
+nessun valore) e una condition che non sia `colonna == valore` o
+`colonna != valore`, dove il valore è racchiuso in una sola coppia di apici
+uguali (`'attivo'`, `"attivo"`) oppure è nudo senza apici né operatori. Un
+apice non chiuso (`status == 'active`) o in eccesso è un errore, non un
+valore da confrontare.
 
 Durante l'esecuzione null si propaga: ogni operazione tranne default_if_null
 trasforma null in null. Un valore che l'operazione non sa trattare fa fallire
