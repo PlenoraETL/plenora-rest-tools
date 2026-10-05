@@ -166,7 +166,7 @@ fn parse_xml(body: &[u8]) -> Result<Value, EngineError> {
                         "XML has an unexpected closing tag",
                     ))
                 })?;
-                if xml_name(event.name().as_ref()) != node.name {
+                if xml_name(event.name().as_ref())? != node.name {
                     return Err(EngineError::InvalidResponse(ErrorDetail::from(
                         "XML closing tag does not match",
                     )));
@@ -249,7 +249,7 @@ fn xml_node(
         let attribute = attribute.map_err(|_| {
             EngineError::InvalidResponse(ErrorDetail::from("XML contains an invalid attribute"))
         })?;
-        let key = format!("@{}", xml_name(attribute.key.as_ref()));
+        let key = format!("@{}", xml_name(attribute.key.as_ref())?);
         // Attribute values are normalized as XML 1.0 requires. Absent an XML
         // declaration the specification assumes 1.0, and the 1.1 specific
         // newline forms are deliberately not honoured for remote payloads.
@@ -260,10 +260,20 @@ fn xml_node(
                     "XML contains an invalid attribute value",
                 ))
             })?;
-        content.insert(key, Value::String(value.into_owned()));
+        // Two attributes that differ only by their namespace prefix (`x:id`,
+        // `y:id`) map to the same key; keeping the last one dropped the other
+        // value without a trace.
+        if content
+            .insert(key, Value::String(value.into_owned()))
+            .is_some()
+        {
+            return Err(EngineError::InvalidResponse(ErrorDetail::from(
+                "XML attributes collide once namespace prefixes are removed",
+            )));
+        }
     }
     Ok(XmlNode {
-        name: xml_name(event.name().as_ref()),
+        name: xml_name(event.name().as_ref())?,
         content,
         text: String::new(),
     })
@@ -306,9 +316,13 @@ fn attach_xml_node(
     }
 }
 
-fn xml_name(raw: &[u8]) -> String {
-    let name = String::from_utf8_lossy(raw);
-    name.rsplit(':').next().unwrap_or(&name).to_owned()
+/// The local name of an element or attribute. A name that is not UTF-8 is
+/// refused: replacing its bytes would make different names equal.
+fn xml_name(raw: &[u8]) -> Result<String, EngineError> {
+    let name = std::str::from_utf8(raw).map_err(|_| {
+        EngineError::InvalidResponse(ErrorDetail::from("XML contains a name that is not UTF-8"))
+    })?;
+    Ok(name.rsplit(':').next().unwrap_or(name).to_owned())
 }
 
 #[cfg(test)]
@@ -355,6 +369,32 @@ mod tests {
     fn parses_xml_repeated_elements_and_attributes() {
         let value = parse_xml(b"<root id=\"1\"><item>A</item><item>B</item></root>").unwrap();
         assert_eq!(value, json!({"root": {"@id": "1", "item": ["A", "B"]}}));
+    }
+
+    #[test]
+    fn xml_names_are_never_altered_or_merged_silently() {
+        // Found while writing the properties of the response_body fuzz
+        // target: a name that was not UTF-8 was read with replacement
+        // characters, and attributes differing only by prefix overwrote each
+        // other.
+        let Err(crate::EngineError::InvalidResponse(detail)) = parse_xml(b"<a\xff>1</a\xff>")
+        else {
+            panic!("a name that is not UTF-8 must be refused");
+        };
+        assert_eq!(detail.text(), "XML contains a name that is not UTF-8");
+        let Err(crate::EngineError::InvalidResponse(detail)) =
+            parse_xml(b"<a x:id=\"1\" y:id=\"2\"/>")
+        else {
+            panic!("colliding attributes must be refused");
+        };
+        assert_eq!(
+            detail.text(),
+            "XML attributes collide once namespace prefixes are removed"
+        );
+        assert_eq!(
+            parse_xml(b"<p:a xmlns:p=\"u\" p:id=\"1\"/>").unwrap(),
+            json!({"a": {"@p": "u", "@id": "1"}})
+        );
     }
 
     #[test]
