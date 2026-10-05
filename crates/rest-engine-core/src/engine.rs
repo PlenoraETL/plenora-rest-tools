@@ -1292,6 +1292,13 @@ impl Engine {
             &mut request,
             preserved_idempotency_header(connection, options),
         );
+        // The idempotency key is what switched on retries for a non-idempotent
+        // method. When its header had to be withheld from this origin, the
+        // request is no longer protected, so it is retried only if the caller
+        // asked for that independently of the key.
+        if idempotency_header_withheld(connection, options, &request) {
+            request.retry.retry_non_idempotent = connection.retry.retry_non_idempotent;
+        }
         self.request_prepared_json(
             connection,
             request,
@@ -3677,6 +3684,25 @@ fn preserved_idempotency_header<'a>(
     Some(name)
 }
 
+/// True when the engine added an idempotency header and the credential scope
+/// removed it from `request`.
+fn idempotency_header_withheld(
+    connection: &ConnectionConfig,
+    options: &crate::ExecutionOptions,
+    request: &PreparedRequest,
+) -> bool {
+    if options.idempotency_key.is_none()
+        || connection.idempotency.location != IdempotencyLocation::Header
+    {
+        return false;
+    }
+    let name = connection.idempotency.name.trim();
+    !request
+        .headers
+        .keys()
+        .any(|header| header.eq_ignore_ascii_case(name))
+}
+
 /// True when an idempotency header name would smuggle a credential-shaped
 /// header past the checks that exist for exactly that.
 ///
@@ -3874,12 +3900,21 @@ fn is_credential_component(component: &str) -> bool {
 
 /// True when a compound marker is spelled out by a run of adjacent components,
 /// or ends one of them.
+///
+/// A trailing plural is stripped as for single components, so `X-SessionIDs`
+/// and `X-Session-Ids` read like `X-SessionID`.
 fn has_credential_compound(name: &str) -> bool {
+    let singular = |text: &str| text.strip_suffix('s').map(str::to_owned);
+    let is_marker = |text: &str| {
+        CREDENTIAL_COMPOUNDS.contains(&text)
+            || singular(text).is_some_and(|stem| CREDENTIAL_COMPOUNDS.contains(&stem.as_str()))
+    };
     let components = header_components(name).collect::<Vec<_>>();
     if components.iter().any(|component| {
+        let stem = component.strip_suffix('s').unwrap_or(component);
         CREDENTIAL_COMPOUNDS
             .iter()
-            .any(|marker| component.ends_with(marker))
+            .any(|marker| component.ends_with(marker) || stem.ends_with(marker))
     }) {
         return true;
     }
@@ -3887,7 +3922,7 @@ fn has_credential_compound(name: &str) -> bool {
         let mut joined = String::new();
         components[start..].iter().any(|component| {
             joined.push_str(component);
-            CREDENTIAL_COMPOUNDS.contains(&joined.as_str())
+            is_marker(&joined)
         })
     })
 }
@@ -4339,6 +4374,10 @@ mod tests {
             "X-Api-Keys",
             "X-Access-Tokens",
             "X-Secrets",
+            "X-SessionIDs",
+            "X-Session-Ids",
+            "X-Refresh-Tokens",
+            "X-ClientSecrets",
             // The routing exemption is granted to verified full names only, so
             // an unrelated header carrying the same component keeps the
             // conservative treatment.

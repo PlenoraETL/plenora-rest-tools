@@ -53,6 +53,18 @@ const MAX_SET_COOKIE_BYTES: usize = 8 * 1024;
 /// jar still held by a client or an in-flight request is never taken away.
 const MAX_COOKIE_JARS: usize = 256;
 
+/// Upper bound for remembered evicted `jar_id`s.
+///
+/// An evicted session cannot be restored, and recreating it empty would log
+/// its caller out without a signal, so every evicted id is remembered and a
+/// later request with it fails. Remembering costs memory, so the count is
+/// bounded too; once it is reached the engine stops evicting and refuses new
+/// `jar_id`s instead of forgetting an evicted one.
+const MAX_EVICTED_COOKIE_JARS: usize = 4_096;
+
+/// Longest accepted `jar_id`, which bounds the memory of the evicted ids.
+const MAX_JAR_ID_BYTES: usize = 256;
+
 /// SHA-256 fingerprint used by the client, token, and cache isolation keys.
 type Fingerprint = [u8; 32];
 
@@ -203,7 +215,23 @@ pub(crate) struct Transport {
     /// so a later request would silently start from an empty session. Owning
     /// them keeps a session tied to its `jar_id` for as long as the engine
     /// lives, independently of how the connection pool churns.
-    jars: Arc<Mutex<HashMap<String, CookieJar>>>,
+    jars: Arc<Mutex<JarRegistry>>,
+}
+
+/// Live cookie jars, and the ids of the jars evicted to make room.
+#[derive(Default)]
+struct JarRegistry {
+    live: HashMap<String, CookieJar>,
+    evicted: HashSet<String>,
+}
+
+/// Why a cookie jar could not be reserved.
+enum JarRefusal {
+    /// Every jar is reserved by an active operation, or the evicted ids are at
+    /// their bound.
+    Full,
+    /// The jar was evicted earlier; its session is gone.
+    Evicted,
 }
 
 /// Cookie store that drops implausibly long `Set-Cookie` headers.
@@ -387,7 +415,7 @@ impl Transport {
                 next_allowed: Instant::now(),
             })),
             sequence: Arc::new(AtomicU64::new(1)),
-            jars: Arc::new(Mutex::new(HashMap::new())),
+            jars: Arc::new(Mutex::new(JarRegistry::default())),
         }
     }
 
@@ -408,28 +436,39 @@ impl Transport {
         if !cookies.enabled {
             return Ok(None);
         }
-        self.cookie_jar(cookies)
-            .await
-            .map(|(_, lease)| Some(lease))
-            .ok_or_else(|| {
-                EngineError::PolicyViolation(
-                    "the engine is holding the maximum number of cookie jars".to_owned(),
-                )
-            })
+        match self.cookie_jar(cookies).await {
+            Ok(Some((_, lease))) => Ok(Some(lease)),
+            Ok(None) => Ok(None),
+            Err(refusal) => Err(jar_refusal_error(refusal)),
+        }
     }
 
     /// The jar backing `jar_id`, creating it on first use, together with a lease
     /// that keeps it alive for as long as the caller holds it.
     ///
-    /// Returns `None` when cookies are disabled, and also when the registry is
-    /// full, which the caller turns into a policy violation.
-    async fn cookie_jar(&self, cookies: &CookiePolicy) -> Option<(CookieJar, JarLease)> {
+    /// Returns `Ok(None)` when cookies are disabled. Fails when the registry is
+    /// full, or when `jar_id` names a jar that was evicted: recreating it empty
+    /// would silently drop the session its caller still relies on.
+    async fn cookie_jar(
+        &self,
+        cookies: &CookiePolicy,
+    ) -> Result<Option<(CookieJar, JarLease)>, JarRefusal> {
         if !cookies.enabled {
-            return None;
+            return Ok(None);
         }
         let (incarnation, sequence) = (self.next_sequence(), self.next_sequence());
-        let mut jars = self.jars.lock().await;
+        let mut registry = self.jars.lock().await;
+        if registry.evicted.contains(&cookies.jar_id) {
+            return Err(JarRefusal::Evicted);
+        }
+        let JarRegistry {
+            live: jars,
+            evicted,
+        } = &mut *registry;
         if !jars.contains_key(&cookies.jar_id) && jars.len() >= MAX_COOKIE_JARS {
+            if evicted.len() >= MAX_EVICTED_COOKIE_JARS {
+                return Err(JarRefusal::Full);
+            }
             // Only an unreserved jar may go. Evicting one that an operation is
             // still holding would let two requests sharing a `jar_id` run
             // against different sessions. Reservations are taken and read under
@@ -437,9 +476,14 @@ impl Transport {
             //
             // A pooled client is not a reservation: it holds the jar so that a
             // live connection keeps its session, but nothing is running on it.
-            // Such a jar may go, at the cost of a reconnection, so it is only
-            // the second choice — a jar nothing has connected to is cheaper to
-            // lose. Either way only the victim's own entries are touched.
+            // Such a jar may go, so it is only the second choice; a jar nothing
+            // has connected to is cheaper to lose. Either way only the victim's
+            // own entries are touched.
+            //
+            // Evicting a jar loses its session, not just a connection: the
+            // cookies it held are gone. The id is therefore remembered, and a
+            // later request with it fails instead of starting from an empty jar
+            // that would quietly log its caller out.
             //
             // Locks are taken jars then clients, the same order as `client_for`,
             // so the two cannot cross.
@@ -466,10 +510,11 @@ impl Transport {
                     });
                     drop(clients);
                     jars.remove(&victim);
+                    evicted.insert(victim);
                 }
                 // Every jar is reserved by an active operation. Refusing is the
                 // honest answer; the caller can retry.
-                None => return None,
+                None => return Err(JarRefusal::Full),
             }
         }
         let jar = jars
@@ -485,7 +530,7 @@ impl Transport {
         let lease = JarLease {
             leases: jar.leases.clone(),
         };
-        Some((jar, lease))
+        Ok(Some((jar, lease)))
     }
 
     /// Monotonic counter that gives every pooled entry a deterministic
@@ -596,6 +641,11 @@ impl Transport {
             if request.cookies.jar_id.trim().is_empty() {
                 return Err(EngineError::InvalidInput(
                     "cookie jar_id cannot be empty".to_owned(),
+                ));
+            }
+            if request.cookies.jar_id.len() > MAX_JAR_ID_BYTES {
+                return Err(EngineError::InvalidInput(
+                    "cookie jar_id exceeds 256 bytes".to_owned(),
                 ));
             }
         }
@@ -1601,13 +1651,8 @@ impl Transport {
         // The lease is redundant here — the operation that asked for this client
         // already holds one for the same `jar_id` — but holding it costs nothing
         // and keeps this lookup correct on its own.
-        let leased = self.cookie_jar(cookies).await;
+        let leased = self.cookie_jar(cookies).await.map_err(jar_refusal_error)?;
         let jar = leased.as_ref().map(|(jar, _)| jar);
-        if cookies.enabled && jar.is_none() {
-            return Err(EngineError::PolicyViolation(
-                "the engine is holding the maximum number of cookie jars".to_owned(),
-            ));
-        }
         let key = ClientKey {
             host: host.clone(),
             port,
@@ -1967,6 +2012,18 @@ fn satisfied_content_range(response: &reqwest::Response) -> Result<ContentRange,
     Ok(ContentRange { start, end, total })
 }
 
+fn jar_refusal_error(refusal: JarRefusal) -> EngineError {
+    EngineError::PolicyViolation(
+        match refusal {
+            JarRefusal::Full => "the engine is holding the maximum number of cookie jars",
+            JarRefusal::Evicted => {
+                "the cookie jar was evicted and its session is lost; use a new jar_id"
+            }
+        }
+        .to_owned(),
+    )
+}
+
 fn download_temporary_path(target: &Path) -> PathBuf {
     let sequence = DOWNLOAD_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let filename = target
@@ -1980,7 +2037,10 @@ fn download_temporary_path(target: &Path) -> PathBuf {
 }
 
 async fn create_download_state(target: &Path) -> Result<DownloadState, EngineError> {
-    let (temporary, file) = create_download_file(target).await?;
+    // No `.await` between creating the staging file and arming its Drop guard:
+    // a cancellation can only drop this future before the file exists or after
+    // the guard owns it.
+    let (temporary, file) = create_download_file(target)?;
     Ok(DownloadState {
         temporary,
         file: Some(file),
@@ -2018,16 +2078,22 @@ async fn discard_download_state(state: &mut DownloadState) {
     }
 }
 
-async fn create_download_file(target: &Path) -> Result<(PathBuf, fs::File), EngineError> {
+/// Creates the staging file synchronously.
+///
+/// `tokio::fs` runs the open on a blocking thread, and that thread finishes the
+/// call even when the awaiting future is dropped: a download cancelled during
+/// the open left a `.part` file that no guard owned. Creating an empty file is a
+/// single short system call, so it is done inline instead, and the caller arms
+/// the cleanup guard before yielding.
+fn create_download_file(target: &Path) -> Result<(PathBuf, fs::File), EngineError> {
     for _ in 0..16 {
         let temporary = download_temporary_path(target);
-        match OpenOptions::new()
+        match std::fs::OpenOptions::new()
             .create_new(true)
             .write(true)
             .open(&temporary)
-            .await
         {
-            Ok(file) => return Ok((temporary, file)),
+            Ok(file) => return Ok((temporary, fs::File::from_std(file))),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(file_io(error)),
         }
