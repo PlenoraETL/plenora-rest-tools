@@ -319,16 +319,19 @@ fn attach_xml_node(
 /// The local name of an element or attribute. A name that is not UTF-8 is
 /// refused: replacing its bytes would make different names equal.
 ///
-/// The local name must also be an XML name. The reader accepts any bytes as
-/// a name, and the JSON shape reserves `@` for attributes and `#text` for
-/// text: an element `<@id>` or `<x:#text>` would read as an attribute or as
-/// the text of its parent, and `<a:>` would have an empty key.
+/// The whole name must be a namespace QName: an NCName, or two NCNames
+/// joined by one `:`. The reader accepts any bytes as a name, and the JSON
+/// shape reserves `@` for attributes and `#text` for text: `<@id>`,
+/// `<x:#text>`, `<a:>` or `<1:a>` would read as something they are not.
 fn xml_name(raw: &[u8]) -> Result<String, EngineError> {
     let name = std::str::from_utf8(raw).map_err(|_| {
         EngineError::InvalidResponse(ErrorDetail::from("XML contains a name that is not UTF-8"))
     })?;
-    let local = name.rsplit(':').next().unwrap_or(name);
-    if !is_xml_local_name(local) {
+    let (prefix, local) = match name.split_once(':') {
+        Some((prefix, local)) => (Some(prefix), local),
+        None => (None, name),
+    };
+    if !is_ncname(local) || prefix.is_some_and(|prefix| !is_ncname(prefix)) {
         return Err(EngineError::InvalidResponse(ErrorDetail::from(
             "XML contains an invalid name",
         )));
@@ -336,20 +339,28 @@ fn xml_name(raw: &[u8]) -> Result<String, EngineError> {
     Ok(local.to_owned())
 }
 
-/// An XML 1.0 NCName, exact on ASCII (a letter or `_` first, then letters,
-/// digits, `-`, `.`, `_`). Characters outside ASCII are accepted as name
-/// characters: none of them can be `@` or `#`, and refusing a real name
-/// would be worse than accepting a few code points the specification
-/// excludes.
-fn is_xml_local_name(name: &str) -> bool {
-    let start = |character: char| {
-        character.is_ascii_alphabetic() || character == '_' || !character.is_ascii()
-    };
+/// `NameStartChar` of XML 1.0 (fifth edition) section 2.3, without `:`.
+fn is_name_start(character: char) -> bool {
+    matches!(character,
+        'A'..='Z' | '_' | 'a'..='z'
+        | '\u{C0}'..='\u{D6}' | '\u{D8}'..='\u{F6}' | '\u{F8}'..='\u{2FF}'
+        | '\u{370}'..='\u{37D}' | '\u{37F}'..='\u{1FFF}' | '\u{200C}'..='\u{200D}'
+        | '\u{2070}'..='\u{218F}' | '\u{2C00}'..='\u{2FEF}' | '\u{3001}'..='\u{D7FF}'
+        | '\u{F900}'..='\u{FDCF}' | '\u{FDF0}'..='\u{FFFD}' | '\u{10000}'..='\u{EFFFF}')
+}
+
+/// `NameChar` of XML 1.0 (fifth edition) section 2.3, without `:`.
+fn is_name_char(character: char) -> bool {
+    is_name_start(character)
+        || matches!(character,
+            '-' | '.' | '0'..='9' | '\u{B7}' | '\u{300}'..='\u{36F}' | '\u{203F}'..='\u{2040}')
+}
+
+/// An XML namespace NCName: a name start character, then name characters,
+/// no colon.
+fn is_ncname(name: &str) -> bool {
     let mut characters = name.chars();
-    characters.next().is_some_and(start)
-        && characters.all(|character| {
-            start(character) || character.is_ascii_digit() || matches!(character, '-' | '.')
-        })
+    characters.next().is_some_and(is_name_start) && characters.all(is_name_char)
 }
 
 #[cfg(test)]
@@ -540,5 +551,29 @@ mod tests {
             parse(&[0, 255, 1], &binary).unwrap(),
             json!({"data_base64": "AP8B", "size": 3})
         );
+    }
+
+    #[test]
+    fn xml_names_follow_the_namespace_name_grammar() {
+        for refused in [
+            "<1:a/>",
+            "<a:1b/>",
+            "<a:b:c/>",
+            "<r \u{b7}x=\"1\"/>",
+            "<\u{b7}a/>",
+            "<\u{2030}/>",
+            "<-a/>",
+        ] {
+            assert!(parse_xml(refused.as_bytes()).is_err(), "{refused}");
+        }
+        for (accepted, key) in [
+            ("<x:a/>", "a"),
+            ("<caf\u{e9}/>", "caf\u{e9}"),
+            ("<a\u{b7}b/>", "a\u{b7}b"),
+            ("<_a.b-c/>", "_a.b-c"),
+        ] {
+            let value = parse_xml(accepted.as_bytes()).unwrap();
+            assert!(value.get(key).is_some(), "{accepted}: {value}");
+        }
     }
 }

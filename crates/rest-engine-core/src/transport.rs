@@ -2110,12 +2110,29 @@ async fn stream_body(
     Ok(builder.header(CONTENT_LENGTH, stream.length).body(body))
 }
 
+/// The text of a header value, never dropped.
+///
+/// HTTP field values are bytes. Visible ASCII is the common case, but a
+/// parameter such as a Link `title` may carry UTF-8, and obs-text is legal:
+/// a value that is not valid UTF-8 is read byte for byte as ISO-8859-1, which
+/// maps every byte to one character. Skipping such a value, as before, made a
+/// Link header with `title="café"` disappear and pagination end in silence.
+fn header_text(value: &reqwest::header::HeaderValue) -> String {
+    match std::str::from_utf8(value.as_bytes()) {
+        Ok(text) => text.to_owned(),
+        Err(_) => value
+            .as_bytes()
+            .iter()
+            .map(|byte| char::from(*byte))
+            .collect(),
+    }
+}
+
 fn response_headers(response: &reqwest::Response) -> BTreeMap<String, String> {
     let mut headers = BTreeMap::<String, String>::new();
     for (name, value) in response.headers() {
-        let Ok(value) = value.to_str() else {
-            continue;
-        };
+        let value = header_text(value);
+        let value = value.as_str();
         headers
             .entry(name.as_str().to_owned())
             .and_modify(|existing| {
