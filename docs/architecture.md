@@ -261,6 +261,12 @@ semantica di credenziale non viene conservato e, sul confine runtime, viene
 rifiutato: altrimenti chiamare `Authorization` l'header di idempotenza sarebbe
 un modo per allargare la allowlist.
 
+Quando l'header di idempotenza non può attraversare l'origin, perché il suo
+nome non dichiara una chiave di idempotenza, anche i retry che la chiave aveva
+abilitato per i metodi non idempotenti vengono ritirati per quella richiesta:
+restano attivi solo se retry_non_idempotent è impostato esplicitamente nella
+policy di retry.
+
 L'autorizzazione è monotona. Una volta che una catena ha lasciato l'origin
 proprietaria, la revoca vale per ogni richiesta derivata, compresa una che
 torni all'origin di partenza: altrimenti un'origin intermedia potrebbe scegliere

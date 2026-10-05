@@ -1980,7 +1980,10 @@ fn download_temporary_path(target: &Path) -> PathBuf {
 }
 
 async fn create_download_state(target: &Path) -> Result<DownloadState, EngineError> {
-    let (temporary, file) = create_download_file(target).await?;
+    // No `.await` between creating the staging file and arming its Drop guard:
+    // a cancellation can only drop this future before the file exists or after
+    // the guard owns it.
+    let (temporary, file) = create_download_file(target)?;
     Ok(DownloadState {
         temporary,
         file: Some(file),
@@ -2018,16 +2021,22 @@ async fn discard_download_state(state: &mut DownloadState) {
     }
 }
 
-async fn create_download_file(target: &Path) -> Result<(PathBuf, fs::File), EngineError> {
+/// Creates the staging file synchronously.
+///
+/// `tokio::fs` runs the open on a blocking thread, and that thread finishes the
+/// call even when the awaiting future is dropped: a download cancelled during
+/// the open left a `.part` file that no guard owned. Creating an empty file is a
+/// single short system call, so it is done inline instead, and the caller arms
+/// the cleanup guard before yielding.
+fn create_download_file(target: &Path) -> Result<(PathBuf, fs::File), EngineError> {
     for _ in 0..16 {
         let temporary = download_temporary_path(target);
-        match OpenOptions::new()
+        match std::fs::OpenOptions::new()
             .create_new(true)
             .write(true)
             .open(&temporary)
-            .await
         {
-            Ok(file) => return Ok((temporary, file)),
+            Ok(file) => return Ok((temporary, fs::File::from_std(file))),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(file_io(error)),
         }
