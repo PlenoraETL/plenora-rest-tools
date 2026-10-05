@@ -64,12 +64,6 @@ fn tally(update: impl FnOnce(&ExecutionTally)) {
     let _ = EXECUTION_TALLY.try_with(|tally| update(tally));
 }
 
-fn tally_retry() {
-    tally(|tally| {
-        tally.retries.fetch_add(1, Ordering::Relaxed);
-    });
-}
-
 /// Upper bound for cached OAuth tokens; keeps secret material from accumulating
 /// for an unbounded number of credential references.
 const MAX_CACHED_TOKENS: usize = 256;
@@ -1170,14 +1164,13 @@ impl Transport {
         let mut rate_limit_wait_ms = 0_u64;
 
         for attempt in 1..=max_attempts {
-            match self.send_once(request).await {
+            match self.send_once(request, attempt > 1).await {
                 Ok(mut response) => {
                     network_requests = network_requests.saturating_add(response.network_requests);
                     rate_limit_wait_ms =
                         rate_limit_wait_ms.saturating_add(response.rate_limit_wait_ms);
                     let retry_status = request.retry.retry_on_status.contains(&response.status);
                     if can_retry && retry_status && attempt < max_attempts {
-                        tally_retry();
                         sleep(retry_delay(
                             &request.retry,
                             attempt,
@@ -1196,7 +1189,6 @@ impl Transport {
                         && attempt < max_attempts
                         && is_retryable_transport_error(&error) =>
                 {
-                    tally_retry();
                     sleep(retry_delay(&request.retry, attempt, None)).await;
                 }
                 Err(error) => return Err(error),
@@ -1284,14 +1276,13 @@ impl Transport {
                 );
                 set_request_header(&mut attempt_request.headers, IF_RANGE.as_str(), etag);
             }
-            let pending = match self.send_once_response(&attempt_request).await {
+            let pending = match self.send_once_response(&attempt_request, attempt > 1).await {
                 Ok(pending) => pending,
                 Err(error)
                     if can_retry
                         && attempt < max_attempts
                         && is_retryable_transport_error(&error) =>
                 {
-                    tally_retry();
                     sleep(retry_delay(&request.retry, attempt, None)).await;
                     continue;
                 }
@@ -1305,7 +1296,6 @@ impl Transport {
                 && request.retry.retry_on_status.contains(&status)
                 && attempt < max_attempts
             {
-                tally_retry();
                 sleep(retry_delay(&request.retry, attempt, retry_after_ms)).await;
                 continue;
             }
@@ -1331,7 +1321,6 @@ impl Transport {
                     {
                         reset_download_state(state).await?;
                     }
-                    tally_retry();
                     sleep(retry_delay(&request.retry, attempt, None)).await;
                 }
                 Err(error) => return Err(error),
@@ -1488,14 +1477,23 @@ impl Transport {
         Ok((token, stats))
     }
 
-    async fn send_once(&self, request: &PreparedRequest) -> Result<ResponseData, EngineError> {
-        let pending = self.send_once_response(request).await?;
+    async fn send_once(
+        &self,
+        request: &PreparedRequest,
+        retry: bool,
+    ) -> Result<ResponseData, EngineError> {
+        let pending = self.send_once_response(request, retry).await?;
         self.read_response(pending).await
     }
 
+    /// Sends `request`, following redirects. `retry` says this is a new
+    /// attempt of a request already sent: it counts as a retry of the
+    /// execution only once it actually goes out, so a backoff cut short by a
+    /// deadline or a cancellation is not reported as a retry.
     async fn send_once_response(
         &self,
         request: &PreparedRequest,
+        retry: bool,
     ) -> Result<PendingResponse, EngineError> {
         let origin = request.url.clone();
         let mut url = request.url.clone();
@@ -1543,6 +1541,9 @@ impl Transport {
             network_requests = network_requests.saturating_add(1);
             tally(|tally| {
                 tally.requests.fetch_add(1, Ordering::Relaxed);
+                if retry && redirects == 0 {
+                    tally.retries.fetch_add(1, Ordering::Relaxed);
+                }
             });
             rate_limit_wait_ms = rate_limit_wait_ms.saturating_add(waited_ms);
             let response = builder.send().await.map_err(map_reqwest_error)?;

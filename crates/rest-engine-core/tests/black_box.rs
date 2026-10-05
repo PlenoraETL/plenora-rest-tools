@@ -4653,3 +4653,43 @@ async fn a_failed_result_counts_the_attempts_that_reached_the_server() {
     assert_eq!(result["metrics"]["requests"], 3, "{result}");
     assert_eq!(result["metrics"]["retries"], 2, "{result}");
 }
+
+#[tokio::test]
+async fn a_retry_cut_short_by_the_deadline_is_not_counted() {
+    // The server asks to retry after 60 s; the deadline ends the execution
+    // during that wait. One request went out and no retry did.
+    let (url, server, observed) = recorded_server(vec![(
+        429,
+        r#"{"error":"slow down"}"#,
+        vec![("Retry-After", "60")],
+    )])
+    .await;
+    let deadline = {
+        let at = time::OffsetDateTime::now_utc() + time::Duration::seconds(1);
+        format!(
+            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+            at.year(),
+            u8::from(at.month()),
+            at.day(),
+            at.hour(),
+            at.minute(),
+            at.second(),
+            at.millisecond()
+        )
+    };
+    let result = execute(
+        &local_engine(),
+        json!({
+            "schema_version": 1,
+            "operation": "test",
+            "connection": {"url": url, "method": "GET", "retry": {"max_attempts": 2}},
+            "options": {"deadline": deadline}
+        }),
+    )
+    .await;
+    server.await.unwrap();
+    assert_eq!(observed.lock().unwrap().len(), 1);
+    assert_eq!(result["errors"][0]["code"], "TIMEOUT", "{result}");
+    assert_eq!(result["metrics"]["requests"], 1, "{result}");
+    assert_eq!(result["metrics"]["retries"], 0, "{result}");
+}
