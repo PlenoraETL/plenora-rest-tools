@@ -180,7 +180,9 @@ nessun valore) e una condition che non sia `colonna == valore` o
 `colonna != valore`, dove il valore è racchiuso in una sola coppia di apici
 uguali (`'attivo'`, `"attivo"`) oppure è nudo senza apici né operatori. Un
 apice non chiuso (`status == 'active`) o in eccesso è un errore, non un
-valore da confrontare.
+valore da confrontare. L'operatore è il primo `==` o `!=` dopo il nome della
+colonna: dentro un letterale tra apici `==` e `!=` sono testo
+(`status != 'a==b'` confronta con `a==b`).
 
 Durante l'esecuzione null si propaga: ogni operazione tranne default_if_null
 trasforma null in null. Un valore che l'operazione non sa trattare fa fallire

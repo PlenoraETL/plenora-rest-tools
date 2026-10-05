@@ -4038,3 +4038,24 @@ async fn well_formed_conditions_still_apply() {
     }
     assert_eq!(record.get("skipped"), None, "{record}");
 }
+
+#[tokio::test]
+async fn operators_inside_a_quoted_literal_are_part_of_the_literal() {
+    let transforms = json!([
+        {"source": "b", "column": "eq_single", "operation": "uppercase", "condition": "a == 'x==y!=z'"},
+        {"source": "b", "column": "eq_double", "operation": "uppercase", "condition": "a == \"x==y!=z\""},
+        {"source": "b", "column": "ne_single", "operation": "uppercase", "condition": "a != 'a==b'"},
+        {"source": "b", "column": "ne_double", "operation": "uppercase", "condition": "a != \"a!=b\""},
+        {"source": "b", "column": "eq_miss", "operation": "uppercase", "condition": "a == 'x==y'"},
+        {"source": "b", "column": "ne_miss", "operation": "uppercase", "condition": "a != \"x==y!=z\""}
+    ]);
+    let result = transform_result(r#"{"a":"x==y!=z","b":"v"}"#, transforms).await;
+    assert_eq!(result["status"], "success", "{result}");
+    let record = &result["output"]["records"][0];
+    for column in ["eq_single", "eq_double", "ne_single", "ne_double"] {
+        assert_eq!(record[column], json!("V"), "{column}: {record}");
+    }
+    for column in ["eq_miss", "ne_miss"] {
+        assert_eq!(record.get(column), None, "{column}: {record}");
+    }
+}
