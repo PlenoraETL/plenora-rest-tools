@@ -42,6 +42,9 @@ jobs:
       - name: Audit Rust advisories, licences, and sources
         run: cargo deny --locked check advisories licenses sources bans
 
+      - name: Audit the fuzz crate lockfile
+        run: cargo deny --manifest-path fuzz/Cargo.toml --locked check advisories licenses sources bans
+
       - name: Audit the Python toolchain pinned by the gates
         run: |
           python3 -m venv /tmp/audit
