@@ -1087,7 +1087,7 @@ async fn pagination_keeps_restrictions_introduced_inside_polling() {
         owner,
         vec![
             format!(r#"{{"status":"pending","poll":"{poller_url}"}}"#),
-            format!(r#"{{"status":"completed","items":[{{"id":2}}]}}"#),
+            r#"{"status":"completed","items":[{"id":2}]}"#.to_string(),
         ],
         owner_requests.clone(),
     );
