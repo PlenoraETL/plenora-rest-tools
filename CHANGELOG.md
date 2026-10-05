@@ -4,10 +4,12 @@ Le modifiche che cambiano il comportamento osservabile, l'API pubblica o la
 politica delle dipendenze. La versione dei manifest resta quella dell'ultima
 release finché una release non viene preparata.
 
-## 0.3.0 (non ancora rilasciata)
+## 0.3.0 (preparata, non ancora pubblicata)
 
-La prossima versione è 0.3.0: contiene modifiche incompatibili dell'API Rust e
-del contratto delle richieste, raccolte in un'unica rottura.
+Contiene modifiche incompatibili dell'API Rust e del contratto delle
+richieste, raccolte in un'unica rottura. I cinque manifest dichiarano 0.3.0 e
+adoption-manifest.json porta i digest degli artefatti costruiti da questo
+albero; la data di pubblicazione si scrive qui insieme al tag v0.3.0.
 
 ### Sessioni cookie (incompatibile)
 
