@@ -30,6 +30,9 @@ pub struct EngineConfig {
     pub automatic_decompression: bool,
     pub allowed_custom_methods: Vec<String>,
     pub allow_cookie_store: bool,
+    /// Cookie sessions the engine keeps at once. Opening one more evicts the
+    /// least recently used idle session.
+    pub max_cookie_sessions: usize,
     pub max_cache_entries: usize,
     pub max_cache_bytes: usize,
     pub max_circuit_origins: usize,
@@ -58,6 +61,7 @@ impl Default for EngineConfig {
             automatic_decompression: true,
             allowed_custom_methods: Vec::new(),
             allow_cookie_store: false,
+            max_cookie_sessions: 256,
             max_cache_entries: 1_024,
             max_cache_bytes: 64 * 1024 * 1024,
             max_circuit_origins: 256,
@@ -565,19 +569,105 @@ pub enum IdempotencyLocation {
     Body,
 }
 
-#[derive(Clone, Debug, Deserialize, Hash, Serialize)]
+/// Cookie handling for one request.
+///
+/// Cookies are kept only inside a session the caller opened with
+/// [`Engine::open_cookie_session`](crate::Engine::open_cookie_session). Without
+/// a session the request carries no engine-held cookies.
+#[derive(Clone, Debug, Default, Deserialize, Hash, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct CookiePolicy {
-    pub enabled: bool,
-    pub jar_id: String,
+    pub session: Option<CookieSession>,
 }
 
-impl Default for CookiePolicy {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            jar_id: "default".to_owned(),
+impl CookiePolicy {
+    /// True when the request uses an engine-held cookie session.
+    pub fn is_enabled(&self) -> bool {
+        self.session.is_some()
+    }
+}
+
+/// Handle of a cookie session opened by an [`Engine`](crate::Engine).
+///
+/// The engine issues it and only the engine interprets it. It names a slot
+/// and the generation of that slot, so a handle outlives its session only as
+/// a value that is refused: once the session is closed or evicted the slot's
+/// generation moves on and the handle fails explicitly, before any network
+/// activity, instead of reaching an empty session. It also carries the
+/// issuing engine's random identifier and a random per-session value, so a
+/// handle from another engine, or one assembled by hand, is refused too.
+///
+/// On the wire it is an opaque string. `Debug` does not print it: the handle
+/// grants the use of the session's cookies.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct CookieSession {
+    pub(crate) engine: u64,
+    pub(crate) slot: u32,
+    pub(crate) generation: u64,
+    pub(crate) nonce: u64,
+}
+
+const COOKIE_SESSION_PREFIX: &str = "rcs1";
+
+impl CookieSession {
+    /// The opaque token, as it travels in JSON.
+    pub fn to_token(&self) -> String {
+        format!(
+            "{COOKIE_SESSION_PREFIX}.{:016x}.{}.{}.{:016x}",
+            self.engine, self.slot, self.generation, self.nonce
+        )
+    }
+
+    /// Parses a token issued by [`CookieSession::to_token`].
+    ///
+    /// Only the exact spelling the engine produces is accepted, so a token has
+    /// a single textual form.
+    pub fn from_token(token: &str) -> Option<Self> {
+        let mut parts = token.split('.');
+        if parts.next()? != COOKIE_SESSION_PREFIX {
+            return None;
         }
+        let engine = parts.next()?;
+        let slot = parts.next()?;
+        let generation = parts.next()?;
+        let nonce = parts.next()?;
+        if parts.next().is_some() || engine.len() != 16 || nonce.len() != 16 {
+            return None;
+        }
+        let hex = |text: &str| {
+            text.bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                .then(|| u64::from_str_radix(text, 16).ok())
+                .flatten()
+        };
+        let session = Self {
+            engine: hex(engine)?,
+            slot: slot.parse().ok()?,
+            generation: generation.parse().ok()?,
+            nonce: hex(nonce)?,
+        };
+        // Rejects leading zeros, signs and other spellings `parse` tolerates.
+        (session.to_token() == token).then_some(session)
+    }
+}
+
+impl fmt::Debug for CookieSession {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("CookieSession(<redacted>)")
+    }
+}
+
+impl Serialize for CookieSession {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.to_token())
+    }
+}
+
+impl<'de> Deserialize<'de> for CookieSession {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let token = String::deserialize(deserializer)?;
+        Self::from_token(&token)
+            .ok_or_else(|| D::Error::custom("cookie session handle is not well formed"))
     }
 }
 

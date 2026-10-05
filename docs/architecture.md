@@ -297,29 +297,44 @@ soli senza nulla da osservare. Rappresentare la sessione nella chiave darebbe
 una garanzia solo apparente, quindi la combinazione resta esclusa finché il
 motore non possiede uno store che possa fissare i cookie per singolo hop.
 
-I cookie jar appartengono comunque al motore e non ai client del pool: sono
-indicizzati per jar_id, sopravvivono all'espulsione di un client e la loro
-istanza fa parte dell'identità del client, così un client creato prima di una
-ricreazione del jar non continua a usare la sessione precedente. Il numero di
-jar è limitato; raggiunto il limite viene espulso il jar più vecchio fra quelli
-che nessuna operazione ha prenotato, mai uno ancora prenotato, perché espellere
-un jar attivo dividerebbe una sessione fra richieste concorrenti. Le prenotazioni
-sono contate dal motore e non dedotte dal numero di riferimenti al jar: quanti
-ne tenga un client HTTP del pool è un dettaglio interno di quel client, e un
-client nel pool non è una prenotazione. Espellere un jar libero porta via i
-client costruiti su di esso e i cookie che conteneva: è la perdita della
-sessione, non una semplice riconnessione. Per questo il jar_id espulso viene
-ricordato e una richiesta successiva con lo stesso jar_id fallisce con
-POLICY_VIOLATION prima di qualunque attività di rete, invece di ripartire da un
-jar vuoto che disconnetterebbe il chiamante in silenzio; per una nuova sessione
-il chiamante usa un nuovo jar_id. Gli id ricordati sono al massimo 4096 e un
-jar_id è lungo al massimo 256 byte: raggiunto quel limite il motore non espelle
-più e rifiuta i nuovi jar_id per il resto della sua vita, invece di dimenticare
-un id espulso. Nessun altro jar viene toccato. La richiesta viene rifiutata solo se
-ogni jar è prenotato da un'operazione attiva, e il rifiuto avviene prima di
-qualunque attività di rete, inclusa l'acquisizione di un token OAuth: la
-prenotazione copre l'intera operazione, non la sola richiesta HTTP. Lo store
-scarta inoltre header Set-Cookie oltre 8 KiB, come limite di risorsa.
+I cookie vivono soltanto dentro sessioni aperte esplicitamente. Il chiamante
+apre una sessione con Engine::open_cookie_session (in Python
+`engine.open_cookie_session()`), riceve un handle opaco e lo indica nella
+richiesta come `connection.cookies.session`; la chiude con
+close_cookie_session. Senza sessione la richiesta non porta cookie del motore.
+Sul confine runtime l'handle viaggia come stringa nel payload: le sessioni le
+apre e le chiude l'host che possiede l'Engine.
+
+Il motore tiene al massimo `max_cookie_sessions` sessioni (256 per default),
+una per slot. L'handle indica lo slot e la sua generazione, più un
+identificativo casuale dell'Engine e un valore casuale della sessione. Quando
+una sessione finisce, perché chiusa o espulsa, la generazione dello slot
+avanza: ogni copia dell'handle viene da quel momento rifiutata con
+POLICY_VIOLATION prima di qualunque attività di rete, inclusa l'acquisizione di
+un token OAuth, e non raggiunge mai una sessione vuota al suo posto. Chiudere
+un handle già finito è un errore, non un'operazione nulla. Un handle di un
+altro Engine, o assemblato a mano con slot e generazione giusti ma senza il
+valore casuale, è rifiutato allo stesso modo; un handle malformato è
+INVALID_INPUT.
+
+La memoria è limitata agli slot: il motore non ricorda le sessioni finite, e
+un numero qualsiasi di sessioni aperte una dopo l'altra non esaurisce nulla.
+Se uno slot arrivasse all'ultima generazione rappresentabile verrebbe ritirato
+invece di ripartire da zero, perché un vecchio handle potrebbe portare di nuovo
+una generazione valida; con tutti gli slot ritirati l'apertura fallisce in modo
+esplicito.
+
+Aprire una sessione quando tutti gli slot sono occupati espelle quella usata
+meno di recente fra quelle che nessuna operazione ha prenotato, mai una ancora
+prenotata, perché espellere una sessione attiva la dividerebbe fra richieste
+concorrenti. Le prenotazioni sono contate dal motore e non dedotte dal numero
+di riferimenti al jar, e un client nel pool non è una prenotazione. Espellere
+una sessione porta via i suoi cookie e i client costruiti su di essa; il suo
+handle viene rifiutato come quello di una sessione chiusa. Se ogni sessione è
+prenotata da un'operazione attiva l'apertura fallisce. I jar appartengono al
+motore e non ai client del pool, quindi una sessione sopravvive all'espulsione
+di un client. Lo store scarta inoltre header Set-Cookie oltre 8 KiB, come
+limite di risorsa.
 
 Autorizzare una richiesta di follow-up verso un'altra origin non autorizza il
 trasferimento delle credenziali. L'origin proprietaria è quella a cui viene

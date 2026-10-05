@@ -20,7 +20,7 @@ use tokio::{fs, io::AsyncReadExt, time::sleep};
 use crate::{
     ASYNC_JOB_RECOVERY_CONTRACT, AsyncJobRecovery, AuthConfig, BatchConfig, BatchInputFormat,
     BodyType, CachePolicy, CancellationToken, CapabilityDocument, ConnectionConfig, CookiePolicy,
-    EngineConfig, EngineError, ExecutionControl, ExecutionError, ExecutionMetrics,
+    CookieSession, EngineConfig, EngineError, ExecutionControl, ExecutionError, ExecutionMetrics,
     ExecutionOperation, ExecutionOutput, ExecutionRequest, ExecutionResult, ExecutionStatus,
     FileTransferDirection, FileTransferInput, HttpMethod, HttpResponseMetadata,
     IdempotencyLocation, IntegrityMetadata, JsonObject, OutputMapping, PaginationConfig,
@@ -191,6 +191,29 @@ impl Engine {
 
     pub fn capabilities(&self) -> CapabilityDocument {
         capabilities()
+    }
+
+    /// Opens a cookie session and returns its handle.
+    ///
+    /// A request uses the session by naming the handle in
+    /// `connection.cookies.session`. The engine keeps at most
+    /// `EngineConfig::max_cookie_sessions` sessions; opening one more evicts the
+    /// least recently used session no operation is holding, and its handle is
+    /// refused from then on.
+    pub async fn open_cookie_session(&self) -> Result<CookieSession, EngineError> {
+        if self.is_closed() {
+            return Err(EngineError::EngineClosed);
+        }
+        self.transport.open_cookie_session().await
+    }
+
+    /// Closes a cookie session. Its handle, and every copy of it, is refused
+    /// from now on; closing a stale handle is an error.
+    pub async fn close_cookie_session(&self, session: &CookieSession) -> Result<(), EngineError> {
+        if self.is_closed() {
+            return Err(EngineError::EngineClosed);
+        }
+        self.transport.close_cookie_session(session).await
     }
 
     pub fn close(&self) {

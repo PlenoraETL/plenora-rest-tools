@@ -1,5 +1,6 @@
 use plenora_rest_core::{
-    CancellationToken, Engine, EngineConfig, ExecutionControl, ExecutionRequest,
+    CancellationToken, CookieSession, Engine, EngineConfig, EngineError, ExecutionControl,
+    ExecutionRequest,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -1327,6 +1328,7 @@ async fn the_cache_refuses_to_run_alongside_the_cookie_store() {
         allow_cookie_store: true,
         ..EngineConfig::default()
     });
+    let cookie_session = engine.open_cookie_session().await.unwrap();
     let result = execute(
         &engine,
         json!({
@@ -1341,7 +1343,7 @@ async fn the_cache_refuses_to_run_alongside_the_cookie_store() {
                     "client_id": "id",
                     "client_secret": "secret"
                 },
-                "cookies": {"enabled": true, "jar_id": "session"},
+                "cookies": {"session": cookie_session},
                 "cache": {"enabled": true, "fresh_for_ms": 600_000, "allow_authenticated": true}
             }
         }),
@@ -1362,7 +1364,7 @@ async fn many_cookie_sessions_do_not_wedge_the_engine() {
     // A pooled client counts as a user of its jar, so with the pool as large as
     // the jar registry every jar can look busy at once. Releasing the clients of
     // the oldest jar is what keeps new sessions possible; without it the engine
-    // would refuse every later `jar_id` for the rest of its life.
+    // would refuse every later session for the rest of its life.
     let engine = Engine::new(EngineConfig {
         allow_private_networks: true,
         allow_cookie_store: true,
@@ -1371,6 +1373,7 @@ async fn many_cookie_sessions_do_not_wedge_the_engine() {
     });
     // Well past the 256 jar bound, each with its own session.
     for index in 0..300 {
+        let cookie_session = engine.open_cookie_session().await.unwrap();
         let (url, server, _) = recorded_server(vec![(
             200,
             r#"{"ok":true}"#,
@@ -1385,7 +1388,7 @@ async fn many_cookie_sessions_do_not_wedge_the_engine() {
                 "connection": {
                     "url": url,
                     "method": "GET",
-                    "cookies": {"enabled": true, "jar_id": format!("tenant-{index}")}
+                    "cookies": {"session": cookie_session}
                 }
             }),
         )
@@ -1409,7 +1412,7 @@ async fn a_busy_oldest_jar_does_not_block_new_sessions() {
         max_pooled_origins: 300,
         ..EngineConfig::default()
     }));
-    let session = |url: &str, jar: &str| {
+    let session = |url: &str, jar: &CookieSession| {
         json!({
             "schema_version": 1,
             "operation": "test",
@@ -1420,7 +1423,7 @@ async fn a_busy_oldest_jar_does_not_block_new_sessions() {
                 // request cannot finish on its own and hand the test a pass it
                 // did not earn.
                 "request": {"timeout_ms": 600_000},
-                "cookies": {"enabled": true, "jar_id": jar}
+                "cookies": {"session": jar}
             }
         })
     };
@@ -1438,9 +1441,9 @@ async fn a_busy_oldest_jar_does_not_block_new_sessions() {
         drop(stream);
     });
     let holder_engine = Arc::clone(&engine);
-    let holder = tokio::spawn(async move {
-        execute(&holder_engine, session(&stalled_url, "tenant-oldest")).await
-    });
+    let oldest = engine.open_cookie_session().await.unwrap();
+    let holder =
+        tokio::spawn(async move { execute(&holder_engine, session(&stalled_url, &oldest)).await });
     timeout(Duration::from_secs(5), arrival)
         .await
         .expect("the long request never reached its server")
@@ -1454,7 +1457,8 @@ async fn a_busy_oldest_jar_does_not_block_new_sessions() {
              or the eviction was never forced past its first candidate"
         );
         let (url, server, _) = recorded_server(vec![(200, r#"{"ok":true}"#, vec![])]).await;
-        let result = execute(&engine, session(&url, &format!("tenant-{index}"))).await;
+        let fresh = engine.open_cookie_session().await.unwrap();
+        let result = execute(&engine, session(&url, &fresh)).await;
         assert_eq!(
             result["status"], "success",
             "session {index} must be admitted while the oldest jar is busy: {result}"
@@ -1466,14 +1470,14 @@ async fn a_busy_oldest_jar_does_not_block_new_sessions() {
     stalled_server.abort();
 }
 
-/// One past the engine's jar bound, so the loop above forces an eviction.
+/// One past the engine's session bound, so the loops force an eviction.
 const MAX_COOKIE_JARS_IN_TEST: usize = 257;
 
 #[tokio::test]
 async fn a_jar_reserved_by_a_running_request_is_not_evicted() {
     // Evicting a jar that a request is still using would split one session in
     // two: the running request stores its cookies in the jar it is holding,
-    // while the next request naming the same `jar_id` is handed a fresh one.
+    // while the next request naming the same session is handed a fresh one.
     // The registry is driven well past its bound while the first request is
     // deliberately stuck, and the session has to survive it.
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1521,7 +1525,7 @@ async fn a_jar_reserved_by_a_running_request_is_not_evicted() {
         max_pooled_origins: 300,
         ..EngineConfig::default()
     }));
-    let session = |url: &str, jar: &str| {
+    let session = |url: &str, jar: &CookieSession| {
         json!({
             "schema_version": 1,
             "operation": "test",
@@ -1531,15 +1535,19 @@ async fn a_jar_reserved_by_a_running_request_is_not_evicted() {
                 // Far longer than the loop below can take, so the stuck request
                 // cannot time out and release its jar on its own.
                 "request": {"timeout_ms": 600_000},
-                "cookies": {"enabled": true, "jar_id": jar}
+                "cookies": {"session": jar}
             }
         })
     };
 
     let held_engine = Arc::clone(&engine);
     let held_target = held_url.clone();
+    let held_session = engine.open_cookie_session().await.unwrap();
+    let held_handle = held_session.clone();
     let held =
-        tokio::spawn(async move { execute(&held_engine, session(&held_target, "held")).await });
+        tokio::spawn(
+            async move { execute(&held_engine, session(&held_target, &held_handle)).await },
+        );
     timeout(Duration::from_secs(5), arrival)
         .await
         .expect("the held request never reached its server")
@@ -1552,7 +1560,8 @@ async fn a_jar_reserved_by_a_running_request_is_not_evicted() {
              or the eviction was never put to the test"
         );
         let (url, filler, _) = recorded_server(vec![(200, r#"{"ok":true}"#, vec![])]).await;
-        let result = execute(&engine, session(&url, &format!("tenant-{index}"))).await;
+        let fresh = engine.open_cookie_session().await.unwrap();
+        let result = execute(&engine, session(&url, &fresh)).await;
         assert_eq!(
             result["status"], "success",
             "session {index} must be admitted: {result}"
@@ -1563,7 +1572,7 @@ async fn a_jar_reserved_by_a_running_request_is_not_evicted() {
     release.send(()).unwrap();
     let first = held.await.unwrap();
     assert_eq!(first["status"], "success", "{first}");
-    let second = execute(&engine, session(&held_url, "held")).await;
+    let second = execute(&engine, session(&held_url, &held_session)).await;
     assert_eq!(second["status"], "success", "{second}");
     server.await.unwrap();
 
@@ -1609,13 +1618,14 @@ async fn oversized_set_cookie_headers_are_dropped_at_the_documented_bound() {
         allow_cookie_store: true,
         ..EngineConfig::default()
     });
+    let cookie_session = engine.open_cookie_session().await.unwrap();
     let request = json!({
         "schema_version": 1,
         "operation": "test",
         "connection": {
             "url": url,
             "method": "GET",
-            "cookies": {"enabled": true, "jar_id": "bounded"}
+            "cookies": {"session": cookie_session}
         }
     });
 
@@ -1655,6 +1665,7 @@ async fn a_cookie_jar_outlives_the_clients_that_use_it() {
         max_pooled_origins: 0,
         ..EngineConfig::default()
     });
+    let cookie_session = engine.open_cookie_session().await.unwrap();
     let with_jar = |url: &str| {
         json!({
             "schema_version": 1,
@@ -1662,7 +1673,7 @@ async fn a_cookie_jar_outlives_the_clients_that_use_it() {
             "connection": {
                 "url": url,
                 "method": "GET",
-                "cookies": {"enabled": true, "jar_id": "session"}
+                "cookies": {"session": cookie_session}
             }
         })
     };
@@ -2995,6 +3006,12 @@ async fn application_success_rules_have_a_stable_error_code() {
 
 #[tokio::test]
 async fn dangerous_transport_options_are_denied_by_default() {
+    let permissive = Engine::new(EngineConfig {
+        allow_cookie_store: true,
+        ..EngineConfig::default()
+    });
+    let cookie_session = permissive.open_cookie_session().await.unwrap();
+    assert!(Engine::default().open_cookie_session().await.is_err());
     for connection in [
         json!({
             "url": "https://example.com",
@@ -3009,7 +3026,7 @@ async fn dangerous_transport_options_are_denied_by_default() {
         json!({
             "url": "https://example.com",
             "method": "GET",
-            "cookies": {"enabled": true, "jar_id": "default"}
+            "cookies": {"session": cookie_session}
         }),
     ] {
         let result = execute(
@@ -3070,13 +3087,14 @@ async fn cookie_jars_are_persistent_and_explicitly_authorized() {
         allow_cookie_store: true,
         ..EngineConfig::default()
     });
+    let cookie_session = engine.open_cookie_session().await.unwrap();
     let request = json!({
         "schema_version": 1,
         "operation": "test",
         "connection": {
             "url": url,
             "method": "GET",
-            "cookies": {"enabled": true, "jar_id": "tenant-a"}
+            "cookies": {"session": cookie_session}
         }
     });
 
@@ -4113,49 +4131,188 @@ async fn a_withheld_idempotency_header_also_withdraws_non_idempotent_retries() {
     );
 }
 
-#[tokio::test]
-async fn a_request_on_an_evicted_cookie_jar_fails_instead_of_losing_the_session() {
-    // Past the jar bound the oldest idle jar is evicted, and its cookies with
-    // it. Coming back with the same `jar_id` must not start from an empty jar,
-    // which would log the caller out without a signal.
-    let engine = Engine::new(EngineConfig {
+fn cookie_engine(max_cookie_sessions: usize) -> Engine {
+    Engine::new(EngineConfig {
         allow_private_networks: true,
         allow_cookie_store: true,
-        max_pooled_origins: 0,
+        max_cookie_sessions,
         ..EngineConfig::default()
-    });
-    let session = |url: &str, jar: &str| {
+    })
+}
+
+fn with_session(url: &str, session: &str) -> Value {
+    json!({
+        "schema_version": 1,
+        "operation": "test",
+        "connection": {"url": url, "method": "GET", "cookies": {"session": session}}
+    })
+}
+
+/// Asserts that a request on `session` is refused before any network activity.
+/// Port 9 is never contacted: a refusal that reached the network would show up
+/// as a transport error instead of a policy violation.
+async fn assert_refused_before_network(engine: &Engine, session: &str) {
+    let result = execute(engine, with_session("http://127.0.0.1:9/", session)).await;
+    assert_eq!(result["status"], "failed", "{result}");
+    assert_eq!(result["errors"][0]["code"], "POLICY_VIOLATION", "{result}");
+    assert_eq!(result["metrics"]["requests"], 0, "{result}");
+}
+
+#[tokio::test]
+async fn an_open_cookie_session_keeps_its_cookies() {
+    let (url, server, observed) = recorded_server(vec![
+        (
+            200,
+            r#"{"ok":true}"#,
+            vec![("Set-Cookie", "sid=login; Path=/")],
+        ),
+        (200, r#"{"ok":true}"#, vec![]),
+    ])
+    .await;
+    let engine = cookie_engine(4);
+    let session = engine.open_cookie_session().await.unwrap().to_token();
+    assert_eq!(
+        execute(&engine, with_session(&url, &session)).await["status"],
+        "success"
+    );
+    assert_eq!(
+        execute(&engine, with_session(&url, &session)).await["status"],
+        "success"
+    );
+    server.await.unwrap();
+    assert!(
+        observed.lock().unwrap()[1]
+            .to_ascii_lowercase()
+            .contains("cookie: sid=login")
+    );
+}
+
+#[tokio::test]
+async fn a_closed_cookie_session_is_refused_and_not_recreated() {
+    let engine = cookie_engine(4);
+    let session = engine.open_cookie_session().await.unwrap();
+    engine.close_cookie_session(&session).await.unwrap();
+    assert_refused_before_network(&engine, &session.to_token()).await;
+    // Closing twice is an error too, so a caller that lost track finds out.
+    assert!(engine.close_cookie_session(&session).await.is_err());
+    // The slot is reused, but under a new generation: the old handle stays
+    // refused while the new one works.
+    let reopened = engine.open_cookie_session().await.unwrap();
+    assert_ne!(reopened, session);
+    assert_refused_before_network(&engine, &session.to_token()).await;
+}
+
+#[tokio::test]
+async fn an_evicted_cookie_session_is_refused_and_not_recreated() {
+    let (url, server, _) = recorded_server(vec![(
+        200,
+        r#"{"ok":true}"#,
+        vec![("Set-Cookie", "sid=login; Path=/")],
+    )])
+    .await;
+    let engine = cookie_engine(2);
+    let oldest = engine.open_cookie_session().await.unwrap().to_token();
+    assert_eq!(
+        execute(&engine, with_session(&url, &oldest)).await["status"],
+        "success"
+    );
+    server.await.unwrap();
+    let _second = engine.open_cookie_session().await.unwrap();
+    // Both slots are taken, so this evicts the least recently used session.
+    let _third = engine.open_cookie_session().await.unwrap();
+    assert_refused_before_network(&engine, &oldest).await;
+}
+
+#[tokio::test]
+async fn more_than_ten_thousand_sequential_sessions_never_exhaust_the_engine() {
+    // Memory is bounded by the slots, not by how many sessions ever existed:
+    // sessions that are closed, and sessions that are simply abandoned and
+    // evicted, both leave nothing behind.
+    let engine = cookie_engine(8);
+    let mut abandoned = Vec::new();
+    for index in 0..10_500 {
+        let session = engine.open_cookie_session().await.unwrap();
+        if index % 2 == 0 {
+            engine.close_cookie_session(&session).await.unwrap();
+        } else if abandoned.len() < 4 {
+            abandoned.push(session);
+        }
+    }
+    for session in &abandoned {
+        assert_refused_before_network(&engine, &session.to_token()).await;
+    }
+    let (url, server, observed) = recorded_server(vec![
+        (
+            200,
+            r#"{"ok":true}"#,
+            vec![("Set-Cookie", "sid=last; Path=/")],
+        ),
+        (200, r#"{"ok":true}"#, vec![]),
+    ])
+    .await;
+    let last = engine.open_cookie_session().await.unwrap().to_token();
+    assert_eq!(
+        execute(&engine, with_session(&url, &last)).await["status"],
+        "success"
+    );
+    assert_eq!(
+        execute(&engine, with_session(&url, &last)).await["status"],
+        "success"
+    );
+    server.await.unwrap();
+    assert!(
+        observed.lock().unwrap()[1]
+            .to_ascii_lowercase()
+            .contains("cookie: sid=last")
+    );
+}
+
+#[tokio::test]
+async fn a_cookie_session_from_another_engine_or_forged_is_refused() {
+    let issuer = cookie_engine(4);
+    let engine = cookie_engine(4);
+    let foreign = issuer.open_cookie_session().await.unwrap();
+    assert_refused_before_network(&engine, &foreign.to_token()).await;
+    assert!(engine.close_cookie_session(&foreign).await.is_err());
+
+    // Same engine, slot and generation, but not the random part the engine
+    // issued: a handle cannot be assembled from guessable numbers.
+    let genuine = engine.open_cookie_session().await.unwrap().to_token();
+    let (prefix, nonce) = genuine.rsplit_once('.').unwrap();
+    let flipped = if nonce.starts_with('0') { "1" } else { "0" };
+    let forged = format!("{prefix}.{flipped}{}", &nonce[1..]);
+    assert_refused_before_network(&engine, &forged).await;
+}
+
+#[tokio::test]
+async fn a_malformed_cookie_session_handle_is_invalid_input() {
+    // A handle that does not parse fails the request contract itself, before
+    // anything is executed.
+    let engine = cookie_engine(4);
+    let malformed = [
+        with_session("http://127.0.0.1:9/", ""),
+        with_session("http://127.0.0.1:9/", "default"),
+        with_session("http://127.0.0.1:9/", "rcs1.zz.0.0.0"),
+        with_session(
+            "http://127.0.0.1:9/",
+            "rcs1.0000000000000000.01.0.0000000000000000",
+        ),
+        // The former shape of the cookie policy is refused, not ignored.
         json!({
             "schema_version": 1,
             "operation": "test",
             "connection": {
-                "url": url,
+                "url": "http://127.0.0.1:9/",
                 "method": "GET",
-                "cookies": {"enabled": true, "jar_id": jar}
+                "cookies": {"enabled": true, "jar_id": "tenant"}
             }
-        })
-    };
-    for index in 0..MAX_COOKIE_JARS_IN_TEST {
-        let (url, server, _) = recorded_server(vec![(
-            200,
-            r#"{"ok":true}"#,
-            vec![("Set-Cookie", "sid=login; Path=/")],
-        )])
-        .await;
-        let result = execute(&engine, session(&url, &format!("tenant-{index}"))).await;
-        server.await.unwrap();
-        assert_eq!(result["status"], "success", "session {index}: {result}");
+        }),
+    ];
+    for request in malformed {
+        let error = engine
+            .execute_json(&request.to_string())
+            .await
+            .expect_err("a malformed cookie policy must be refused");
+        assert!(matches!(error, EngineError::InvalidInput(_)), "{request}");
     }
-
-    // `tenant-0` was the oldest idle jar, so it is the one that went.
-    let returning = execute(&engine, session("http://127.0.0.1:9/", "tenant-0")).await;
-    assert_eq!(returning["status"], "failed", "{returning}");
-    assert_eq!(returning["errors"][0]["code"], "POLICY_VIOLATION");
-    assert_eq!(returning["metrics"]["requests"], 0);
-
-    let oversized = execute(&engine, session("http://127.0.0.1:9/", &"j".repeat(257))).await;
-    assert_eq!(
-        oversized["errors"][0]["code"], "INVALID_INPUT",
-        "{oversized}"
-    );
 }
