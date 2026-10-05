@@ -2695,8 +2695,13 @@ fn retry_delay(policy: &RetryPolicy, attempt: u32, retry_after_ms: Option<u64>) 
 
 fn parse_retry_after(value: &str, now: SystemTime) -> Option<u64> {
     let value = value.trim();
-    if let Ok(seconds) = value.parse::<u64>() {
-        return seconds.checked_mul(1_000);
+    // A delay in seconds too large to represent in milliseconds is still a
+    // delay, and the longest one: it saturates, so it exceeds any cap and
+    // stops the retry, instead of reading as an absent header and retrying
+    // on the ordinary backoff.
+    if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) {
+        let seconds = value.parse::<u64>().unwrap_or(u64::MAX);
+        return Some(seconds.saturating_mul(1_000));
     }
     let date = httpdate::parse_http_date(value).ok()?;
     let delay = date.duration_since(now).unwrap_or(Duration::ZERO);

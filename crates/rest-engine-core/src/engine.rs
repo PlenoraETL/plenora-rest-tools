@@ -1126,7 +1126,11 @@ impl Engine {
                 let mut page_number = *start_page;
                 let mut request_index = 0_usize;
                 while output.len() < *max_rows {
-                    let limit = (*page_size).min(max_rows.saturating_sub(output.len()));
+                    // The page size stays the same on every request: page N
+                    // of a smaller size is a different slice of the data
+                    // (page 2 of size 1 is the second row, not the third).
+                    // Rows beyond max_rows are cut locally instead.
+                    let limit = *page_size;
                     let mut parameters = base_parameters.clone();
                     parameters.insert(page_param.clone(), usize_value(page_number)?);
                     parameters.insert(page_size_param.clone(), usize_value(limit)?);

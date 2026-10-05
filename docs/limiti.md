@@ -39,7 +39,7 @@ ciascuna con il motivo.
 | `request.max_redirects` | 5 (redirect spenti per default) | `INVALID_RESPONSE`, nessun redirect seguito oltre il limite |
 | `retry.max_attempts` | 1 | si restituisce l'ultimo esito; i tentativi non superano mai il limite |
 | `retry.max_backoff_ms` | 30 000 | l'attesa calcolata viene limitata a questo valore |
-| `retry.max_retry_after_ms` | 300 000 | un `Retry-After` più lungo **non** viene accorciato: niente nuovo tentativo, l'operazione fallisce con lo status HTTP ricevuto |
+| `retry.max_retry_after_ms` | 300 000 | un `Retry-After` più lungo, anche oltre il rappresentabile, **non** viene accorciato: niente nuovo tentativo, l'operazione fallisce con lo status HTTP ricevuto |
 | `pagination.page_size` | 100 | 0 è `INVALID_INPUT` |
 | `pagination.max_rows` | 10 000 | vedi [Paginazione](#paginazione) |
 | `pagination.max_pages` (cursor, link, header_link) | 100 | vedi [Paginazione](#paginazione) |
@@ -65,6 +65,11 @@ remote_effect `none`, retry `never`, `details.max_rows` e, per cursor e link,
 `details.max_pages`). La paginazione è completa, e il risultato `success`,
 solo quando è la sorgente a dire che i dati sono finiti: una pagina corta,
 nessun cursore o link successivo, oppure un cursore o link già seguito.
+
+In modalità page la dimensione della pagina resta `page_size` su ogni
+richiesta, anche l'ultima: le righe oltre `max_rows` si tagliano localmente.
+Chiedere una pagina più piccola cambierebbe la porzione di dati restituita
+(la pagina 2 di dimensione 1 è la seconda riga, non la terza).
 
 Caso limite dichiarato: in modalità offset e page, una sorgente con
 esattamente `max_rows` righe e l'ultima pagina piena viene segnalata come

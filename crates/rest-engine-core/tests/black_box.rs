@@ -4861,3 +4861,101 @@ async fn a_retry_after_beyond_the_cap_is_not_shortened_into_an_early_retry() {
     assert_eq!(observed.lock().unwrap().len(), 2, "{result}");
     assert_eq!(result["status"], "success", "{result}");
 }
+
+#[tokio::test]
+async fn page_pagination_keeps_its_page_size_up_to_max_rows() {
+    // An ordinary API: page N of size S holds rows (N-1)*S+1 ..= N*S of ten.
+    // With page_size 2 and max_rows 3 the second request must still ask for
+    // pages of 2, or page 2 of size 1 would return row 2 again.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/rows", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let mut requests = Vec::new();
+        while let Ok(Ok((mut stream, _))) = timeout(Duration::from_secs(2), listener.accept()).await
+        {
+            let request = read_request(&mut stream).await;
+            let line = request.lines().next().unwrap_or_default().to_owned();
+            let query = |name: &str| {
+                line.split(['?', '&', ' '])
+                    .find_map(|pair| pair.strip_prefix(&format!("{name}=")))
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .unwrap()
+            };
+            let (page, size) = (query("page"), query("page_size"));
+            let rows = ((page - 1) * size + 1..=(page * size).min(10))
+                .map(|value| json!({"v": value}))
+                .collect::<Vec<_>>();
+            let body = json!({"items": rows}).to_string();
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(head.as_bytes()).await.unwrap();
+            stream.write_all(body.as_bytes()).await.unwrap();
+            stream.shutdown().await.unwrap();
+            requests.push(line);
+        }
+        requests
+    });
+    let result = execute(
+        &local_engine(),
+        json!({
+            "schema_version": 1,
+            "operation": "generate",
+            "connection": {
+                "url": url,
+                "method": "GET",
+                "response": {"records_path": "items"},
+                "pagination": {"type": "page", "page_size": 2, "max_rows": 3}
+            }
+        }),
+    )
+    .await;
+    let requests = server.await.unwrap();
+    assert_eq!(
+        result["output"]["records"],
+        json!([{"v": 1}, {"v": 2}, {"v": 3}]),
+        "{result} {requests:?}"
+    );
+    assert!(
+        requests.iter().all(|line| line.contains("page_size=2")),
+        "{requests:?}"
+    );
+    assert_eq!(result["status"], "partial");
+}
+
+#[test]
+fn a_retry_after_too_large_to_represent_is_the_longest_wait() {
+    // 18446744073709552 seconds overflow u64 milliseconds. Such a delay is
+    // the longest there is: it exceeds any cap, so the 429 is not retried,
+    // instead of reading as an absent header and retrying on the backoff.
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let (url, server, observed) = recorded_server(vec![(
+            429,
+            r#"{"error":"slow down"}"#,
+            vec![("Retry-After", "18446744073709552")],
+        )])
+        .await;
+        let result = execute(
+            &local_engine(),
+            json!({
+                "schema_version": 1,
+                "operation": "test",
+                "connection": {
+                    "url": url,
+                    "method": "GET",
+                    "retry": {"max_attempts": 2, "backoff_base_ms": 1, "max_backoff_ms": 1}
+                }
+            }),
+        )
+        .await;
+        // Bounded wait for a second request that must never come.
+        let _ = timeout(Duration::from_secs(1), server).await;
+        assert_eq!(observed.lock().unwrap().len(), 1, "{result}");
+        assert_eq!(result["errors"][0]["code"], "HTTP_STATUS", "{result}");
+    });
+}
