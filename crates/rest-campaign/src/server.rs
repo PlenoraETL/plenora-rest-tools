@@ -77,9 +77,9 @@ pub struct KeyCounters {
 pub struct LabelStats {
     pub requests: u64,
     /// Massimo di richieste contemporaneamente in servizio (dalla lettura
-    /// della richiesta alla scrittura della risposta). Esclude `/hang`, la cui
-    /// fine dipende dal client e arriverebbe in ritardo rispetto al rilascio
-    /// del permesso del motore.
+    /// della richiesta all'inizio della scrittura della risposta). Esclude
+    /// `/hang`, la cui fine dipende dal client e arriverebbe in ritardo
+    /// rispetto al rilascio del permesso del motore.
     pub peak_in_flight: u64,
     /// Massimo di richieste arrivate nella stessa finestra di un secondo
     /// (finestre allineate all'avvio del server).
@@ -297,10 +297,13 @@ async fn serve_connection(state: Arc<ServerState>, mut connection: Connection) {
             .to_owned();
         let tracked = !request.path.starts_with("/hang/");
         state.arrive(&label, tracked);
-        let flow = route(&state, &mut connection, &request).await;
-        if tracked {
-            state.depart(&label);
-        }
+        let mut in_flight = InFlight {
+            state: &state,
+            label: &label,
+            active: tracked,
+        };
+        let flow = route(&state, &mut connection, &mut in_flight, &request).await;
+        in_flight.release();
         if matches!(flow, Flow::Close) || request.wants_close() {
             break;
         }
@@ -308,11 +311,38 @@ async fn serve_connection(state: Arc<ServerState>, mut connection: Connection) {
     let _ = connection.stream.shutdown().await;
 }
 
+/// Richiesta in servizio per il conteggio della concorrenza. Si rilascia
+/// prima di scrivere la risposta: da quel momento il client può completare e
+/// liberare il permesso del motore, quindi la finestra contata dal server è
+/// sempre contenuta in quella del permesso e il picco osservato non supera il
+/// limite per un ritardo di scheduling del server. Un download in streaming
+/// conta fino alla testata, non per tutto il corpo.
+struct InFlight<'a> {
+    state: &'a ServerState,
+    label: &'a str,
+    active: bool,
+}
+
+impl InFlight<'_> {
+    fn release(&mut self) {
+        if self.active {
+            self.active = false;
+            self.state.depart(self.label);
+        }
+    }
+}
+
 fn number(segment: Option<&&str>) -> Option<u64> {
     segment.and_then(|value| value.parse().ok())
 }
 
-async fn respond(connection: &mut Connection, request: &Request, response: Response) -> Flow {
+async fn respond(
+    connection: &mut Connection,
+    in_flight: &mut InFlight<'_>,
+    request: &Request,
+    response: Response,
+) -> Flow {
+    in_flight.release();
     let keep_alive = !request.wants_close();
     match write_response(&mut connection.stream, &response, keep_alive).await {
         Ok(()) => Flow::KeepOpen,
@@ -328,10 +358,15 @@ fn injected(status: u16) -> Response {
     Response::json(status, &json!({"error": "injected"}))
 }
 
-async fn route(state: &ServerState, connection: &mut Connection, request: &Request) -> Flow {
+async fn route(
+    state: &ServerState,
+    connection: &mut Connection,
+    in_flight: &mut InFlight<'_>,
+    request: &Request,
+) -> Flow {
     let segments: Vec<&str> = request.path.trim_start_matches('/').split('/').collect();
     let (Some(route), Some(key)) = (segments.first().copied(), segments.get(1).copied()) else {
-        return respond(connection, request, not_found()).await;
+        return respond(connection, in_flight, request, not_found()).await;
     };
     let key = key.to_owned();
     let hits = state.with_key(&key, |counters| {
@@ -342,6 +377,7 @@ async fn route(state: &ServerState, connection: &mut Connection, request: &Reque
         "ok" => {
             respond(
                 connection,
+                in_flight,
                 request,
                 Response::json(200, &json!({"ok": true})),
             )
@@ -352,6 +388,7 @@ async fn route(state: &ServerState, connection: &mut Connection, request: &Reque
             tokio::time::sleep(Duration::from_millis(delay)).await;
             respond(
                 connection,
+                in_flight,
                 request,
                 Response::json(200, &json!({"ok": true})),
             )
@@ -377,7 +414,7 @@ async fn route(state: &ServerState, connection: &mut Connection, request: &Reque
             } else {
                 Response::json(200, &json!({"ok": true}))
             };
-            respond(connection, request, response).await
+            respond(connection, in_flight, request, response).await
         }
         "drop" => Flow::Close,
         "sink_drop" => {
@@ -393,16 +430,25 @@ async fn route(state: &ServerState, connection: &mut Connection, request: &Reque
             );
             let mut partial = br#"{"payload":""#.to_vec();
             partial.resize(128, b'x');
+            in_flight.release();
             let _ = connection.stream.write_all(head.as_bytes()).await;
             let _ = connection.stream.write_all(&partial).await;
             let _ = connection.stream.flush().await;
             Flow::Close
         }
-        "pages" => respond(connection, request, pages(state, &key, &segments, request)).await,
+        "pages" => {
+            respond(
+                connection,
+                in_flight,
+                request,
+                pages(state, &key, &segments, request),
+            )
+            .await
+        }
         "enrich" => {
             let flaky_mod = number(segments.get(2)).unwrap_or(0);
             let Some(id) = number(segments.get(3)) else {
-                return respond(connection, request, not_found()).await;
+                return respond(connection, in_flight, request, not_found()).await;
             };
             let delay = (id.wrapping_mul(7_919) ^ key_seed(&key)) % 17;
             tokio::time::sleep(Duration::from_millis(delay)).await;
@@ -414,17 +460,25 @@ async fn route(state: &ServerState, connection: &mut Connection, request: &Reque
             } else {
                 Response::json(200, &json!({"remote": id}))
             };
-            respond(connection, request, response).await
+            respond(connection, in_flight, request, response).await
         }
-        "jobs" => respond(connection, request, jobs(state, &key, &segments, request)).await,
-        "download" => download(state, connection, request, &key, &segments, hits).await,
+        "jobs" => {
+            respond(
+                connection,
+                in_flight,
+                request,
+                jobs(state, &key, &segments, request),
+            )
+            .await
+        }
+        "download" => download(state, connection, in_flight, request, &key, &segments, hits).await,
         "upload" => {
             state.with_key(&key, |counters| {
                 counters.upload_bytes = request.body_bytes;
                 counters.upload_sha256 = request.body_sha256.clone();
             });
             let body = json!({"bytes": request.body_bytes, "sha256": request.body_sha256});
-            respond(connection, request, Response::json(200, &body)).await
+            respond(connection, in_flight, request, Response::json(200, &body)).await
         }
         "cookie" => {
             let response = match segments.get(2).copied() {
@@ -440,16 +494,16 @@ async fn route(state: &ServerState, connection: &mut Connection, request: &Reque
                 }
                 _ => not_found(),
             };
-            respond(connection, request, response).await
+            respond(connection, in_flight, request, response).await
         }
         "auth" => {
             let expected = format!("Bearer {}", state.bearer);
             let authorized = request.header("authorization") == Some(expected.as_str());
             let status = if authorized { 200 } else { 401 };
             let response = Response::json(status, &json!({"authorized": authorized}));
-            respond(connection, request, response).await
+            respond(connection, in_flight, request, response).await
         }
-        _ => respond(connection, request, not_found()).await,
+        _ => respond(connection, in_flight, request, not_found()).await,
     }
 }
 
@@ -572,16 +626,18 @@ fn jobs(state: &ServerState, key: &str, segments: &[&str], request: &Request) ->
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn download(
     state: &ServerState,
     connection: &mut Connection,
+    in_flight: &mut InFlight<'_>,
     request: &Request,
     key: &str,
     segments: &[&str],
     hits: u64,
 ) -> Flow {
     let Some(size) = number(segments.get(2)) else {
-        return respond(connection, request, not_found()).await;
+        return respond(connection, in_flight, request, not_found()).await;
     };
     let mode = segments.get(3).copied().unwrap_or("plain");
     let seed = key_seed(key);
@@ -623,6 +679,7 @@ async fn download(
     let corrupt_at = (mode == "corrupt").then_some(size / 2);
     let keep_alive = !request.wants_close() && cut_at.is_none();
     let head = response_head(status, &headers, length, keep_alive);
+    in_flight.release();
     if connection.stream.write_all(head.as_bytes()).await.is_err() {
         return Flow::Close;
     }

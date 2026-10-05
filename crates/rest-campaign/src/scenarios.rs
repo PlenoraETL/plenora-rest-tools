@@ -1392,13 +1392,17 @@ async fn job_interrupted(observation: &mut Observation, context: &Context, key: 
     });
     let mut reference = started;
     if is_cancel {
-        // Si cancella dopo che il servizio ha ricevuto il submit, così il
-        // caso osservato è quello con un job remoto da cancellare.
+        // Si cancella dopo che il servizio ha ricevuto il submit e dopo un
+        // margine perché il motore legga la risposta, così il caso osservato
+        // di solito è quello con un job remoto da cancellare. Il server conta
+        // il submit prima di scrivere la risposta: una cancellazione che
+        // arriva prima che il motore conosca il job id resta possibile ed è
+        // registrata come guasto distinto.
         let wait_until = Instant::now() + context.watchdog / 2;
         while context.server.peek(key).submits == 0 && Instant::now() < wait_until {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
-        tokio::time::sleep(Duration::from_millis(30)).await;
+        tokio::time::sleep(Duration::from_millis(context.sizes.cancel_after_ms)).await;
         reference = Instant::now();
         token.cancel();
     }
@@ -1424,10 +1428,12 @@ async fn job_interrupted(observation: &mut Observation, context: &Context, key: 
         }
     };
     absorb(observation, context, &result);
-    let (code, fault) = if is_cancel {
-        ("CANCELLED", "cancellazione_job")
-    } else {
-        ("TIMEOUT", "deadline_job")
+    let known_job = !result.recoveries.is_empty();
+    let (code, fault) = match (is_cancel, known_job) {
+        (true, true) => ("CANCELLED", "cancellazione_job"),
+        (true, false) => ("CANCELLED", "cancellazione_job_prima_del_job_id"),
+        (false, true) => ("TIMEOUT", "deadline_job"),
+        (false, false) => ("TIMEOUT", "deadline_job_prima_del_job_id"),
     };
     if let Some(error) = expect_failure(observation, &result, &[code]) {
         fault_error(observation, fault, FaultClass::AfterSend, error);
@@ -1465,19 +1471,14 @@ async fn job_interrupted(observation: &mut Observation, context: &Context, key: 
             );
         }
         None => {
-            // Interrotto prima di conoscere il job: nessuna cancellazione
-            // remota possibile, ma l'effetto remoto non può essere escluso.
+            // Interrotto prima di conoscere il job id: nessuna cancellazione
+            // remota possibile; l'effetto remoto non può essere escluso, e la
+            // classe AfterSend del guasto vieta remote_effect none.
             observation.check(
                 counters.cancels == 0,
                 Criterion::UnexpectedOutcome,
                 "cancellazione remota senza handle di recovery",
             );
-            if is_cancel && counters.submits == 1 {
-                observation.violate(
-                    Criterion::UnexpectedOutcome,
-                    "job ricevuto dal servizio ma assente dalle recovery",
-                );
-            }
         }
     }
 }
