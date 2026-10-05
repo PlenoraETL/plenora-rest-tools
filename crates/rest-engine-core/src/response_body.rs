@@ -318,11 +318,38 @@ fn attach_xml_node(
 
 /// The local name of an element or attribute. A name that is not UTF-8 is
 /// refused: replacing its bytes would make different names equal.
+///
+/// The local name must also be an XML name. The reader accepts any bytes as
+/// a name, and the JSON shape reserves `@` for attributes and `#text` for
+/// text: an element `<@id>` or `<x:#text>` would read as an attribute or as
+/// the text of its parent, and `<a:>` would have an empty key.
 fn xml_name(raw: &[u8]) -> Result<String, EngineError> {
     let name = std::str::from_utf8(raw).map_err(|_| {
         EngineError::InvalidResponse(ErrorDetail::from("XML contains a name that is not UTF-8"))
     })?;
-    Ok(name.rsplit(':').next().unwrap_or(name).to_owned())
+    let local = name.rsplit(':').next().unwrap_or(name);
+    if !is_xml_local_name(local) {
+        return Err(EngineError::InvalidResponse(ErrorDetail::from(
+            "XML contains an invalid name",
+        )));
+    }
+    Ok(local.to_owned())
+}
+
+/// An XML 1.0 NCName, exact on ASCII (a letter or `_` first, then letters,
+/// digits, `-`, `.`, `_`). Characters outside ASCII are accepted as name
+/// characters: none of them can be `@` or `#`, and refusing a real name
+/// would be worse than accepting a few code points the specification
+/// excludes.
+fn is_xml_local_name(name: &str) -> bool {
+    let start = |character: char| {
+        character.is_ascii_alphabetic() || character == '_' || !character.is_ascii()
+    };
+    let mut characters = name.chars();
+    characters.next().is_some_and(start)
+        && characters.all(|character| {
+            start(character) || character.is_ascii_digit() || matches!(character, '-' | '.')
+        })
 }
 
 #[cfg(test)]
@@ -422,6 +449,29 @@ mod tests {
         assert_eq!(
             parse_xml(b"<p:a xmlns:p=\"u\" p:id=\"1\"/>").unwrap(),
             json!({"a": {"@p": "u", "@id": "1"}})
+        );
+    }
+
+    #[test]
+    fn xml_names_that_collide_with_the_json_shape_are_refused() {
+        // Found by the response_body fuzz target: the reader accepts any
+        // bytes as a name, so `<@id>` produced a key that reads as an
+        // attribute, `<x:#text>` one that reads as text, and `<a:>` an
+        // empty key.
+        for body in [
+            &b"<a><@id><b/></@id></a>"[..],
+            b"<a><x:#text>1</x:#text></a>",
+            b"<a:>1</a:>",
+            b"<a 1x=\"1\"/>",
+        ] {
+            let Err(crate::EngineError::InvalidResponse(detail)) = parse_xml(body) else {
+                panic!("a name outside the XML grammar must be refused");
+            };
+            assert_eq!(detail.text(), "XML contains an invalid name");
+        }
+        assert_eq!(
+            parse_xml("<città x-y.z=\"1\"><_b/></città>".as_bytes()).unwrap(),
+            json!({"città": {"@x-y.z": "1", "_b": ""}})
         );
     }
 
