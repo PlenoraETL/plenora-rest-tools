@@ -28,8 +28,8 @@ use crate::{
     QueryStyle, ResponseConfig, ResponseTransform, SCHEMA_VERSION, capabilities, json_path,
     response_body,
     transport::{
-        DownloadTarget, PreparedBody, PreparedFile, PreparedFileSource, PreparedRequest,
-        PreparedStream, ResponseData, Transport, same_origin,
+        DownloadTarget, EXECUTION_TALLY, ExecutionTally, PreparedBody, PreparedFile,
+        PreparedFileSource, PreparedRequest, PreparedStream, ResponseData, Transport, same_origin,
     },
 };
 
@@ -161,7 +161,11 @@ impl Engine {
         }
         let active_jobs = Arc::new(Mutex::new(BTreeMap::new()));
         let deadline = control.deadline.map(tokio::time::Instant::from_std);
-        let execution = ACTIVE_ASYNC_JOBS.scope(active_jobs.clone(), self.execute_inner(request));
+        let tally = Arc::new(ExecutionTally::default());
+        let execution = EXECUTION_TALLY.scope(
+            tally.clone(),
+            ACTIVE_ASYNC_JOBS.scope(active_jobs.clone(), self.execute_inner(request)),
+        );
         enum Controlled<T> {
             Finished(T),
             Cancelled,
@@ -184,7 +188,7 @@ impl Engine {
                 }
             }
         };
-        match outcome {
+        let mut result = match outcome {
             Controlled::Finished(result) => result,
             Controlled::Cancelled => {
                 self.cancel_active_jobs(&active_jobs, RemoteCancelTrigger::Cancellation)
@@ -196,7 +200,18 @@ impl Engine {
                     .await;
                 failed_result_with_recoveries(EngineError::Timeout, recoveries_from(&active_jobs))
             }
-        }
+        };
+        // Never fewer requests or retries than were actually sent: the
+        // response-based counts miss the attempts of a failure.
+        result.metrics.requests = result
+            .metrics
+            .requests
+            .max(tally.requests.load(Ordering::Relaxed));
+        result.metrics.retries = result
+            .metrics
+            .retries
+            .max(tally.retries.load(Ordering::Relaxed));
+        result
     }
 
     pub fn capabilities(&self) -> CapabilityDocument {

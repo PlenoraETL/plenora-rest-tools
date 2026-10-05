@@ -4617,3 +4617,39 @@ async fn the_request_deadline_binds_every_entry_point() {
     assert_eq!(result.errors[0].code, "TIMEOUT");
     server.abort();
 }
+
+#[tokio::test]
+async fn a_failed_result_counts_the_attempts_that_reached_the_server() {
+    // Every attempt reaches the server, which closes the connection without
+    // answering. The result fails, and its metrics must still say three
+    // requests and two retries: a monitor of amplification reads them.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let mut seen = 0_usize;
+        while seen < 3 {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let _ = read_request(&mut stream).await;
+            drop(stream);
+            seen += 1;
+        }
+        seen
+    });
+    let result = execute(
+        &local_engine(),
+        json!({
+            "schema_version": 1,
+            "operation": "test",
+            "connection": {
+                "url": url,
+                "method": "GET",
+                "retry": {"max_attempts": 3, "backoff_base_ms": 1, "max_backoff_ms": 1}
+            }
+        }),
+    )
+    .await;
+    assert_eq!(server.await.unwrap(), 3);
+    assert_eq!(result["status"], "failed", "{result}");
+    assert_eq!(result["metrics"]["requests"], 3, "{result}");
+    assert_eq!(result["metrics"]["retries"], 2, "{result}");
+}
