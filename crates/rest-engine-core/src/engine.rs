@@ -3692,6 +3692,9 @@ pub(crate) fn link_header_target(
             {
                 return Ok(Some(target.to_owned()));
             }
+            // RFC 8288, 3.3: occurrences of rel after the first in a link
+            // value are ignored, so `rel=prev; rel=next` is not a next link.
+            break;
         }
     }
     Ok(None)
@@ -4546,6 +4549,24 @@ mod tests {
                 .as_deref(),
             Some("/b")
         );
+    }
+
+    #[test]
+    fn only_the_first_rel_parameter_of_a_link_counts() {
+        // Found by the property test against RFC 8288: a second rel in the
+        // same link value was honoured, so a link declared as prev was
+        // followed as the next page.
+        let headers = BTreeMap::from([(
+            "link".to_owned(),
+            "</prev>; rel=prev; rel=next, </next>; rel=next".to_owned(),
+        )]);
+        assert_eq!(
+            link_header_target(&headers, "next").unwrap().as_deref(),
+            Some("/next")
+        );
+        let headers =
+            BTreeMap::from([("link".to_owned(), "</prev>; rel=prev; rel=next".to_owned())]);
+        assert_eq!(link_header_target(&headers, "next").unwrap(), None);
     }
 
     #[test]
