@@ -132,6 +132,32 @@ chiamante. Non viene compilata nel core. Un comportamento proprietario ancora
 esprimibile tramite HTTP deve essere modellato estendendo un contratto
 versionato; un protocollo non HTTP appartiene a una capability separata.
 
+### Null e valori assenti
+
+Nei campi il cui valore è un JSON arbitrario (value di un parametro, value di
+una trasformazione, default di un output_mapping) un null esplicito e un campo
+assente sono distinti: null è un valore che il chiamante ha scritto, l'assenza
+no.
+
+- Un parametro fixed con value null invia null; un parametro fixed senza value
+  è un errore di configurazione, non un parametro opzionale omesso.
+- Un parametro mapped senza valore nella sorgente e senza value resta assente
+  (errore MISSING_PARAMETER se required); con value null usa null.
+- Null resta tale soltanto in un body JSON. Path, query, header, cookie,
+  campi form e multipart e il template del body raw sono testo, e il testo non
+  ha una grafia per null: un null in quelle posizioni, anche dentro un array o
+  un oggetto, rifiuta la richiesta con INVALID_INPUT prima di qualunque attività
+  di rete, invece di inviare una stringa vuota.
+
+Nei campi opzionali con un tipo proprio (per esempio request.timeout_ms,
+response.records_path, response.error_path, response.success_when) null
+equivale all'assenza del campo, come negli schemi v1 che dichiarano quei campi
+con tipo ["…", "null"]. Per success_when questo significa nessuna condizione.
+
+Deviazione dichiarata: fino a 0.2.2 un fixed con value null veniva omesso e un
+null in una posizione testuale veniva inviato come stringa vuota. Gli schemi v1
+ammettevano già entrambe le forme; cambia la semantica, non lo schema.
+
 ## Job REST asincroni e code
 
 Il polling copre servizi che rispondono alla submit con un job id o una

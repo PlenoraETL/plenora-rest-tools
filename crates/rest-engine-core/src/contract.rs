@@ -332,7 +332,14 @@ pub struct ParameterSpec {
     pub mode: ParameterMode,
     #[serde(default)]
     pub source: Option<String>,
-    #[serde(default)]
+    /// `None` when the field is absent, `Some(Value::Null)` when it is an
+    /// explicit JSON `null`: a fixed parameter whose value is `null` sends
+    /// `null`, it is not dropped as if it had no value.
+    #[serde(
+        default,
+        deserialize_with = "explicit_value",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub value: Option<Value>,
     #[serde(default)]
     pub required: bool,
@@ -465,7 +472,12 @@ pub struct ResponseTransform {
     pub column: String,
     pub source: String,
     pub operation: String,
-    #[serde(default)]
+    /// Absent and explicit `null` stay distinct, as for [`ParameterSpec::value`].
+    #[serde(
+        default,
+        deserialize_with = "explicit_value",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub value: Option<Value>,
     #[serde(default)]
     pub condition: Option<String>,
@@ -476,8 +488,28 @@ pub struct ResponseTransform {
 pub struct OutputMapping {
     pub path: String,
     pub column: String,
-    #[serde(default)]
+    /// Absent and explicit `null` stay distinct, as for [`ParameterSpec::value`].
+    #[serde(
+        default,
+        deserialize_with = "explicit_value",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub default: Option<Value>,
+}
+
+/// Deserializes a field whose JSON value may itself be `null`.
+///
+/// For `Option<Value>` serde reads a present `null` as `None`, which makes an
+/// explicit `null` indistinguishable from an absent field. Where `null` is a
+/// value the caller can mean — a parameter value, a transform argument, a
+/// mapping default — that would silently drop it, so a present field is always
+/// `Some`, `null` included. Absence is still `None` through `#[serde(default)]`,
+/// which does not call this function.
+fn explicit_value<'de, D>(deserializer: D) -> Result<Option<Value>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Value::deserialize(deserializer).map(Some)
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1036,4 +1068,60 @@ fn default_arcgis_client() -> String {
 }
 fn default_arcgis_expiration() -> u32 {
     60
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{Value, json};
+
+    use super::{OutputMapping, ParameterSpec, ResponseTransform};
+
+    #[test]
+    fn an_explicit_null_is_kept_apart_from_an_absent_value() {
+        let explicit: ParameterSpec =
+            serde_json::from_value(json!({"name": "p", "mode": "fixed", "value": null})).unwrap();
+        assert_eq!(explicit.value, Some(Value::Null));
+        let absent: ParameterSpec =
+            serde_json::from_value(json!({"name": "p", "mode": "fixed"})).unwrap();
+        assert_eq!(absent.value, None);
+
+        let transform: ResponseTransform = serde_json::from_value(
+            json!({"column": "c", "source": "s", "operation": "default_if_null", "value": null}),
+        )
+        .unwrap();
+        assert_eq!(transform.value, Some(Value::Null));
+
+        let mapping: OutputMapping =
+            serde_json::from_value(json!({"path": "a", "column": "c", "default": null})).unwrap();
+        assert_eq!(mapping.default, Some(Value::Null));
+    }
+
+    #[test]
+    fn null_means_absent_for_typed_optional_fields() {
+        let request: super::RequestConfig =
+            serde_json::from_value(json!({"timeout_ms": null})).unwrap();
+        assert_eq!(request.timeout_ms, None);
+        let response: super::ResponseConfig = serde_json::from_value(json!({
+            "records_path": null,
+            "error_path": null,
+            "success_when": null
+        }))
+        .unwrap();
+        assert_eq!(response.records_path, None);
+        assert_eq!(response.error_path, None);
+        assert_eq!(response.success_when, None);
+    }
+
+    #[test]
+    fn serialization_round_trips_absent_and_null() {
+        for document in [
+            json!({"name": "p", "mode": "fixed", "value": null}),
+            json!({"name": "p", "mode": "fixed"}),
+        ] {
+            let spec: ParameterSpec = serde_json::from_value(document.clone()).unwrap();
+            let again: ParameterSpec =
+                serde_json::from_value(serde_json::to_value(&spec).unwrap()).unwrap();
+            assert_eq!(again.value, spec.value, "{document}");
+        }
+    }
 }

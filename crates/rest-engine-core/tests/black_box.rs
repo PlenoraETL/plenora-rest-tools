@@ -3522,3 +3522,148 @@ async fn read_request(stream: &mut TcpStream) -> String {
     String::from_utf8_lossy(&request).into_owned()
 }
 use std::sync::{Arc, Mutex as StdMutex};
+
+#[tokio::test]
+async fn an_explicit_null_fixed_parameter_is_sent_in_a_json_body() {
+    let (url, server, observed) =
+        recorded_server(vec![(200, r#"{"accepted":true}"#, vec![])]).await;
+    let result = execute(
+        &local_engine(),
+        json!({
+            "schema_version": 1,
+            "operation": "test",
+            "connection": {
+                "url": url,
+                "method": "POST",
+                "parameters": [
+                    {"name": "cleared", "mode": "fixed", "value": null, "location": "body"},
+                    {"name": "kept", "mode": "fixed", "value": 1, "location": "body"}
+                ]
+            }
+        }),
+    )
+    .await;
+    server.await.unwrap();
+
+    assert_eq!(result["status"], "success", "{result}");
+    let request = observed.lock().unwrap()[0].clone();
+    assert!(request.contains(r#""cleared":null"#), "{request}");
+    assert!(request.contains(r#""kept":1"#), "{request}");
+}
+
+#[tokio::test]
+async fn a_fixed_parameter_without_a_value_is_rejected() {
+    let result = execute(
+        &local_engine(),
+        json!({
+            "schema_version": 1,
+            "operation": "test",
+            "connection": {
+                "url": "http://127.0.0.1:9/",
+                "method": "POST",
+                "parameters": [{"name": "missing", "mode": "fixed", "required": false}]
+            }
+        }),
+    )
+    .await;
+    assert_eq!(result["status"], "failed");
+    assert_eq!(result["errors"][0]["code"], "INVALID_INPUT");
+}
+
+#[tokio::test]
+async fn null_is_refused_where_a_parameter_is_rendered_as_text() {
+    let engine = local_engine();
+    let cases = [
+        (
+            "GET",
+            "http://127.0.0.1:9/{id}",
+            json!({"name": "id", "mode": "fixed", "value": null}),
+        ),
+        (
+            "GET",
+            "http://127.0.0.1:9/",
+            json!({"name": "q", "mode": "fixed", "value": null}),
+        ),
+        (
+            "GET",
+            "http://127.0.0.1:9/",
+            json!({"name": "q", "mode": "fixed", "value": ["a", null], "location": "query"}),
+        ),
+        (
+            "GET",
+            "http://127.0.0.1:9/",
+            json!({"name": "X-Flag", "mode": "fixed", "value": null, "location": "header"}),
+        ),
+        (
+            "GET",
+            "http://127.0.0.1:9/",
+            json!({"name": "sid", "mode": "fixed", "value": null, "location": "cookie"}),
+        ),
+    ];
+    for (method, url, parameter) in cases {
+        let result = execute(
+            &engine,
+            json!({
+                "schema_version": 1,
+                "operation": "test",
+                "connection": {"url": url, "method": method, "parameters": [parameter]}
+            }),
+        )
+        .await;
+        assert_eq!(result["status"], "failed", "{parameter}");
+        assert_eq!(result["errors"][0]["code"], "INVALID_INPUT", "{parameter}");
+    }
+
+    for body_type in ["form_urlencoded", "multipart"] {
+        let result = execute(
+            &engine,
+            json!({
+                "schema_version": 1,
+                "operation": "test",
+                "connection": {
+                    "url": "http://127.0.0.1:9/",
+                    "method": "POST",
+                    "request": {"body_type": body_type},
+                    "parameters": [{"name": "f", "mode": "fixed", "value": null, "location": "body"}]
+                }
+            }),
+        )
+        .await;
+        assert_eq!(result["errors"][0]["code"], "INVALID_INPUT", "{body_type}");
+    }
+
+    let raw = execute(
+        &engine,
+        json!({
+            "schema_version": 1,
+            "operation": "test",
+            "connection": {
+                "url": "http://127.0.0.1:9/",
+                "method": "POST",
+                "request": {"body_type": "raw", "raw_body": "<v>{f}</v>"},
+                "parameters": [{"name": "f", "mode": "fixed", "value": null, "location": "body"}]
+            }
+        }),
+    )
+    .await;
+    assert_eq!(raw["errors"][0]["code"], "INVALID_INPUT");
+}
+
+#[tokio::test]
+async fn a_mapped_null_from_the_input_is_refused_in_the_query() {
+    let result = execute(
+        &local_engine(),
+        json!({
+            "schema_version": 1,
+            "operation": "enrich",
+            "connection": {
+                "url": "http://127.0.0.1:9/",
+                "method": "GET",
+                "parameters": [{"name": "id", "required": true}]
+            },
+            "input": {"records": [{"id": null}]}
+        }),
+    )
+    .await;
+    assert_eq!(result["errors"][0]["code"], "INVALID_INPUT", "{result}");
+}

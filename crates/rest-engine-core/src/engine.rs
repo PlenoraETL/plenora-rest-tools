@@ -1997,6 +1997,7 @@ impl Engine {
                         "parameter '{name}' is used in the URL but has location '{location:?}'"
                     )));
                 }
+                refuse_null_in_text(name, value)?;
                 continue;
             }
             match location {
@@ -2006,19 +2007,23 @@ impl Engine {
                     )));
                 }
                 ParameterLocation::Query => {
+                    refuse_null_in_text(name, value)?;
                     query_parameters.insert(name.clone(), value.clone());
                 }
                 ParameterLocation::Header => {
+                    refuse_null_in_text(name, value)?;
                     insert_header(&mut headers, name, parameter_header_value(value));
                 }
                 ParameterLocation::Body => {
                     body_parameters.insert(name.clone(), value.clone());
                 }
                 ParameterLocation::Cookie => {
+                    refuse_null_in_text(name, value)?;
                     validate_cookie_name(name)?;
                     cookies.push((name.clone(), cookie_value(value)?));
                 }
                 ParameterLocation::Auto if legacy_query_only => {
+                    refuse_null_in_text(name, value)?;
                     query_parameters.insert(name.clone(), value.clone());
                 }
                 ParameterLocation::Auto => {
@@ -2047,18 +2052,31 @@ impl Engine {
         } else {
             match connection.request.body_type {
                 BodyType::Json => PreparedBody::Json(Value::Object(body_parameters)),
-                BodyType::FormUrlencoded => PreparedBody::Form(
-                    body_parameters
-                        .iter()
-                        .map(|(key, value)| (key.clone(), value_as_text(value)))
-                        .collect(),
-                ),
+                BodyType::FormUrlencoded => {
+                    for (name, value) in &body_parameters {
+                        refuse_null_in_text(name, value)?;
+                    }
+                    PreparedBody::Form(
+                        body_parameters
+                            .iter()
+                            .map(|(key, value)| (key.clone(), value_as_text(value)))
+                            .collect(),
+                    )
+                }
                 BodyType::Multipart => {
+                    for (name, value) in &body_parameters {
+                        refuse_null_in_text(name, value)?;
+                    }
                     multipart_body(&body_parameters, self.config.max_request_bytes)?
                 }
                 BodyType::Raw => {
                     let raw = connection.request.raw_body.as_deref().unwrap_or_default();
-                    let (rendered, _) = render_template(raw, parameters, false);
+                    let (rendered, consumed) = render_template(raw, parameters, false);
+                    for name in &consumed {
+                        if let Some(value) = parameters.get(name) {
+                            refuse_null_in_text(name, value)?;
+                        }
+                    }
                     ensure_request_size(rendered.len(), self.config.max_request_bytes)?;
                     PreparedBody::Raw(rendered)
                 }
@@ -2489,6 +2507,15 @@ fn resolve_parameters(
 
     for parameter in &connection.parameters {
         let value = match parameter.mode {
+            // A fixed parameter without a value has nothing to send: dropping
+            // it would make a configuration mistake indistinguishable from an
+            // optional parameter that is legitimately absent.
+            ParameterMode::Fixed if parameter.value.is_none() => {
+                return Err(EngineError::InvalidInput(format!(
+                    "fixed parameter '{}' has no value",
+                    parameter.name
+                )));
+            }
             ParameterMode::Fixed => parameter.value.clone(),
             ParameterMode::Mapped => {
                 let source_path = parameter.source.as_deref().unwrap_or(&parameter.name);
@@ -3244,6 +3271,30 @@ fn ensure_request_size(size: usize, limit: usize) -> Result<(), EngineError> {
     } else {
         Ok(())
     }
+}
+
+/// Refuses a `null` (alone, in an array, or as an object member) in a
+/// parameter that is rendered as text: URL path, query, header, cookie, form
+/// field, multipart field, or raw body template.
+///
+/// Text has no spelling for `null`. Rendering it as an empty string would send
+/// a value the caller never gave, and dropping it would make it absent, so the
+/// request is rejected before any network activity. A JSON body keeps `null`.
+fn refuse_null_in_text(name: &str, value: &Value) -> Result<(), EngineError> {
+    fn contains_null(value: &Value) -> bool {
+        match value {
+            Value::Null => true,
+            Value::Array(values) => values.iter().any(contains_null),
+            Value::Object(values) => values.values().any(contains_null),
+            Value::Bool(_) | Value::Number(_) | Value::String(_) => false,
+        }
+    }
+    if contains_null(value) {
+        return Err(EngineError::InvalidInput(format!(
+            "parameter '{name}' is null in a location rendered as text"
+        )));
+    }
+    Ok(())
 }
 
 fn value_as_text(value: &Value) -> String {

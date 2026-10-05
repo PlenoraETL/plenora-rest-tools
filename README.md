@@ -169,6 +169,7 @@ l'integrazione canary in Plenora. Lo stato e i criteri sono mantenuti nella
 - [Contratti pubblici](contracts/README.md)
 - [Sviluppo, verifica e release](docs/development.md)
 - [Stato e strada verso la produzione](docs/roadmap.md)
+- [Changelog](CHANGELOG.md)
 
 ## Verifica
 
