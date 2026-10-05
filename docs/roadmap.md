@@ -240,7 +240,13 @@ scritta accanto, e il campo approval che il report ricopia; oggi vale
 - eseguire le fasi in staging con configurazioni, dimensioni e servizi
   rappresentativi di Plenora: il server locale prova il motore, non i servizi
   reali, le credenziali reali né gli artifact source e sink del runtime;
-- eseguire il soak per 4-6 ore su una macchina dedicata Linux;
+- eseguire il soak per 4-6 ore su una macchina dedicata Linux: nel soak di
+  75 minuti già eseguito l'RSS cresce a gradini e si appiattisce, sotto le
+  soglie proposte ma vicino alla pendenza massima
+  ([report](../campaign/reports/README.md));
+- aggiungere un profilo in cui max_concurrent_requests sia il vincolo attivo:
+  nei profili attuali domina il limite di rate e il picco di concorrenza
+  osservato resta lontano dal limite;
 - osservare le code interne del runtime Plenora, che la campagna del motore
   non vede;
 - correggere i difetti aperti qui sotto e ripetere le fasi interessate.
