@@ -19,6 +19,8 @@ mod error;
 #[doc(hidden)]
 pub mod fuzzing;
 mod json_path;
+#[cfg(test)]
+mod property_tests;
 mod response_body;
 mod runtime;
 mod transport;
