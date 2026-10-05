@@ -249,46 +249,30 @@ scritta accanto, e il campo approval che il report ricopia; oggi vale
   osservato resta lontano dal limite;
 - osservare le code interne del runtime Plenora, che la campagna del motore
   non vede;
-- correggere i difetti aperti qui sotto e ripetere le fasi interessate.
+- decidere se distinguere i guasti di connessione senza effetto remoto
+  (difetto 4 qui sotto).
 
-### Difetti aperti trovati dalla campagna
+### Difetti trovati dalla campagna
 
-Finché restano aperti, ogni fase della campagna fallisce: sono difetti del
-motore, non delle soglie.
+I primi tre, bloccanti, sono corretti nel motore, ciascuno con un test che
+fallisce senza la correzione; dopo le correzioni le fasi smoke e load sulla VM
+sono ripetute ([report](../campaign/reports/README.md)).
 
-1. **Deadline della richiesta ignorata da execute_with_control** (bloccante).
-   Engine::execute e execute_json applicano `options.deadline`;
-   Engine::execute_with_control usa soltanto la deadline del controllo
-   ricevuto e ignora quella della richiesta senza errore. Riproduzione:
-   richiesta GET con `options.deadline` a 300 ms verso un servizio che accetta
-   la connessione e non risponde, eseguita con
-   `execute_with_control(request, ExecutionControl::default())`: termina con
-   TIMEOUT solo al timeout di richiesta (15 s nella campagna) invece che alla
-   deadline; un job in polling con intervallo lungo non termina fino alla fine
-   del polling. Scenario `deadline_with_control`.
-2. **Deadline nel payload del RuntimeBinding ignorata** (bloccante). Il
-   binding applica soltanto la metadata `plenora.execution.deadline`; una
-   `options.deadline` nel payload non è applicata né rifiutata, mentre una
-   chiave di idempotenza nel payload è rifiutata con INVALID_INPUT.
-   Riproduzione: messaggio rest.test con `options.deadline` a 300 ms nel
-   payload e nessuna metadata di deadline verso un servizio che non risponde:
-   il messaggio torna al timeout di richiesta. Scenario `runtime_deadline`.
-3. **metrics.requests e metrics.retries azzerati nei fallimenti** (bloccante
-   secondo la soglia proposta). Quando l'operazione fallisce per errore di
-   trasporto, timeout, cancellazione, deadline, checksum o download
-   interrotto, il risultato riporta `requests` e `retries` a 0 anche se il
-   servizio ha ricevuto una o più richieste (per esempio 3 tentativi verso un
-   servizio che chiude la connessione prima della risposta: 3 richieste
-   ricevute, `requests` 0, `retries` 0). Gli errori HTTP dopo i retry sono
-   invece contati. Scenari drop_before_response, post_body_then_drop,
-   truncated, stall, deadline, cancel, job_cancel, job_deadline,
-   download_corrupt, download_cut.
-4. **remote_effect più prudente del necessario** (non bloccante). Un
+1. **Deadline della richiesta ignorata da execute_with_control** — corretto:
+   execute_with_control applica la più vicina tra la deadline del controllo e
+   `options.deadline` (test `the_request_deadline_binds_every_entry_point`).
+2. **Deadline nel payload del RuntimeBinding ignorata** — corretto dalla
+   stessa modifica (test `runtime_honours_the_deadline_carried_in_the_payload`).
+3. **metrics.requests e metrics.retries azzerati nei fallimenti** — corretto:
+   un contatore per esecuzione registra ogni invio e ogni retry, compresa la
+   cancellazione remota dei job (test
+   `a_failed_result_counts_the_attempts_that_reached_the_server`).
+4. **remote_effect più prudente del necessario** (aperto, non bloccante). Un
    handshake TLS fallito e un connect timeout, dove nessun byte della
    richiesta HTTP è partito, sono riportati come TRANSPORT_ERROR o TIMEOUT
    con remote_effect unknown e retry quarantine invece di none e safe: un
-   chiamante non può ritentarli automaticamente. Il report li conta come
-   prudenti.
+   chiamante non può ritentarli automaticamente. È prudente, non sbagliato
+   (ERR-004); il report li conta come prudenti.
 
 ## Gate successivo: release candidata
 

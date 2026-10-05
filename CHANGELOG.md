@@ -95,6 +95,15 @@ del contratto delle richieste, raccolte in un'unica rottura.
   servissero, andrebbero consegnati come dato remoto in un campo dichiarato del
   risultato, non nell'errore.
 
+### Correzioni trovate dalla campagna operativa
+
+- `options.deadline` vale per ogni punto d'ingresso: Engine::execute_with_control
+  e il RuntimeBinding (deadline nel payload) la ignoravano.
+- Un risultato fallito riporta in metrics.requests e metrics.retries le
+  richieste e i retry davvero inviati, compresa la cancellazione remota dei
+  job; prima valevano 0 dopo errori di trasporto, timeout, deadline o
+  cancellazione.
+
 ### Dipendenze
 
 - thiserror non è più una dipendenza diretta: Display di EngineError è scritto

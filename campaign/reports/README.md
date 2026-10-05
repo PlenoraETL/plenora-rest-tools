@@ -12,6 +12,8 @@ approvati.
 | [2026-10-05-load](2026-10-05-load.md) | e78602e | come sopra | 15 min, 32 worker, 40 op/s, 200 req/s | fallita: difetti 1-3 e un esaurimento temporaneo del disco della VM (vedi sotto) |
 | [2026-10-05-soak](2026-10-05-soak.md) | e78602e | come sopra | 75 min, 16 worker, 20 op/s, 200 req/s | fallita: difetti 1-3; risorse entro le soglie |
 | [2026-10-05-load-2](2026-10-05-load-2.md) | ffbf34d | come sopra | 10 min, 32 worker, 40 op/s, 200 req/s | fallita: difetti 1-3 |
+| [2026-10-06-smoke-correzioni](2026-10-06-smoke-correzioni.md) | e8d1ffe | come sopra | passaggio funzionale + 15 min, 4 worker, 4 op/s | superata, dopo le correzioni dei difetti 1-3 |
+| [2026-10-06-load-correzioni](2026-10-06-load-correzioni.md) | e8d1ffe | come sopra | 15 min, 32 worker, 40 op/s, 200 req/s | superata: 36054 operazioni, 0 inattese, RSS 4.7 → 75.3 MiB (picco 92), fd 7 → 7 (picco 35) |
 
 Note:
 
