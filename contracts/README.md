@@ -55,6 +55,13 @@ conformità alle superfici comuni. Attualmente il componente adotta:
 - plenora-surface-bindings-v1;
 - plenora-composition-v1.
 
+I file del repository dei contratti che il gate usa (i vettori runtime-v1 di
+REST, gli schemi runtime-vector-v1, error-v1 e adoption-manifest-v4, la
+specifica dei vettori) sono copiati byte per byte in upstream/, con revisione e
+SHA-256 in upstream/source.json. La revisione deve coincidere con quella di
+adoption-manifest.json; il validatore e il test runtime_vectors rifiutano una
+copia diversa dal suo pin o un file senza pin.
+
 plenora-arrow-interchange-v1 è dichiarato non applicabile. La libreria scambia
 oggetti JSON e artifact opachi, non record batch Arrow.
 
@@ -141,7 +148,9 @@ Il validatore controlla:
 3. risoluzione dei riferimenti posseduti dal componente;
 4. digest canonici dei sei schemi;
 5. export pubblici Rust e Python;
-6. firma del binding Rust.
+6. firma del binding Rust;
+7. pin dei file in upstream/, vettori runtime contro il loro schema e
+   manifesto di adozione contro lo schema v4 e le regole di ADOPTION.md.
 
 Per una modifica breaking si crea una nuova versione del contratto e si
 mantiene la v1 invariata finché esistono consumer supportati.

@@ -271,6 +271,14 @@ Nel runtime il payload contiene un riferimento opaco. RuntimeResources risolve
 il riferimento verso un path autorizzato soltanto all'interno del processo. Il
 path non viene incluso nel risultato pubblico.
 
+Un riferimento (artifact_source, artifact_sink, credential_ref) è accettato
+solo nella forma positiva dei contratti adottati: schema minuscolo di 2-32
+caratteri, `:`, `//` facoltativo e un resto non vuoto senza spazi né backslash;
+mai `file:`, mai un segmento `.` o `..`, mai un punto codificato `%2E`, al più
+512 byte. Tutto il resto è INVALID_INPUT prima di chiamare RuntimeResources:
+anche un path relativo come `dir/report.csv` o `report.csv`, che una lista di
+forme vietate lascerebbe passare.
+
 ## Sicurezza
 
 EngineConfig blocca per default reti private, file transfer, proxy, cookie

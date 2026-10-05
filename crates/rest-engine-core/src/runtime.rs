@@ -438,23 +438,80 @@ fn reject_inline_secrets(request: &ExecutionRequest) -> Result<(), EngineError> 
     Ok(())
 }
 
+/// Longest reference the runtime accepts, in bytes.
+const MAX_REFERENCE_BYTES: usize = 512;
+
+/// Accepts only an opaque `scheme:` or `scheme://` reference.
+///
+/// The rule is positive, as in the adopted contracts (Runtime Binding 1.0
+/// RT-013 and the `reference` grammar of `data-execution-input-v3`): a
+/// lowercase scheme of 2 to 32 characters, a colon, an optional `//`, then a
+/// non-empty remainder without whitespace or backslashes; never `file:`, never
+/// a `.` or `..` segment, never a percent-encoded dot. Anything else is refused
+/// whatever it looks like, so a relative path such as `dir/report.csv` or
+/// `report.csv` cannot pass for a handle the way it could pass a list of
+/// forbidden spellings. The host still decides, in `RuntimeResources`, which of
+/// the well-formed references it authorizes.
 fn validate_reference(reference: &str) -> Result<(), EngineError> {
-    let normalized = reference.replace('\\', "/");
-    if reference.is_empty()
-        || reference.len() > 512
-        || normalized.starts_with('/')
-        || normalized.to_ascii_lowercase().starts_with("file:")
-        || normalized
-            .as_bytes()
-            .get(1)
-            .is_some_and(|value| *value == b':')
-        || normalized.split('/').any(|segment| segment == "..")
-    {
-        return Err(EngineError::InvalidInput(ErrorDetail::from(
+    if is_opaque_reference(reference) {
+        Ok(())
+    } else {
+        Err(EngineError::InvalidInput(ErrorDetail::from(
             "runtime reference must be opaque and authorized",
-        )));
+        )))
     }
-    Ok(())
+}
+
+fn is_opaque_reference(reference: &str) -> bool {
+    if reference.len() < 4 || reference.len() > MAX_REFERENCE_BYTES {
+        return false;
+    }
+    let Some((scheme, rest)) = reference.split_once(':') else {
+        return false;
+    };
+    let mut scheme_characters = scheme.chars();
+    let scheme_ok = scheme_characters
+        .next()
+        .is_some_and(|first| first.is_ascii_lowercase())
+        && (2..=32).contains(&scheme.len())
+        && scheme_characters.all(|character| {
+            character.is_ascii_lowercase()
+                || character.is_ascii_digit()
+                || matches!(character, '+' | '.' | '-')
+        });
+    let body = rest.strip_prefix("//").unwrap_or(rest);
+    scheme_ok
+        && scheme != "file"
+        && !body.is_empty()
+        && !reference.chars().any(|character| {
+            character == '\\'
+                || character.is_whitespace()
+                || character.is_control()
+                // Python's `\s`, which the contract grammar uses, also matches
+                // the information separators U+001C to U+001F.
+                || ('\u{1c}'..='\u{1f}').contains(&character)
+        })
+        && !reference.contains("%2E")
+        && !reference.contains("%2e")
+        && !has_dot_segment(reference)
+}
+
+/// A `.` or `..` segment: preceded by the start, `/` or `:`, and followed by
+/// `/` or the end, as `(^|[/:])\.{1,2}(/|$)` in the contract grammar.
+fn has_dot_segment(reference: &str) -> bool {
+    let mut starts = std::iter::once(0).chain(
+        reference
+            .char_indices()
+            .filter(|(_, character)| matches!(character, '/' | ':'))
+            .map(|(index, _)| index + 1),
+    );
+    starts.any(|start| {
+        let tail = reference.get(start..).unwrap_or_default();
+        ["..", "."].iter().any(|dots| {
+            tail.strip_prefix(dots)
+                .is_some_and(|after| after.is_empty() || after.starts_with('/'))
+        })
+    })
 }
 
 fn success_message(
@@ -559,9 +616,47 @@ mod tests {
 
     #[test]
     fn runtime_references_are_opaque_and_not_paths() {
-        assert!(validate_reference("artifact://tenant/item").is_ok());
-        assert!(validate_reference("../private/file").is_err());
-        assert!(validate_reference("C:\\private\\file").is_err());
+        for accepted in [
+            "artifact://tenant/item",
+            "secret://rest/vector",
+            "artifact:tenant-a/8d936f1d",
+            "s3+v2://bucket/key.csv",
+            "artifact://tenant/$HOME/report",
+            "artifact://tenant/a..b",
+        ] {
+            assert!(validate_reference(accepted).is_ok(), "{accepted}");
+        }
+        for refused in [
+            "",
+            "../private/file",
+            "./report.csv",
+            "C:\\private\\file",
+            "c:/private/file",
+            "/etc/passwd",
+            "dir/report.csv",
+            "report.csv",
+            "~/report.csv",
+            "\\\\server\\share",
+            "file:///etc/passwd",
+            "FILE:x",
+            "artifact://tenant/../other",
+            "artifact://tenant/.",
+            "artifact:..",
+            "artifact://tenant/%2e%2e/x",
+            "artifact://tenant/%2E",
+            "artifact://tenant/a b",
+            "artifact://tenant/a\u{1f}b",
+            "artifact://tenant\\x",
+            "artifact://",
+            "artifact:",
+            "a://x",
+            "Artifact://x",
+            "1rtifact://x",
+        ] {
+            assert!(validate_reference(refused).is_err(), "{refused:?}");
+        }
+        let too_long = format!("artifact://{}", "a".repeat(super::MAX_REFERENCE_BYTES));
+        assert!(validate_reference(&too_long).is_err());
         let _resources = EmptyResources;
     }
 }

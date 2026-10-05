@@ -67,6 +67,23 @@ del contratto delle richieste, raccolte in un'unica rottura.
 - Un batch flat_array rifiuta i record che non si risolvono in esattamente un
   parametro non null.
 
+### Runtime e contratti (incompatibile)
+
+- Adottata la revisione 1e902dfa di plenora-contracts. I tre vettori
+  runtime-v1 di REST (rest-upload-request, rest-download-success,
+  rest-upload-unknown-error) sono copiati in contracts/upstream con il loro
+  SHA-256 ed eseguiti attraverso RuntimeBinding (test runtime_vectors), con le
+  mutazioni negative dell'instradamento e gli esempi negativi REST del
+  contratto.
+- Un riferimento runtime (artifact_source, artifact_sink, credential_ref) deve
+  essere un riferimento opaco `schema:` o `schema://` secondo la grammatica dei
+  contratti. Prima bastava non sembrare un path assoluto, `file:` o `..`: un
+  path relativo come `dir/report.csv` o `report.csv` arrivava a
+  RuntimeResources. Ora è INVALID_INPUT prima della risoluzione.
+- scripts/validate_contracts.py verifica i pin dei file copiati, i vettori
+  contro lo schema runtime-vector-v1 e il manifesto di adozione contro lo
+  schema v4 e le regole incrociate di ADOPTION.md.
+
 ### API Rust (incompatibile)
 
 - EngineError non contiene più testo di terzi: i campi testuali delle varianti
