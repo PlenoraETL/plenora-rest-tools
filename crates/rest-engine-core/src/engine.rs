@@ -2279,7 +2279,7 @@ fn poll_state(response: &Value, polling: &PollingConfig) -> Result<Option<PollSt
     // even an empty one, and is reported instead of being guessed.
     if value.is_null() {
         return Err(EngineError::InvalidResponse(
-            "asynchronous status is null".to_owned(),
+            ErrorDetail::from("asynchronous status is null"),
         ));
     }
     let status = value_as_text(value);
