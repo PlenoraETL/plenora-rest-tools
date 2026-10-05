@@ -2275,6 +2275,13 @@ fn poll_state(response: &Value, polling: &PollingConfig) -> Result<Option<PollSt
     let Some(value) = json_path::get(response, &polling.status_path) else {
         return Ok(None);
     };
+    // A null status is not the empty string: it matches no configured value,
+    // even an empty one, and is reported instead of being guessed.
+    if value.is_null() {
+        return Err(EngineError::InvalidResponse(
+            "asynchronous status is null".to_owned(),
+        ));
+    }
     let status = value_as_text(value);
     if polling
         .pending_values
@@ -2454,7 +2461,10 @@ fn polling_job_id(
             .cloned()
             .map(Value::String)
     } else {
-        json_path::get(response, &polling.id_path).cloned()
+        // A null id is no id: rendered into a URL it would become "".
+        json_path::get(response, &polling.id_path)
+            .filter(|value| !value.is_null())
+            .cloned()
     }
 }
 
@@ -2807,12 +2817,27 @@ fn parse_transform_condition(condition: &str) -> Option<TransformCondition<'_>> 
         return None;
     };
     let column = left.trim();
-    if column.is_empty() || right.contains("==") || right.contains("!=") {
+    let is_operator_or_quote = |character: char| matches!(character, '=' | '!' | '\'' | '"');
+    if column.is_empty() || column.contains(is_operator_or_quote) {
         return None;
     }
-    let expected = right
-        .trim()
-        .trim_matches(|character| character == '\'' || character == '"');
+    // The literal is either quoted with one matching pair, or bare. Trimming
+    // quote characters from both ends would accept `'active` or `active"` and
+    // compare against a value the author never wrote.
+    let right = right.trim();
+    let expected = match right.chars().next() {
+        Some(quote @ ('\'' | '"')) => {
+            let inner = right
+                .strip_prefix(quote)
+                .and_then(|rest| rest.strip_suffix(quote))?;
+            if inner.contains(quote) {
+                return None;
+            }
+            inner
+        }
+        _ if right.is_empty() || right.contains(is_operator_or_quote) => return None,
+        _ => right,
+    };
     Some(TransformCondition {
         column,
         expected,

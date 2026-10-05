@@ -149,6 +149,15 @@ no.
   un oggetto, rifiuta la richiesta con INVALID_INPUT prima di qualunque attività
   di rete, invece di inviare una stringa vuota.
 
+Lo stesso vale per i valori della risposta. Una trasformazione prefix, suffix
+o replace su una sorgente null restituisce null, non una stringa costruita da
+""; una condition su una colonna assente o null non è soddisfatta né da `==`
+né da `!=`; uno status di polling null è un errore INVALID_RESPONSE invece di
+coincidere con un valore vuoto configurato; un job id null equivale a un job id
+assente e non viene inserito in un URL. Un value null in una trasformazione è
+ammesso solo per default_if_null: altrove la richiesta è rifiutata con
+INVALID_INPUT prima della rete.
+
 Nei campi opzionali con un tipo proprio (per esempio request.timeout_ms,
 response.records_path, response.error_path, response.success_when) null
 equivale all'assenza del campo, come negli schemi v1 che dichiarano quei campi
@@ -167,8 +176,11 @@ multiply e divide richiedono un numero; divide non accetta zero; round accetta
 un intero di decimali da 0 a 15; prefix e suffix una stringa, un numero o un
 booleano; replace un oggetto con find non vuoto e replace stringa;
 default_if_null un valore; le conversioni di temperatura, uppercase e lowercase
-nessun valore) e una condition che non sia `colonna == 'valore'` o
-`colonna != 'valore'`.
+nessun valore) e una condition che non sia `colonna == valore` o
+`colonna != valore`, dove il valore è racchiuso in una sola coppia di apici
+uguali (`'attivo'`, `"attivo"`) oppure è nudo senza apici né operatori. Un
+apice non chiuso (`status == 'active`) o in eccesso è un errore, non un
+valore da confrontare.
 
 Durante l'esecuzione null si propaga: ogni operazione tranne default_if_null
 trasforma null in null. Un valore che l'operazione non sa trattare fa fallire

@@ -15,9 +15,15 @@ release finché una release non viene preparata.
   [Null e valori assenti](docs/architecture.md#null-e-valori-assenti).
 - Un null in path, query, header, cookie, form, multipart o template raw è
   rifiutato con INVALID_INPUT invece di essere inviato come stringa vuota.
+- Null non è più letto come stringa vuota nemmeno nei valori della risposta:
+  prefix, suffix e replace su null restituiscono null; una condition su una
+  colonna null non si applica; uno status di polling null è INVALID_RESPONSE;
+  un job id null è un job id assente. Un value null in una trasformazione
+  diversa da default_if_null è INVALID_INPUT.
 - Le trasformazioni della risposta sono validate prima dell'esecuzione:
   un'operazione sconosciuta, un argomento mancante o di tipo sbagliato, una
-  divisione per zero costante o una condition non riconosciuta sono
+  divisione per zero costante o una condition non riconosciuta (compresi
+  apici non chiusi o in eccesso, come `status == 'active`) sono
   INVALID_INPUT. Prima l'operazione sconosciuta lasciava il valore invariato e
   una condition senza operatore applicava sempre la trasformazione.
 - Un valore che una trasformazione non sa trattare, o un risultato senza
