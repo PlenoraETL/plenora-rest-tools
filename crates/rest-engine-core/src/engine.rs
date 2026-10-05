@@ -2770,16 +2770,20 @@ struct TransformCondition<'a> {
 }
 
 fn parse_transform_condition(condition: &str) -> Option<TransformCondition<'_>> {
-    let (left, right, equals) = if let Some((left, right)) = condition.split_once("==") {
-        (left, right, true)
-    } else if let Some((left, right)) = condition.split_once("!=") {
-        (left, right, false)
+    let is_operator_or_quote = |character: char| matches!(character, '=' | '!' | '\'' | '"');
+    // The column cannot contain `=`, `!` or a quote, so the first of those
+    // characters starts the operator. Searching the whole string for `==`
+    // instead would find one inside a quoted literal, as in
+    // `status != 'a==b'`, and split there.
+    let operator = condition.find(is_operator_or_quote)?;
+    let (left, rest) = condition.split_at(operator);
+    let (right, equals) = if let Some(right) = rest.strip_prefix("==") {
+        (right, true)
     } else {
-        return None;
+        (rest.strip_prefix("!=")?, false)
     };
     let column = left.trim();
-    let is_operator_or_quote = |character: char| matches!(character, '=' | '!' | '\'' | '"');
-    if column.is_empty() || column.contains(is_operator_or_quote) {
+    if column.is_empty() {
         return None;
     }
     // The literal is either quoted with one matching pair, or bare. Trimming
