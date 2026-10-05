@@ -139,22 +139,26 @@ fn parse_xml(body: &[u8]) -> Result<Value, EngineError> {
                 attach_xml_node(&mut stack, &mut root, node)?;
             }
             Ok(Event::Text(event)) => {
-                if let Some(node) = stack.last_mut() {
-                    let text = event.decode().map_err(|_| {
-                        EngineError::InvalidResponse(ErrorDetail::from("XML contains invalid text"))
-                    })?;
-                    node.text.push_str(&text);
+                let text = event.decode().map_err(|_| {
+                    EngineError::InvalidResponse(ErrorDetail::from("XML contains invalid text"))
+                })?;
+                match stack.last_mut() {
+                    Some(node) => node.text.push_str(&text),
+                    // Only the whitespace XML allows around the root element.
+                    None if text
+                        .chars()
+                        .all(|character| matches!(character, ' ' | '\t' | '\r' | '\n')) => {}
+                    None => return Err(xml_content_outside_root()),
                 }
             }
             Ok(Event::CData(event)) => {
-                if let Some(node) = stack.last_mut() {
-                    let text = event.decode().map_err(|_| {
-                        EngineError::InvalidResponse(ErrorDetail::from(
-                            "XML contains invalid CDATA",
-                        ))
-                    })?;
-                    node.text.push_str(&text);
-                }
+                let text = event.decode().map_err(|_| {
+                    EngineError::InvalidResponse(ErrorDetail::from("XML contains invalid CDATA"))
+                })?;
+                let Some(node) = stack.last_mut() else {
+                    return Err(xml_content_outside_root());
+                };
+                node.text.push_str(&text);
             }
             Ok(Event::End(event)) => {
                 let node = stack.pop().ok_or_else(|| {
@@ -197,9 +201,10 @@ fn parse_xml(body: &[u8]) -> Result<Value, EngineError> {
                         )));
                     }
                 };
-                if let Some(node) = stack.last_mut() {
-                    node.text.push_str(&resolved);
-                }
+                let Some(node) = stack.last_mut() else {
+                    return Err(xml_content_outside_root());
+                };
+                node.text.push_str(&resolved);
             }
             Ok(Event::DocType(_)) => {
                 return Err(EngineError::InvalidResponse(ErrorDetail::from(
@@ -223,6 +228,16 @@ fn parse_xml(body: &[u8]) -> Result<Value, EngineError> {
     let (name, value) = root
         .ok_or_else(|| EngineError::InvalidResponse(ErrorDetail::from("XML response is empty")))?;
     Ok(Value::Object(Map::from_iter([(name, value)])))
+}
+
+/// Character data outside the root element (`<a/>junk`, `junk<a/>`, a
+/// reference or CDATA after the root) makes the document not well formed. It
+/// used to be dropped, so a truncated or concatenated payload was accepted as
+/// if it were only its root element.
+fn xml_content_outside_root() -> EngineError {
+    EngineError::InvalidResponse(ErrorDetail::from(
+        "XML has content outside the root element",
+    ))
 }
 
 fn xml_node(
@@ -340,6 +355,29 @@ mod tests {
     fn parses_xml_repeated_elements_and_attributes() {
         let value = parse_xml(b"<root id=\"1\"><item>A</item><item>B</item></root>").unwrap();
         assert_eq!(value, json!({"root": {"@id": "1", "item": ["A", "B"]}}));
+    }
+
+    #[test]
+    fn xml_content_outside_the_root_is_refused() {
+        // Found while writing the properties of the response_body fuzz
+        // target: text, references, and CDATA outside the root element were
+        // dropped and the document accepted.
+        for body in [
+            &b"<a/>junk"[..],
+            b"junk<a/>",
+            b"<a>1</a>&amp;",
+            b"<a/><![CDATA[ ]]>",
+        ] {
+            let Err(crate::EngineError::InvalidResponse(detail)) = parse_xml(body) else {
+                panic!("content outside the root must be refused");
+            };
+            assert_eq!(detail.text(), "XML has content outside the root element");
+        }
+        // The whitespace XML allows around the root is still accepted.
+        assert_eq!(
+            parse_xml(b"<?xml version=\"1.0\"?>\r\n<a>1</a>\n\t ").unwrap(),
+            json!({"a": "1"})
+        );
     }
 
     #[test]
