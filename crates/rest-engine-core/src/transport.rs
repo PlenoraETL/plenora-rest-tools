@@ -341,7 +341,19 @@ impl CookieStore for BoundedJar {
     }
 
     fn cookies(&self, url: &Url) -> Option<HeaderValue> {
-        self.inner.cookies(url)
+        // The inner jar keeps its cookies in hash maps, so the order of the
+        // pairs in the Cookie header changed from one jar to the next for the
+        // same cookies. Sorted, the header depends only on the cookies. A
+        // pair never contains `;`: the cookie-octet grammar excludes it.
+        let value = self.inner.cookies(url)?;
+        let mut pairs = value
+            .as_bytes()
+            .split(|byte| *byte == b';')
+            .map(<[u8]>::trim_ascii)
+            .filter(|pair| !pair.is_empty())
+            .collect::<Vec<_>>();
+        pairs.sort_unstable();
+        Some(HeaderValue::from_bytes(&pairs.join(&b"; "[..])).unwrap_or(value))
     }
 }
 
@@ -2795,6 +2807,25 @@ mod tests {
             parse_retry_after(&httpdate::fmt_http_date(now - Duration::from_secs(1)), now),
             Some(0)
         );
+    }
+
+    #[test]
+    fn the_cookie_header_does_not_depend_on_hash_order() {
+        // Found by the remote_headers fuzz target: two jars holding the same
+        // cookies sent them in different orders, because the inner jar
+        // iterates hash maps with a per-instance random seed.
+        use reqwest::cookie::CookieStore;
+        let url = Url::parse("https://example.com/").unwrap();
+        let headers = ["h=8", "c=3", "a=1", "g=7", "e=5", "b=2", "f=6", "d=4"]
+            .map(reqwest::header::HeaderValue::from_static);
+        for _ in 0..4 {
+            let jar = super::BoundedJar::default();
+            jar.set_cookies(&mut headers.iter(), &url);
+            assert_eq!(
+                jar.cookies(&url).unwrap(),
+                "a=1; b=2; c=3; d=4; e=5; f=6; g=7; h=8"
+            );
+        }
     }
 
     #[test]
