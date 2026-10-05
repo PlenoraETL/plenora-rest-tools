@@ -2004,6 +2004,7 @@ impl Engine {
                         "parameter '{name}' is used in the URL but has location '{location:?}'"
                     )));
                 }
+                refuse_null_in_text(name, value)?;
                 continue;
             }
             match location {
@@ -2013,19 +2014,23 @@ impl Engine {
                     )));
                 }
                 ParameterLocation::Query => {
+                    refuse_null_in_text(name, value)?;
                     query_parameters.insert(name.clone(), value.clone());
                 }
                 ParameterLocation::Header => {
+                    refuse_null_in_text(name, value)?;
                     insert_header(&mut headers, name, parameter_header_value(value));
                 }
                 ParameterLocation::Body => {
                     body_parameters.insert(name.clone(), value.clone());
                 }
                 ParameterLocation::Cookie => {
+                    refuse_null_in_text(name, value)?;
                     validate_cookie_name(name)?;
                     cookies.push((name.clone(), cookie_value(value)?));
                 }
                 ParameterLocation::Auto if legacy_query_only => {
+                    refuse_null_in_text(name, value)?;
                     query_parameters.insert(name.clone(), value.clone());
                 }
                 ParameterLocation::Auto => {
@@ -2054,18 +2059,31 @@ impl Engine {
         } else {
             match connection.request.body_type {
                 BodyType::Json => PreparedBody::Json(Value::Object(body_parameters)),
-                BodyType::FormUrlencoded => PreparedBody::Form(
-                    body_parameters
-                        .iter()
-                        .map(|(key, value)| (key.clone(), value_as_text(value)))
-                        .collect(),
-                ),
+                BodyType::FormUrlencoded => {
+                    for (name, value) in &body_parameters {
+                        refuse_null_in_text(name, value)?;
+                    }
+                    PreparedBody::Form(
+                        body_parameters
+                            .iter()
+                            .map(|(key, value)| (key.clone(), value_as_text(value)))
+                            .collect(),
+                    )
+                }
                 BodyType::Multipart => {
+                    for (name, value) in &body_parameters {
+                        refuse_null_in_text(name, value)?;
+                    }
                     multipart_body(&body_parameters, self.config.max_request_bytes)?
                 }
                 BodyType::Raw => {
                     let raw = connection.request.raw_body.as_deref().unwrap_or_default();
-                    let (rendered, _) = render_template(raw, parameters, false);
+                    let (rendered, consumed) = render_template(raw, parameters, false);
+                    for name in &consumed {
+                        if let Some(value) = parameters.get(name) {
+                            refuse_null_in_text(name, value)?;
+                        }
+                    }
                     ensure_request_size(rendered.len(), self.config.max_request_bytes)?;
                     PreparedBody::Raw(rendered)
                 }
@@ -2236,6 +2254,13 @@ fn poll_state(response: &Value, polling: &PollingConfig) -> Result<Option<PollSt
     let Some(value) = json_path::get(response, &polling.status_path) else {
         return Ok(None);
     };
+    // A null status is not the empty string: it matches no configured value,
+    // even an empty one, and is reported instead of being guessed.
+    if value.is_null() {
+        return Err(EngineError::InvalidResponse(
+            "asynchronous status is null".to_owned(),
+        ));
+    }
     let status = value_as_text(value);
     if polling
         .pending_values
@@ -2406,7 +2431,10 @@ fn polling_job_id(
             .cloned()
             .map(Value::String)
     } else {
-        json_path::get(response, &polling.id_path).cloned()
+        // A null id is no id: rendered into a URL it would become "".
+        json_path::get(response, &polling.id_path)
+            .filter(|value| !value.is_null())
+            .cloned()
     }
 }
 
@@ -2496,6 +2524,15 @@ fn resolve_parameters(
 
     for parameter in &connection.parameters {
         let value = match parameter.mode {
+            // A fixed parameter without a value has nothing to send: dropping
+            // it would make a configuration mistake indistinguishable from an
+            // optional parameter that is legitimately absent.
+            ParameterMode::Fixed if parameter.value.is_none() => {
+                return Err(EngineError::InvalidInput(format!(
+                    "fixed parameter '{}' has no value",
+                    parameter.name
+                )));
+            }
             ParameterMode::Fixed => parameter.value.clone(),
             ParameterMode::Mapped => {
                 let source_path = parameter.source.as_deref().unwrap_or(&parameter.name);
@@ -2704,7 +2741,12 @@ fn transform_condition(row: &JsonObject, condition: &str) -> bool {
     } else {
         return true;
     };
-    let actual = row.get(left.trim()).map(value_as_text).unwrap_or_default();
+    // A missing or null column is not the empty string: the comparison is
+    // unknown, as in SQL, and the transform does not apply.
+    let actual = match row.get(left.trim()) {
+        None | Some(Value::Null) => return false,
+        Some(actual) => value_as_text(actual),
+    };
     let expected = expected
         .trim()
         .trim_matches(|character| character == '\'' || character == '"');
@@ -2913,6 +2955,8 @@ fn transform_value(source: &Value, transform: &ResponseTransform) -> Value {
             .as_str()
             .map(|value| Value::String(value.to_lowercase()))
             .unwrap_or(Value::Null),
+        // A null source has no text: it stays null instead of becoming "".
+        "prefix" | "suffix" | "replace" if source.is_null() => Value::Null,
         "prefix" => transform
             .value
             .as_ref()
@@ -3251,6 +3295,30 @@ fn ensure_request_size(size: usize, limit: usize) -> Result<(), EngineError> {
     } else {
         Ok(())
     }
+}
+
+/// Refuses a `null` (alone, in an array, or as an object member) in a
+/// parameter that is rendered as text: URL path, query, header, cookie, form
+/// field, multipart field, or raw body template.
+///
+/// Text has no spelling for `null`. Rendering it as an empty string would send
+/// a value the caller never gave, and dropping it would make it absent, so the
+/// request is rejected before any network activity. A JSON body keeps `null`.
+fn refuse_null_in_text(name: &str, value: &Value) -> Result<(), EngineError> {
+    fn contains_null(value: &Value) -> bool {
+        match value {
+            Value::Null => true,
+            Value::Array(values) => values.iter().any(contains_null),
+            Value::Object(values) => values.values().any(contains_null),
+            Value::Bool(_) | Value::Number(_) | Value::String(_) => false,
+        }
+    }
+    if contains_null(value) {
+        return Err(EngineError::InvalidInput(format!(
+            "parameter '{name}' is null in a location rendered as text"
+        )));
+    }
+    Ok(())
 }
 
 fn value_as_text(value: &Value) -> String {
@@ -3934,6 +4002,24 @@ fn validate_idempotency_key(key: &str) -> Result<(), EngineError> {
 }
 
 fn validate_execution_configuration(request: &ExecutionRequest) -> Result<(), EngineError> {
+    // An explicit null is a value only where null makes sense as one, the
+    // default of `default_if_null`. As the text of a prefix, a suffix, or any
+    // other argument it would be read as "" or as a missing argument.
+    if let Some(transform) = request
+        .connection
+        .response
+        .transforms
+        .iter()
+        .find(|transform| {
+            transform.value.as_ref().is_some_and(Value::is_null)
+                && transform.operation != "default_if_null"
+        })
+    {
+        return Err(EngineError::InvalidInput(format!(
+            "transform for column '{}' has a null value",
+            transform.column
+        )));
+    }
     let Some(polling) = request.connection.polling.as_ref() else {
         return Ok(());
     };

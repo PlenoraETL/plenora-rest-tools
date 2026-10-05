@@ -3524,6 +3524,279 @@ async fn read_request(stream: &mut TcpStream) -> String {
 use std::sync::{Arc, Mutex as StdMutex};
 
 #[tokio::test]
+async fn an_explicit_null_fixed_parameter_is_sent_in_a_json_body() {
+    let (url, server, observed) =
+        recorded_server(vec![(200, r#"{"accepted":true}"#, vec![])]).await;
+    let result = execute(
+        &local_engine(),
+        json!({
+            "schema_version": 1,
+            "operation": "test",
+            "connection": {
+                "url": url,
+                "method": "POST",
+                "parameters": [
+                    {"name": "cleared", "mode": "fixed", "value": null, "location": "body"},
+                    {"name": "kept", "mode": "fixed", "value": 1, "location": "body"}
+                ]
+            }
+        }),
+    )
+    .await;
+    server.await.unwrap();
+
+    assert_eq!(result["status"], "success", "{result}");
+    let request = observed.lock().unwrap()[0].clone();
+    assert!(request.contains(r#""cleared":null"#), "{request}");
+    assert!(request.contains(r#""kept":1"#), "{request}");
+}
+
+#[tokio::test]
+async fn a_fixed_parameter_without_a_value_is_rejected() {
+    let result = execute(
+        &local_engine(),
+        json!({
+            "schema_version": 1,
+            "operation": "test",
+            "connection": {
+                "url": "http://127.0.0.1:9/",
+                "method": "POST",
+                "parameters": [{"name": "missing", "mode": "fixed", "required": false}]
+            }
+        }),
+    )
+    .await;
+    assert_eq!(result["status"], "failed");
+    assert_eq!(result["errors"][0]["code"], "INVALID_INPUT");
+}
+
+#[tokio::test]
+async fn null_is_refused_where_a_parameter_is_rendered_as_text() {
+    let engine = local_engine();
+    let cases = [
+        (
+            "GET",
+            "http://127.0.0.1:9/{id}",
+            json!({"name": "id", "mode": "fixed", "value": null}),
+        ),
+        (
+            "GET",
+            "http://127.0.0.1:9/",
+            json!({"name": "q", "mode": "fixed", "value": null}),
+        ),
+        (
+            "GET",
+            "http://127.0.0.1:9/",
+            json!({"name": "q", "mode": "fixed", "value": ["a", null], "location": "query"}),
+        ),
+        (
+            "GET",
+            "http://127.0.0.1:9/",
+            json!({"name": "X-Flag", "mode": "fixed", "value": null, "location": "header"}),
+        ),
+        (
+            "GET",
+            "http://127.0.0.1:9/",
+            json!({"name": "sid", "mode": "fixed", "value": null, "location": "cookie"}),
+        ),
+    ];
+    for (method, url, parameter) in cases {
+        let result = execute(
+            &engine,
+            json!({
+                "schema_version": 1,
+                "operation": "test",
+                "connection": {"url": url, "method": method, "parameters": [parameter]}
+            }),
+        )
+        .await;
+        assert_eq!(result["status"], "failed", "{parameter}");
+        assert_eq!(result["errors"][0]["code"], "INVALID_INPUT", "{parameter}");
+    }
+
+    for body_type in ["form_urlencoded", "multipart"] {
+        let result = execute(
+            &engine,
+            json!({
+                "schema_version": 1,
+                "operation": "test",
+                "connection": {
+                    "url": "http://127.0.0.1:9/",
+                    "method": "POST",
+                    "request": {"body_type": body_type},
+                    "parameters": [{"name": "f", "mode": "fixed", "value": null, "location": "body"}]
+                }
+            }),
+        )
+        .await;
+        assert_eq!(result["errors"][0]["code"], "INVALID_INPUT", "{body_type}");
+    }
+
+    let raw = execute(
+        &engine,
+        json!({
+            "schema_version": 1,
+            "operation": "test",
+            "connection": {
+                "url": "http://127.0.0.1:9/",
+                "method": "POST",
+                "request": {"body_type": "raw", "raw_body": "<v>{f}</v>"},
+                "parameters": [{"name": "f", "mode": "fixed", "value": null, "location": "body"}]
+            }
+        }),
+    )
+    .await;
+    assert_eq!(raw["errors"][0]["code"], "INVALID_INPUT");
+}
+
+#[tokio::test]
+async fn a_mapped_null_from_the_input_is_refused_in_the_query() {
+    let result = execute(
+        &local_engine(),
+        json!({
+            "schema_version": 1,
+            "operation": "enrich",
+            "connection": {
+                "url": "http://127.0.0.1:9/",
+                "method": "GET",
+                "parameters": [{"name": "id", "required": true}]
+            },
+            "input": {"records": [{"id": null}]}
+        }),
+    )
+    .await;
+    assert_eq!(result["errors"][0]["code"], "INVALID_INPUT", "{result}");
+}
+
+#[tokio::test]
+async fn a_null_transform_argument_is_rejected_before_any_request() {
+    for transform in [
+        json!({"source": "a", "column": "c", "operation": "prefix", "value": null}),
+        json!({"source": "a", "column": "c", "operation": "suffix", "value": null}),
+        json!({"source": "a", "column": "c", "operation": "add", "value": null}),
+    ] {
+        let result = execute(
+            &local_engine(),
+            json!({
+                "schema_version": 1,
+                "operation": "generate",
+                "connection": {
+                    "url": "http://127.0.0.1:9/",
+                    "method": "GET",
+                    "response": {"transforms": [transform]}
+                }
+            }),
+        )
+        .await;
+        assert_eq!(
+            result["errors"][0]["code"], "INVALID_INPUT",
+            "{transform}: {result}"
+        );
+        assert_eq!(result["metrics"]["requests"], 0, "{transform}");
+    }
+}
+
+#[tokio::test]
+async fn null_is_not_read_as_empty_text_in_transforms() {
+    let (url, server, _) = recorded_server(vec![(200, r#"{"a":null,"b":"ABC"}"#, vec![])]).await;
+    let result = execute(
+        &local_engine(),
+        json!({
+            "schema_version": 1,
+            "operation": "generate",
+            "connection": {
+                "url": url,
+                "method": "GET",
+                "response": {
+                    "output_mapping": [
+                        {"path": "a", "column": "a"},
+                        {"path": "b", "column": "b"}
+                    ],
+                    "transforms": [
+                        {"source": "a", "column": "prefixed", "operation": "prefix", "value": "id-"},
+                        {"source": "a", "column": "suffixed", "operation": "suffix", "value": "-x"},
+                        {"source": "a", "column": "replaced", "operation": "replace",
+                         "value": {"find": "x", "replace": "y"}},
+                        {"source": "b", "column": "matched", "operation": "uppercase",
+                         "condition": "a == ''"}
+                    ]
+                }
+            }
+        }),
+    )
+    .await;
+    server.await.unwrap();
+    assert_eq!(result["status"], "success", "{result}");
+    let record = &result["output"]["records"][0];
+    assert_eq!(record["prefixed"], Value::Null, "{record}");
+    assert_eq!(record["suffixed"], Value::Null, "{record}");
+    assert_eq!(record["replaced"], Value::Null, "{record}");
+    assert_eq!(record.get("matched"), None, "{record}");
+}
+
+#[tokio::test]
+async fn a_null_poll_status_is_not_read_as_an_empty_status() {
+    // An empty pending value is legal on the Rust surface; a null status must
+    // not match it as if null were "".
+    let (base_url, server, _) = recorded_server(vec![
+        (202, r#"{"accepted":true}"#, vec![("Location", "/jobs/1")]),
+        (200, r#"{"status":null}"#, vec![]),
+    ])
+    .await;
+    let result = execute(
+        &local_engine(),
+        json!({
+            "schema_version": 1,
+            "operation": "test",
+            "connection": {
+                "url": format!("{base_url}jobs"),
+                "method": "POST",
+                "polling": {
+                    "pending_values": [""],
+                    "interval_ms": 0,
+                    "max_attempts": 3
+                }
+            }
+        }),
+    )
+    .await;
+    server.await.unwrap();
+    assert_eq!(result["errors"][0]["code"], "INVALID_RESPONSE", "{result}");
+    assert_eq!(result["metrics"]["poll_requests"], 1);
+}
+
+#[tokio::test]
+async fn a_null_job_id_is_not_rendered_into_the_poll_url() {
+    let (base_url, server, observed) =
+        recorded_server(vec![(202, r#"{"id":null,"status":"queued"}"#, vec![])]).await;
+    let result = execute(
+        &local_engine(),
+        json!({
+            "schema_version": 1,
+            "operation": "test",
+            "connection": {
+                "url": format!("{base_url}jobs"),
+                "method": "POST",
+                "polling": {
+                    "url_template": "{base}/jobs/{id}",
+                    "location_header": null,
+                    "interval_ms": 0,
+                    "max_attempts": 3
+                }
+            }
+        }),
+    )
+    .await;
+    server.await.unwrap();
+    assert_eq!(result["errors"][0]["code"], "INVALID_RESPONSE", "{result}");
+    assert_eq!(
+        observed.lock().unwrap().len(),
+        1,
+        "no poll may reach /jobs/"
+    );
+}
+
+#[tokio::test]
 async fn a_withheld_idempotency_header_also_withdraws_non_idempotent_retries() {
     // `X-Deduplication-ID` does not name an idempotency key, so it is not
     // carried to another origin. The retries it enabled must not be carried
