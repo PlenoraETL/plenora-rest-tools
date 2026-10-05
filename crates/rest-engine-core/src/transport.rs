@@ -2240,7 +2240,9 @@ async fn reset_download_state(state: &mut DownloadState) -> Result<(), EngineErr
         .truncate(true)
         .open(&state.temporary)
         .await
-        .map_err(file_io)?;
+        // A retry of a download whose request already went out: the remote
+        // side may have acted, so this is not a failure without effect.
+        .map_err(download_write_io)?;
     state.file = Some(file);
     state.bytes_written = 0;
     state.digest = Sha256::new();

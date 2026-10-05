@@ -897,3 +897,21 @@ async fn unknown_plenora_keys_are_ignored_not_refused() {
         response.payload
     );
 }
+
+#[tokio::test]
+async fn a_malformed_media_type_is_protocol_and_an_unadvertised_one_unsupported() {
+    for (content_type, category) in [
+        ("application//json", "protocol"),
+        ("application/", "protocol"),
+        ("/json", "protocol"),
+        ("application/json;", "protocol"),
+        ("application/json; charset", "protocol"),
+        ("application json", "protocol"),
+        ("text/csv", "unsupported"),
+        ("application/json; charset=utf-8", "unsupported"),
+    ] {
+        let mut request = with_credential(runtime_request("http://127.0.0.1:9/"));
+        request.content_type = content_type.to_owned();
+        assert_refusal(&refused(request).await, category, content_type);
+    }
+}

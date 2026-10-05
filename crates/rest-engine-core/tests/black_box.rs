@@ -4672,3 +4672,50 @@ fn a_deadline_is_any_rfc_3339_spelling_of_utc() {
         assert_eq!(error.payload().code, "INVALID_INPUT", "{refused}");
     }
 }
+
+#[tokio::test]
+async fn a_retried_download_whose_staging_cannot_be_reopened_keeps_the_remote_effect_unknown() {
+    // A repeatable POST download is cut after a few bytes; before the retry
+    // the staging file has gone, so it cannot be reopened. The first POST
+    // reached the server, so the failure cannot claim no remote effect.
+    let directory = transfer_directory("post-download-reset");
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/export", listener.local_addr().unwrap());
+    let server = {
+        let directory = directory.clone();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let _ = read_request(&mut stream).await;
+            let mut entries = fs::read_dir(&directory).await.unwrap();
+            while let Some(entry) = entries.next_entry().await.unwrap() {
+                if entry.file_name().to_string_lossy().ends_with(".part") {
+                    fs::remove_file(entry.path()).await.unwrap();
+                }
+            }
+            let head = "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: 64\r\nConnection: close\r\n\r\nabc";
+            stream.write_all(head.as_bytes()).await.unwrap();
+            stream.shutdown().await.unwrap();
+        })
+    };
+    let result = execute(
+        &transfer_engine(&directory, 1024, 1024),
+        json!({
+            "schema_version": 1,
+            "operation": "download",
+            "connection": {
+                "url": url,
+                "method": "POST",
+                "retry": {"max_attempts": 2, "retry_non_idempotent": true, "backoff_base_ms": 1}
+            },
+            "input": {"file": {"path": "export.bin"}}
+        }),
+    )
+    .await;
+    server.await.unwrap();
+    let error = &result["errors"][0];
+    assert_eq!(error["code"], "DOWNLOAD_WRITE_FAILED", "{result}");
+    assert_eq!(error["phase"], "write");
+    assert_eq!(error["remote_effect"], "unknown");
+    assert_eq!(error["retry"]["kind"], "requires_recovery");
+    let _ = fs::remove_dir_all(directory).await;
+}

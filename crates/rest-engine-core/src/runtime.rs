@@ -288,6 +288,44 @@ fn non_string_metadata(envelope: &Value) -> Option<BTreeMap<String, String>> {
     )
 }
 
+/// `tchar` of RFC 9110 §5.6.2.
+fn is_token(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte))
+}
+
+/// `type "/" subtype *( OWS ";" OWS parameter )` of RFC 9110 §8.3.1, with a
+/// parameter value that is a token or a quoted string. `application//json`,
+/// `application/` or a stray `;` are malformed (`protocol`); a well-formed
+/// type the component does not advertise is `unsupported`.
+fn is_media_type(value: &str) -> bool {
+    let mut parts = value.split(';');
+    let essence = parts.next().unwrap_or_default();
+    let Some((kind, subtype)) = essence.split_once('/') else {
+        return false;
+    };
+    is_token(kind)
+        && is_token(subtype)
+        && parts.all(|parameter| {
+            let parameter = parameter.trim_matches([' ', '\t']);
+            parameter.split_once('=').is_some_and(|(name, value)| {
+                is_token(name)
+                    && (is_token(value)
+                        || value
+                            .strip_prefix('"')
+                            .and_then(|inner| inner.strip_suffix('"'))
+                            .is_some_and(|inner| {
+                                !inner.contains('"')
+                                    && inner
+                                        .bytes()
+                                        .all(|byte| byte == b'\t' || (0x20..0x7f).contains(&byte))
+                            }))
+            })
+        })
+}
+
 fn is_canonical_uuid(value: &str) -> bool {
     Uuid::parse_str(value).is_ok_and(|parsed| parsed.hyphenated().to_string() == value)
 }
@@ -356,11 +394,7 @@ fn validate_grammar(message: &RuntimeMessage) -> Result<(), ErrorPayload> {
     if message.kind != RuntimeMessageKind::Request {
         return protocol("runtime invocation requires a request envelope");
     }
-    let content_type_well_formed = message
-        .content_type
-        .split_once('/')
-        .is_some_and(|(kind, subtype)| !kind.is_empty() && !subtype.is_empty());
-    if !content_type_well_formed {
+    if !is_media_type(&message.content_type) {
         return protocol("runtime request content type is malformed");
     }
     if !message.payload.is_object() {
