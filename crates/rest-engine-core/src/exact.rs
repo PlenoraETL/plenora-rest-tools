@@ -79,9 +79,11 @@ pub(crate) fn rate_interval(rate: f64) -> Option<Duration> {
 /// above one, so the error is below `2^-12` ms. It is exactly the ideal as
 /// long as no truncation happens (an integer factor, or `factor = p / 2^k`
 /// for the first `128 / k` steps) and whenever the cap is reached. The
-/// sequence never stalls: a delay of at least 1 ms grows by at least
-/// `2^-52` ms per step, far above the truncation. A base of zero is zero
-/// forever.
+/// sequence never decreases, and with a positive base and a factor strictly
+/// above one it never stalls: `D_n` of at least 1 ms grows by at least
+/// `2^-52` ms per step, far above the truncation, so it reaches the cap
+/// (`floor(D_n)` can still repeat between consecutive steps). With factor
+/// one it is constant; a base of zero is zero forever.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Backoff {
     /// Whole milliseconds of `D_n`; never above `max_ms`.

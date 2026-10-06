@@ -39,7 +39,7 @@ ciascuna con il motivo.
 | `request.max_redirects` | 5 (redirect spenti per default) | `INVALID_RESPONSE`, nessun redirect seguito oltre il limite |
 | `retry.max_attempts` | 1 | si restituisce l'ultimo esito; i tentativi non superano mai il limite; 0 è `INVALID_INPUT` |
 | `retry.max_backoff_ms` | 30 000 | un'attesa il cui valore esatto lo supera aspetta questo valore |
-| `retry.backoff_factor` | 2 | non finito o minore di 1: `INVALID_INPUT`. L'n-esimo retry aspetta `min(max_backoff_ms, floor(backoff_base_ms · backoff_factor^n))`, calcolato in aritmetica intera con 128 bit frazionari: mai più lungo, al più 1 ms più corto, uguale con fattore intero e dal tetto in poi; l'attesa cresce sempre fino al tetto; con base 0 nessun retry aspetta |
+| `retry.backoff_factor` | 2 | non finito o minore di 1: `INVALID_INPUT`. L'n-esimo retry aspetta `min(max_backoff_ms, floor(backoff_base_ms · backoff_factor^n))`, calcolato in aritmetica intera con 128 bit frazionari: mai più lungo, al più 1 ms più corto, uguale con fattore intero e dal tetto in poi; l'attesa non diminuisce mai; con base positiva e fattore strettamente maggiore di 1 cresce fino a raggiungere il tetto, ma il floor può dare attese consecutive uguali (base 1 e fattore 1,5: 1, 1, 2, 3, ...); con fattore 1 resta costante; con base 0 nessun retry aspetta |
 | `request.timeout_ms` | timeout dell'Engine | 0 è `INVALID_INPUT`; lo stesso per `connect_timeout_ms` e `request_timeout_ms` a 0 nell'Engine, a ogni esecuzione |
 | `retry.max_retry_after_ms` | 300 000 | un `Retry-After` più lungo, anche oltre il rappresentabile, **non** viene accorciato: niente nuovo tentativo, l'operazione fallisce con lo status HTTP ricevuto |
 | `pagination.page_size` | 100 | 0 è `INVALID_INPUT` |

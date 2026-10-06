@@ -247,8 +247,10 @@ proposed_rejection_probes_hold_on_the_rest_request_vector).
   e al più 1 ms più corta; coincide con un fattore intero, con un fattore
   `p / 2^k` per i primi `128 / k` retry e dal tetto in poi. Base 0 non
   aspetta mai, un valore esatto oltre il tetto aspetta il tetto, e l'attesa
-  non smette di crescere prima del tetto (base 1 e fattore 1,5 arrivano a
-  30 000 ms). Lo stesso calcolo vale per `polling.interval_backoff`. Un test
+  non diminuisce mai: con base positiva e fattore strettamente maggiore di 1
+  cresce fino al tetto, anche se il floor può dare attese consecutive uguali
+  (base 1 e fattore 1,5: 1, 1, 2, 3, ... fino a 30 000 ms); con fattore 1
+  resta costante. Lo stesso calcolo vale per `polling.interval_backoff`. Un test
   di proprietà lo confronta con `floor(base · factor^n)` calcolato in
   razionali esatti, compreso il fattore `1 + EPSILON`.
 
