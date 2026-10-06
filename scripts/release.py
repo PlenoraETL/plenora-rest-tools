@@ -401,6 +401,52 @@ def check_manifest(directory: Path) -> None:
     print("adoption manifest digests match the release artifacts")
 
 
+CHANGELOG_HEADING = re.compile(r"^## (\S+)(?: (.*))?$")
+RELEASE_DATE = re.compile(r"\(([0-9]{4})-([0-9]{2})-([0-9]{2})\)")
+
+
+def release_notes(expected: str, output: Path) -> None:
+    """Writes the CHANGELOG section of `expected` as the release notes.
+
+    The section starts at its `## <version> (<YYYY-MM-DD>)` heading and ends
+    before the next `## ` heading. It must exist exactly once, carry a real
+    date (a section still marked as unreleased refuses the release) and have
+    a body: a release whose notes would be empty or would describe another
+    version is refused rather than published with generated PR titles.
+    """
+    version = normalized_version(expected)
+    lines = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8").splitlines()
+    starts = [
+        index
+        for index, line in enumerate(lines)
+        if (match := CHANGELOG_HEADING.match(line)) is not None and match.group(1) == version
+    ]
+    if len(starts) != 1:
+        fail(f"CHANGELOG.md must contain exactly one '## {version}' section, found {len(starts)}")
+    start = starts[0]
+    heading = CHANGELOG_HEADING.match(lines[start])
+    qualifier = heading.group(2) if heading is not None else None
+    date = RELEASE_DATE.fullmatch(qualifier or "")
+    if date is None:
+        fail(
+            f"CHANGELOG.md section {version} must be headed '## {version} (YYYY-MM-DD)' "
+            "with the release date before it is tagged"
+        )
+    try:
+        datetime(int(date.group(1)), int(date.group(2)), int(date.group(3)), tzinfo=timezone.utc)
+    except ValueError:
+        fail(f"CHANGELOG.md section {version} has an invalid release date")
+    end = next(
+        (index for index in range(start + 1, len(lines)) if lines[index].startswith("## ")),
+        len(lines),
+    )
+    body = "\n".join(lines[start + 1 : end]).strip()
+    if not body:
+        fail(f"CHANGELOG.md section {version} is empty")
+    output.write_text(body + "\n", encoding="utf-8", newline="\n")
+    print(f"release notes for {version}: {len(body.splitlines())} lines", file=sys.stderr)
+
+
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
     commands = result.add_subparsers(dest="command", required=True)
@@ -426,6 +472,10 @@ def parser() -> argparse.ArgumentParser:
 
     manifest = commands.add_parser("check-manifest")
     manifest.add_argument("directory", type=Path)
+
+    notes = commands.add_parser("release-notes")
+    notes.add_argument("version", help="version or v-prefixed release tag")
+    notes.add_argument("output", type=Path)
     return result
 
 
@@ -446,6 +496,8 @@ def main() -> None:
         normalize_sbom(args.path, args.version)
     elif args.command == "check-manifest":
         check_manifest(args.directory)
+    elif args.command == "release-notes":
+        release_notes(args.version, args.output)
 
 
 if __name__ == "__main__":

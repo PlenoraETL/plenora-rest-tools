@@ -317,6 +317,10 @@ La stessa versione deve essere presente in:
 4. tutti gli artifact di adoption-manifest.json;
 5. release-metadata.json.
 
+Cargo.lock e fuzz/Cargo.lock riportano la versione dei crate del workspace:
+si aggiornano con `cargo metadata` (senza --locked) nella radice e con
+`--manifest-path fuzz/Cargo.toml`, altrimenti i gate con --locked falliscono.
+
 release-metadata.json deve anche contenere un SOURCE_DATE_EPOCH positivo. Dopo
 l'aggiornamento della versione:
 
@@ -337,9 +341,14 @@ git tag -a vX.Y.Z -m "plenora-rest-tools X.Y.Z"
 git push origin vX.Y.Z
 ~~~
 
+Prima del tag la sezione del CHANGELOG della versione va intestata con la
+data, `## X.Y.Z (AAAA-MM-GG)`: è il testo della release.
+
 Il workflow Release controlla che tag e cinque fonti di versione coincidano,
-riesegue il gate, ricostruisce gli artefatti, genera attestazioni di provenance
-e SBOM e pubblica una GitHub Release.
+estrae la sezione datata del CHANGELOG come note di rilascio (fallisce se
+manca, se non ha data o se è vuota), riesegue il gate, ricostruisce gli
+artefatti, genera attestazioni di provenance e SBOM e pubblica una GitHub
+Release.
 
 Il workflow non pubblica automaticamente su crates.io o PyPI.
 

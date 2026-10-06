@@ -982,8 +982,11 @@ pub struct RetryPolicy {
     /// than `min(max_backoff_ms, floor(base · factor^n))` and at most 1 ms
     /// shorter; it is equal to it with an integer factor, with a factor
     /// `p / 2^k` for the first `128 / k` retries, and once the cap is
-    /// reached. The delay never stops growing before the cap (with base 1
-    /// and factor 1.5 it reaches 30 000 ms at the 27th retry). A value below 1
+    /// reached. The delay never decreases. With a positive base and a factor
+    /// strictly above 1 it keeps growing until it reaches the cap, although
+    /// the floor can give equal consecutive delays (base 1 and factor 1.5
+    /// give 1, 1, 2, 3, ... and 30 000 ms at the 27th retry); with factor 1
+    /// it stays constant, and with base 0 it is always zero. A value below 1
     /// or not finite fails with `INVALID_INPUT`. Default 2.0.
     pub backoff_factor: f64,
     /// Ceiling of the backoff delay, in milliseconds: a delay whose exact
