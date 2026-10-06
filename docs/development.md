@@ -29,12 +29,15 @@ ambiente di sviluppo, ma non è una piattaforma distribuita o supportata.
 .github/workflows             verifica PR/main e pubblicazione dei tag
 crates/rest-engine-core       motore Rust e runtime binding
 crates/rest-engine-python     estensione PyO3
+crates/rest-campaign          campagna operativa (smoke, load, soak), non pubblicata
+campaign                      profili, soglie e report della campagna
 python/plenora_rest           SDK Python pubblico
 python/tests                  test black-box della wheel installata
 contracts/schemas             schemi JSON component-owned
 contracts/bindings            mapping degli entrypoint Rust
 contracts/compatibility-v1.json baseline immutabile v1
 examples                      esempi provider-neutral
+fuzz                          target cargo-fuzz e corpus iniziale (workspace separato)
 scripts                       verifica, contratti e release
 ~~~
 
@@ -46,7 +49,7 @@ Durante lo sviluppo è possibile eseguire controlli mirati:
 cargo check --workspace --all-targets --locked
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo clippy --workspace --lib --locked -- -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic -D clippy::indexing_slicing -D clippy::unreachable -D clippy::todo -D clippy::unimplemented
+cargo clippy --workspace --exclude plenora-rest-campaign --lib --locked -- -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic -D clippy::indexing_slicing -D clippy::unreachable -D clippy::todo -D clippy::unimplemented
 cargo test --workspace --locked
 cargo +1.85.1 check --workspace --all-targets --locked
 ~~~
@@ -61,6 +64,39 @@ unwrap, expect, panic, unreachable, todo, unimplemented e niente
 indicizzazioni o slicing che possano uscire dai limiti. Un invariante
 interno violato diventa un errore tipizzato (RUNTIME_ERROR), mai un panic
 dentro l'host. I test ne sono esenti.
+
+## Fuzz e test di proprietà
+
+I parser dell'input remoto non fidato (corpo della risposta JSON, NDJSON,
+CSV, XML, testo e binario; percorsi JSON; header Link, Retry-After,
+Content-Range, ETag, Cache-Control, Set-Cookie) e dell'input di richiesta
+(ExecutionRequest, RuntimeMessage) hanno due livelli di prova.
+
+I test di proprietà stanno nel crate core
+(`crates/rest-engine-core/src/property_tests.rs`) e girano con
+`cargo test --workspace`, quindi in ogni gate. Ogni proprietà ha un oracolo
+scritto nel test: un interprete di riferimento per i percorsi JSON, scrittori
+CSV, NDJSON e XML che conoscono già il valore atteso, la grammatica di RFC 8288
+e RFC 9110 per gli header, la regola documentata dei riferimenti runtime.
+L'input rifiutato porta un canarino che nessun errore deve riportare. Il seme
+e il numero di casi sono fissati nel codice e la prova non scrive file: la
+suite è deterministica e dura meno di un secondo. Un controesempio trovato
+diventa un test unitario accanto al parser che corregge.
+
+I target di fuzz stanno in `fuzz/`, crate `cargo-fuzz` con workspace e
+Cargo.lock propri, fuori dalla MSRV: target, proprietà, formato degli input,
+cosa non è raggiungibile e comandi sono in [fuzz/README.md](../fuzz/README.md).
+Raggiungono i parser privati con la feature `fuzzing` del crate core, che
+abilita un modulo `doc(hidden)` non pubblico e fuori dal contratto v1. I due
+target che eseguono il motore riscrivono ogni URL in un loopback letterale
+che la configurazione di default rifiuta: nessuna connessione, nessun DNS.
+
+Il workflow Fuzz controlla formattazione e compilazione dei target e
+l'allineamento del corpus iniziale su ogni pull request e push a main; la
+campagna gira ogni lunedì e a mano per 600 secondi a target, sulle pull
+request che toccano `fuzz/` per 60 secondi. Un crash o un timeout rendono rosso
+il job e i reperti restano come artefatto. libFuzzer non gira su Windows MSVC:
+in locale le campagne si lanciano su Linux.
 
 ## Gate completo
 
@@ -95,6 +131,26 @@ rustdoc con il compilatore di rust-toolchain.toml, costruisce la wheel abi3 win_
 prova installata su CPython 3.10-3.14 con scripts/test_wheel.ps1, che esegue
 python/tests da fuori del checkout.
 
+## Campagna operativa
+
+La campagna operativa è separata dal gate: dura da minuti a ore e il suo esito
+dipende dalla macchina. cargo test esegue soltanto i test dell'harness (una
+campagna in-process di pochi secondi e il verificatore su report con
+violazioni). Le fasi si lanciano con:
+
+~~~bash
+scripts/campaign.sh smoke|load|soak [--quick] [--duration-min N] [--seed N]
+~~~
+
+Lo script compila il binario in release con la toolchain dei gate
+(CAMPAIGN_RUST_TOOLCHAIN, default 1.98.1) e scrive
+campaign-out/<data>-<fase>.json e .md. RSS, descriptor e thread si misurano
+solo su Linux; load e soak su altre piattaforme falliscono per misure mancanti
+invece di passare. I report delle esecuzioni reali da conservare vanno in
+campaign/reports. Il workflow Campaign esegue le stesse fasi su runner GitHub.
+Profili, soglie, criteri e lavoro residuo sono descritti nella
+[roadmap](roadmap.md#campagna-come-codice).
+
 ## Versioni delle dipendenze
 
 Le dipendenze dirette in Cargo.toml sono fissate alla versione esatta
@@ -123,9 +179,12 @@ senza un innalzamento esplicito della MSRV.
 ## Audit delle dipendenze
 
 Il workflow Audit esegue cargo-deny secondo la policy in deny.toml (advisory,
-licenze, sorgenti, wildcard) e pip-audit sulla toolchain Python fissata dai
-gate. Gira su pull request, push a main, una volta al giorno e su avvio
-manuale.
+licenze, sorgenti, wildcard), sul Cargo.lock del workspace e su quello di
+`fuzz/`, e pip-audit sulla toolchain Python fissata dai gate. Gira su pull
+request, push a main, una volta al giorno e su avvio manuale. L'unica
+eccezione di licenza è NCSA per libfuzzer-sys, che esiste solo nel lock di
+`fuzz/`; sul workspace cargo-deny la segnala come eccezione non usata, un
+avviso e non un errore.
 
 Ogni advisory accettata in deny.toml lo è soltanto perché nessuna versione
 corretta della dipendenza compila sulla MSRV pubblicata. Il workflow esegue

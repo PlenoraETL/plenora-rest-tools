@@ -1,0 +1,28 @@
+{
+  "$schema": "../../schemas/runtime-probe-v1.schema.json",
+  "schema_version": 1,
+  "contract": "plenora-runtime-probe-v1",
+  "rule": "RT-017",
+  "base": "database-read-request.json",
+  "mutation": {
+    "set": {
+      "plenora.trace.correlation_id": "018F3D84-7B2C-7F00-8000-000000000001"
+    }
+  },
+  "expected": {
+    "content_type": "application/vnd.plenora.error+json",
+    "error": {
+      "category": "protocol",
+      "phase": "validate",
+      "remote_effect": "none",
+      "retry": {
+        "kind": "never"
+      }
+    },
+    "metadata": {
+      "plenora.capability.operation": "database.read",
+      "plenora.operation.version": "1",
+      "plenora.output.contract": "plenora-error-v1"
+    }
+  }
+}

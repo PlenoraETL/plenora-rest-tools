@@ -1,0 +1,82 @@
+[package]
+name = "plenora-rest-fuzz"
+version = "0.0.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+# Workspace e lock separati: nightly e libFuzzer restano fuori dal workspace
+# stabile, dalla sua MSRV 1.85.1 e dal suo Cargo.lock. La CI li controlla a
+# parte (.github/workflows/fuzz.yml: fmt e check di questo manifest) e
+# l'Audit passa cargo-deny anche su questo lock.
+[workspace]
+
+# Versioni esatte, identiche a [workspace.dependencies] del manifest
+# principale. `libfuzzer-sys` è l'unica dipendenza che esiste solo qui: è il
+# driver di cargo-fuzz (motore libFuzzer di LLVM), lo stesso pin di
+# plenora-database-tools e plenora-data-tools.
+[dependencies]
+libfuzzer-sys = "=0.4.13"
+# La feature `fuzzing` espone i parser privati attraverso un modulo
+# doc(hidden) che non è superficie pubblica (vedi README.md).
+plenora-rest-core = { path = "../crates/rest-engine-core", features = ["fuzzing"] }
+base64 = "=0.22.1"
+serde_json = "=1.0.151"
+tokio = { version = "=1.53.1", features = ["net", "rt", "time"] }
+
+# Corpi di risposta remoti: JSON, NDJSON, CSV, XML, testo e binario.
+[[bin]]
+name = "response_body"
+path = "fuzz_targets/response_body.rs"
+test = false
+doc = false
+bench = false
+
+# Percorsi JSON (cursori, link, mapping, polling) su documenti arbitrari.
+[[bin]]
+name = "json_path"
+path = "fuzz_targets/json_path.rs"
+test = false
+doc = false
+bench = false
+
+# Header Link della paginazione.
+[[bin]]
+name = "link_header"
+path = "fuzz_targets/link_header.rs"
+test = false
+doc = false
+bench = false
+
+# Gli altri header remoti letti dal motore: Retry-After, Content-Range,
+# ETag, Cache-Control, Set-Cookie (jar limitato).
+[[bin]]
+name = "remote_headers"
+path = "fuzz_targets/remote_headers.rs"
+test = false
+doc = false
+bench = false
+
+# ExecutionRequest: deserializzazione, round-trip, esecuzione fino alla
+# validazione senza rete.
+[[bin]]
+name = "execution_request"
+path = "fuzz_targets/execution_request.rs"
+test = false
+doc = false
+bench = false
+
+# RuntimeMessage attraverso RuntimeBinding::invoke_json, senza rete.
+[[bin]]
+name = "runtime_message"
+path = "fuzz_targets/runtime_message.rs"
+test = false
+doc = false
+bench = false
+
+[profile.release]
+debug = 1
+overflow-checks = true

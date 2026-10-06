@@ -8,3 +8,9 @@ __pycache__/
 *.dll
 *.dylib
 .venv/
+/fuzz/target/
+/fuzz/artifacts/
+/fuzz/coverage/
+/fuzz/corpus-lavoro/
+
+/campaign-out/

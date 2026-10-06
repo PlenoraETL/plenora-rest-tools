@@ -3,7 +3,7 @@
   "component": "plenora-rest-tools",
   "contracts_source": {
     "repository": "https://github.com/PlenoraETL/plenora-contracts.git",
-    "revision": "83ed391212b28100ffa6097a2963f746b6209b37"
+    "revision": "1e902dfaab5819c1d9ce785878d5b26dbeae48b3"
   },
   "profile": "plenora-rest-tools-profile-v1",
   "artifacts": [
@@ -36,7 +36,8 @@
       "digest": "sha256:8f4832826f596f22bbf59399341a8c35cc525d58d16555a56486753dfe20a991",
       "verification": [
         "powershell -File scripts/release.ps1",
-        "cargo test -p plenora-rest-core --test runtime_binding"
+        "cargo test -p plenora-rest-core --test runtime_binding",
+        "cargo test -p plenora-rest-core --test runtime_vectors"
       ]
     }
   ],
@@ -62,7 +63,8 @@
       "status": "conforming",
       "verification": [
         "cargo test -p plenora-rest-core --test black_box",
-        "cargo test -p plenora-rest-core --test runtime_binding"
+        "cargo test -p plenora-rest-core --test runtime_binding",
+        "cargo test -p plenora-rest-core --test runtime_vectors"
       ]
     },
     {
@@ -70,7 +72,8 @@
       "status": "conforming",
       "verification": [
         "cargo test -p plenora-rest-core --test black_box",
-        "cargo test -p plenora-rest-core --test runtime_binding"
+        "cargo test -p plenora-rest-core --test runtime_binding",
+        "cargo test -p plenora-rest-core --test runtime_vectors"
       ]
     },
     {
@@ -84,7 +87,8 @@
       "id": "plenora-runtime-binding-v1",
       "status": "conforming",
       "verification": [
-        "cargo test -p plenora-rest-core --test runtime_binding"
+        "cargo test -p plenora-rest-core --test runtime_binding",
+        "cargo test -p plenora-rest-core --test runtime_vectors"
       ]
     },
     {
@@ -97,7 +101,8 @@
       "verification": [
         "cargo test -p plenora-rest-core --test public_surface",
         "cargo test -p plenora-rest-core --test runtime_binding",
-        "installed-wheel black-box unittest suite"
+        "installed-wheel black-box unittest suite",
+        "cargo test -p plenora-rest-core --test runtime_vectors"
       ]
     },
     {

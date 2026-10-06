@@ -37,6 +37,18 @@ del contratto delle richieste, raccolte in un'unica rottura.
 - Superficie congelata aggiornata con decisione esplicita: export CookieSession
   ed entrypoint di sessione in compatibility-v1.json e bindings/rust-v1.json.
 
+### Campagna operativa
+
+- Nuovo crate crates/rest-campaign (non pubblicato, nessuna dipendenza nuova)
+  con il binario plenora-rest-campaign: fasi smoke, load con iniezione di
+  guasti e soak contro un server HTTP locale in-process, campionamento di RSS,
+  descriptor e thread (Linux), file temporanei, latenze, throughput ed errori,
+  verifica dei criteri di accettazione della roadmap con exit code non zero e
+  report JSON e Markdown. Profili in campaign/profiles.json, soglie proposte e
+  da approvare in campaign/limits.json, esecuzione con scripts/campaign.sh e
+  con il workflow Campaign. Vedi
+  [Campagna come codice](docs/roadmap.md#campagna-come-codice).
+
 ### Comportamento
 
 - Un null esplicito in value di un parametro, di una trasformazione o in
@@ -66,6 +78,99 @@ del contratto delle richieste, raccolte in un'unica rottura.
 - Una condition su una colonna assente o null non applica la trasformazione.
 - Un batch flat_array rifiuta i record che non si risolvono in esattamente un
   parametro non null.
+
+### Parser dell'input remoto (trovati da fuzz e test di proprietà)
+
+- XML: il testo conserva gli spazi attorno ai riferimenti (`Fish &amp; Chips`
+  era letto `Fish&Chips`); nel contenuto misto il testo resta quello scritto
+  tra i figli, rifilato solo ai bordi.
+- XML: contenuto fuori dalla radice (`<a/>junk`, `junk<a/>`, riferimenti o
+  CDATA dopo la radice), nomi non UTF-8, nomi fuori dalla grammatica XML (per
+  esempio `<@id>`, `<x:#text>`, `<a:>`) e attributi che collidono una volta
+  tolto il prefisso (`x:id`, `y:id`) sono INVALID_RESPONSE invece di essere
+  scartati, alterati o sovrascritti.
+- JSON e NDJSON: i numeri sono letti con arrotondamento corretto; alcuni
+  decimali erano letti con un errore di un'unità sull'ultima cifra.
+- Header Link: i quoted-pair di una relazione quotata sono risolti
+  (`rel="n\ext"` vale `next`) e conta solo il primo `rel` di un link, come
+  vuole RFC 8288.
+- Retry-After: un numero di secondi oltre il rappresentabile satura all'attesa
+  massima (poi limitata da max_retry_after_ms) invece di essere ignorato.
+- L'header Cookie inviato elenca le coppie in ordine lessicografico: prima
+  l'ordine dipendeva dalle hash map del jar e cambiava da un Engine all'altro.
+
+### Verifica
+
+- Test di proprietà dei parser dell'input remoto e dei riferimenti runtime,
+  ciascuno con un oracolo scritto nel test, deterministici (seme e casi
+  fissati). Vedi [Fuzz e test di proprietà](docs/development.md#fuzz-e-test-di-proprietà).
+- Crate di fuzz in `fuzz/` (workspace e lock propri) con sei target senza rete:
+  corpo della risposta, percorsi JSON, header Link, altri header remoti,
+  ExecutionRequest e RuntimeMessage. I target raggiungono i parser privati con
+  la feature `fuzzing` del crate core: modulo `doc(hidden)`, non pubblico e
+  fuori dal contratto v1. Workflow Fuzz: fmt e check dei target su ogni pull
+  request, campagna settimanale, manuale e sulle pull request che toccano
+  `fuzz/`.
+
+### Runtime e contratti (incompatibile)
+
+- Adottata la revisione 1e902dfa di plenora-contracts. I tre vettori
+  runtime-v1 di REST (rest-upload-request, rest-download-success,
+  rest-upload-unknown-error) sono copiati in contracts/upstream con il loro
+  SHA-256 ed eseguiti attraverso RuntimeBinding (test runtime_vectors), con le
+  mutazioni negative dell'instradamento e gli esempi negativi REST del
+  contratto.
+- Un riferimento runtime (artifact_source, artifact_sink, credential_ref) deve
+  essere un riferimento opaco `schema:` o `schema://` secondo la grammatica dei
+  contratti. Prima bastava non sembrare un path assoluto, `file:` o `..`: un
+  path relativo come `dir/report.csv` o `report.csv` arrivava a
+  RuntimeResources. Ora è INVALID_INPUT prima della risoluzione.
+- scripts/validate_contracts.py verifica i pin dei file copiati, i vettori
+  contro lo schema runtime-vector-v1 e il manifesto di adozione contro lo
+  schema v4 e le regole incrociate di ADOPTION.md.
+
+### Binding runtime allineato alla matrice comune (incompatibile)
+
+Le quattro librerie con superficie runtime rispondono ora allo stesso modo agli
+stessi casi, secondo Runtime Binding 1.0 §11-13 (RT-016..RT-023) proposti in
+plenora-contracts #21 e non ancora normativi; le sonde di quella proposta sono
+copiate in contracts/proposte ed eseguite (test
+proposed_rejection_probes_hold_on_the_rest_request_vector).
+
+- Rifiuti prima dell'invocazione: fase validate, remote_effect none, retry
+  never (P). Categoria (P, R1): `unsupported` per un valore ben formato ma non
+  annunciato (capability, versione del binding, operazione, versione
+  dell'operazione, input contract, content type), `protocol` per un valore
+  assente, malformato o non canonico; codici RUNTIME_UNSUPPORTED e
+  RUNTIME_PROTOCOL_VIOLATION. Prima tutti erano INVALID_INPUT,
+  invalid_configuration.
+- Identità non canoniche (UUID maiuscoli, tra graffe, assenti) e valori di
+  metadato non stringa (un `null` come idempotency key) sono `protocol`. Le
+  chiavi `plenora.*` che il binding non riserva sono ignorate come membri
+  facoltativi. L'ordine delle categorie è quello di RT-018: prima `protocol`
+  su tutti i valori riservati, poi `unsupported`, poi `timeout`.
+- Metadati del risultato (P, R2): `plenora.message.id` sempre nuovo;
+  `plenora.message.causation_id` è il message id della richiesta;
+  correlazione, operazione e versione dell'operazione sono copiate byte per
+  byte solo se canoniche, altrimenti omesse. Prima un id non canonico veniva
+  riflesso (anche come causazione), una correlazione assente sostituita con
+  una nuova e una versione assente scritta come "1".
+- Deadline: ogni grafia RFC 3339 di UTC (`Z` o `z`, `+00:00`, `t`
+  minuscola, frazioni); un offset diverso da zero o `-00:00` è rifiutato
+  (`protocol` sul runtime, INVALID_INPUT in ExecutionControl e
+  `options.deadline`). Prima un offset qualunque era accettato. Una deadline già scaduta è DEADLINE_EXPIRED
+  (timeout, validate, none, never) prima di risolvere credenziali o artefatti;
+  prima era TIMEOUT (read, unknown, quarantine) e arrivava dopo la
+  risoluzione. Sul runtime una deadline nel payload ora vale; nei metadati e
+  nel payload insieme è rifiutata (invalid_configuration).
+- Idempotency key vuota, oltre 255 byte o con caratteri non visibili:
+  `protocol` prima dell'invocazione.
+- Download: un errore di scrittura locale dopo l'invio della richiesta è
+  DOWNLOAD_WRITE_FAILED (io, write, unknown, requires_recovery), perché la
+  richiesta può aver avuto effetto remoto (un download può usare POST); prima
+  FILE_IO con remote_effect none. Se la pubblicazione nel sink è avvenuta e
+  fallisce solo la rimozione del file di staging: CLEANUP_AFTER_PUBLISH_FAILED
+  (io, cleanup, committed, never).
 
 ### API Rust (incompatibile)
 
@@ -110,7 +215,22 @@ del contratto delle richieste, raccolte in un'unica rottura.
   test compresi; maturin è fissato a 1.14.1 anche in build-system.requires;
   rustdoc gira con `-D warnings` nel gate.
 
+### Correzioni trovate dalla campagna operativa
+
+- `options.deadline` vale per ogni punto d'ingresso: Engine::execute_with_control
+  e il RuntimeBinding (deadline nel payload) la ignoravano.
+- Un risultato fallito riporta in metrics.requests e metrics.retries le
+  richieste e i retry davvero inviati, compresa la cancellazione remota dei
+  job; prima valevano 0 dopo errori di trasporto, timeout, deadline o
+  cancellazione.
+
 ### Dipendenze
 
 - thiserror non è più una dipendenza diretta: Display di EngineError è scritto
   a mano.
+- serde_json attiva la feature float_roundtrip (stesso pin, Cargo.lock
+  invariato).
+- proptest =1.11.0 è una dev-dependency, senza feature di default.
+- `fuzz/Cargo.lock` è un grafo separato, controllato dall'Audit con la stessa
+  policy; libfuzzer-sys =0.4.13 vi entra come unica dipendenza propria, con
+  un'eccezione di licenza NCSA limitata a quel crate in deny.toml.
