@@ -998,3 +998,195 @@ fn property_configuration_is_deterministic() {
     assert_eq!(first.rng_seed, RngSeed::Fixed(0x5EED_2026));
     assert!(first.failure_persistence.is_none());
 }
+
+// ---------------------------------------------------------------------------
+// Limiti numerici esatti: intervallo del rate e backoff.
+//
+// L'oracolo costruisce il fattore come frazione intera nota (a / 2^b oppure
+// a · 2^c, esattamente rappresentabile in f64) e calcola il riferimento in
+// razionali esatti con un intero senza limite di bit scritto qui, senza
+// passare dalla scomposizione del codice verificato.
+// ---------------------------------------------------------------------------
+
+/// Intero naturale senza limite di bit, cifre a 64 bit little-endian.
+#[derive(Clone, Debug)]
+struct Naturale(Vec<u64>);
+
+impl Naturale {
+    fn da(valore: u64) -> Self {
+        Self(vec![valore])
+    }
+
+    fn per(&mut self, fattore: u64) {
+        let mut riporto = 0_u128;
+        for cifra in &mut self.0 {
+            let prodotto = u128::from(*cifra) * u128::from(fattore) + riporto;
+            *cifra = prodotto as u64;
+            riporto = prodotto >> 64;
+        }
+        if riporto > 0 {
+            self.0.push(riporto as u64);
+        }
+    }
+
+    fn per_potenza_di_due(&mut self, esponente: usize) {
+        let zeri = std::iter::repeat_n(0, esponente / 64);
+        self.0.splice(0..0, zeri);
+        self.per(1 << (esponente % 64));
+    }
+
+    /// `min(tetto, floor(self / 2^esponente))`.
+    fn diviso_potenza_di_due_al_piu(&self, esponente: usize, tetto: u64) -> u64 {
+        let cifre = esponente / 64;
+        let resto = esponente % 64;
+        let mut quoziente: Vec<u64> = self.0.iter().skip(cifre).copied().collect();
+        if resto > 0 {
+            for indice in 0..quoziente.len() {
+                let alta = quoziente.get(indice + 1).copied().unwrap_or(0);
+                quoziente[indice] = (quoziente[indice] >> resto) | (alta << (64 - resto));
+            }
+        }
+        if quoziente.iter().skip(1).any(|cifra| *cifra != 0) {
+            return tetto;
+        }
+        quoziente.first().copied().unwrap_or(0).min(tetto)
+    }
+}
+
+/// Un fattore positivo con la sua frazione esatta: `a / 2^b` o `a · 2^c`.
+#[derive(Clone, Debug)]
+enum Fattore {
+    Frazione { a: u64, b: u32 },
+    Multiplo { a: u64, c: u32 },
+}
+
+impl Fattore {
+    fn valore(&self) -> f64 {
+        assert!(self.numeratore() < 1 << 53, "{self:?} non è esatto in f64");
+        #[allow(clippy::cast_precision_loss)]
+        match *self {
+            Self::Frazione { a, b } => a as f64 / 2_f64.powi(i32::try_from(b).unwrap()),
+            Self::Multiplo { a, c } => a as f64 * 2_f64.powi(i32::try_from(c).unwrap()),
+        }
+    }
+
+    fn numeratore(&self) -> u64 {
+        match *self {
+            Self::Frazione { a, .. } | Self::Multiplo { a, .. } => a,
+        }
+    }
+
+    /// `min(tetto, floor(base · fattore^n))` in razionali esatti.
+    fn potenza(&self, base: u64, n: usize, tetto: u64) -> u64 {
+        let mut valore = Naturale::da(base);
+        for passo in 1..=n {
+            valore.per(self.numeratore());
+            if let Self::Multiplo { c, .. } = *self {
+                valore.per_potenza_di_due(c as usize);
+            }
+            // Il fattore è almeno 1: raggiunto il tetto, la successione ci
+            // resta.
+            if valore.diviso_potenza_di_due_al_piu(self.denominatore_bit() * passo, tetto) == tetto
+            {
+                return tetto;
+            }
+        }
+        valore.diviso_potenza_di_due_al_piu(self.denominatore_bit() * n, tetto)
+    }
+
+    fn denominatore_bit(&self) -> usize {
+        match *self {
+            Self::Frazione { b, .. } => b as usize,
+            Self::Multiplo { .. } => 0,
+        }
+    }
+}
+
+/// Fattori di backoff (almeno 1), compresi il più piccolo sopra 1
+/// (`1 + EPSILON`), denominatori piccoli (3/2, 5/4, ...) e fattori enormi.
+fn fattore() -> impl Strategy<Value = Fattore> {
+    prop_oneof![
+        Just(Fattore::Frazione {
+            a: (1 << 52) + 1,
+            b: 52
+        }),
+        (1_u32..=4).prop_flat_map(
+            |b| ((1_u64 << b)..=(4 << b)).prop_map(move |a| { Fattore::Frazione { a, b } })
+        ),
+        (0_u32..=30, 0_u64..=1_000_000).prop_map(|(b, extra)| Fattore::Frazione {
+            a: (1_u64 << b) + extra,
+            b
+        }),
+        (1_u64..=(1 << 20), 0_u32..=1000).prop_map(|(a, c)| Fattore::Multiplo { a, c }),
+    ]
+}
+
+/// Rate positivi: quelli dei fattori, rate sotto 1 al secondo fino oltre il
+/// limite dichiarato (`u64::MAX` ns), e rate intorno a 10^9 al secondo.
+fn rate() -> impl Strategy<Value = Fattore> {
+    prop_oneof![
+        fattore(),
+        (1_u64..=(1 << 20), 0_u32..=90).prop_map(|(a, b)| Fattore::Frazione { a, b }),
+        ((1_u64 << 52)..(1 << 53), 85_u32..=88).prop_map(|(a, b)| Fattore::Frazione { a, b }),
+        (999_999_000_u64..=1_000_001_000).prop_map(|a| Fattore::Multiplo { a, c: 0 }),
+    ]
+}
+
+proptest! {
+    #![proptest_config(config(1024))]
+
+    #[test]
+    fn backoff_is_the_exact_power_within_one_millisecond_below(
+        base in prop_oneof![Just(0_u64), Just(1_u64), 1_u64..=10_000, any::<u64>()],
+        fattore in fattore(),
+        max in prop_oneof![Just(30_000_u64), 0_u64..=1_000_000, any::<u64>()],
+        passi in 1_usize..=48,
+    ) {
+        let mut backoff = crate::exact::Backoff::new(base, fattore.valore(), max).unwrap();
+        for n in 0..passi {
+            let ideale = fattore.potenza(base, n, max);
+            let ottenuto = backoff.next_ms();
+            // Mai più lungo dell'ideale, al più 1 ms più corto.
+            prop_assert!(ottenuto <= ideale, "n {}: {} > {}", n, ottenuto, ideale);
+            prop_assert!(ideale - ottenuto <= 1, "n {}: {} << {}", n, ottenuto, ideale);
+            // Esatto quando il tetto è raggiunto e finché nessun bit
+            // frazionario oltre i 128 è stato troncato.
+            if ideale == max || fattore.denominatore_bit() * n <= 128 {
+                prop_assert_eq!(ottenuto, ideale, "n {}", n);
+            }
+        }
+    }
+
+    #[test]
+    fn rate_interval_follows_the_declared_domain(fattore in rate()) {
+        let rate = fattore.valore();
+        // intervallo = 10^9 / rate = numeratore / denominatore nanosecondi.
+        let (numeratore, denominatore) = match fattore {
+            Fattore::Frazione { a, b } => (Some(1_000_000_000_u128 << b), Some(u128::from(a))),
+            Fattore::Multiplo { a, c } => (
+                Some(1_000_000_000_u128),
+                1_u128
+                    .checked_shl(c)
+                    .and_then(|potenza| potenza.checked_mul(u128::from(a))),
+            ),
+        };
+        let numeratore = numeratore.unwrap();
+        // Dominio dichiarato: almeno 1 ns, e per eccesso al più u64::MAX ns.
+        // Un denominatore oltre u128 è un intervallo sotto 1 ns.
+        let atteso = denominatore
+            .filter(|denominatore| numeratore >= *denominatore)
+            .filter(|denominatore| numeratore <= u128::from(u64::MAX) * denominatore)
+            .map(|denominatore| {
+                Duration::from_nanos(u64::try_from(numeratore.div_ceil(denominatore)).unwrap())
+            });
+        prop_assert_eq!(crate::exact::rate_interval(rate), atteso, "{:?}", fattore);
+    }
+}
+
+#[test]
+fn the_rate_oracle_rejects_the_documented_cases() {
+    // 2^-35 al secondo: 10^9 · 2^35 ns, oltre u64::MAX ns (circa 584 anni)
+    // anche se una Duration lo conterrebbe.
+    assert_eq!(crate::exact::rate_interval(2_f64.powi(-35)), None);
+    assert!(crate::exact::rate_interval(2_f64.powi(-34)).is_some());
+}

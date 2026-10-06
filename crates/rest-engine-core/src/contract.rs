@@ -62,13 +62,18 @@ pub struct EngineConfig {
     pub pool_idle_timeout_ms: u64,
     /// HTTP requests in flight at once across the whole engine; further
     /// requests wait for a slot. Every execution fails with `INVALID_INPUT`
-    /// when it is zero. Default 64.
+    /// when it is zero or above `tokio::sync::Semaphore::MAX_PERMITS`
+    /// (`usize::MAX >> 3`); `Engine::new` itself never fails or panics.
+    /// Default 64.
     pub max_concurrent_requests: usize,
     /// Engine-wide request rate, in requests per second, applied when a
     /// connection does not set its own `requests_per_second`. One limiter is
     /// shared by every request of the engine; waiting time is reported in
-    /// `metrics.rate_limit_wait_ms`. `None` (the default) means no limit;
-    /// `Some(0)` makes every execution fail with `INVALID_INPUT`.
+    /// `metrics.rate_limit_wait_ms`. `None` (the default) means no limit.
+    /// The interval between requests is `10^9 / rate` nanoseconds, rounded up
+    /// to a whole nanosecond; a rate of zero or above 10^9, whose interval is
+    /// not at least one nanosecond, makes every execution fail with
+    /// `INVALID_INPUT`.
     pub requests_per_second: Option<u32>,
     /// Allows connections to private, loopback, link-local, and other
     /// non-public addresses. When false (the default), every resolved address
@@ -272,9 +277,14 @@ pub struct ConnectionConfig {
     pub success_statuses: Vec<u16>,
     /// Request rate for this connection, in requests per second, replacing
     /// `EngineConfig::requests_per_second`. The engine has a single limiter,
-    /// so the rate paces this request against every other one. A value that
-    /// is not finite and greater than zero fails with `INVALID_INPUT` before
-    /// any request.
+    /// so the rate paces this request against every other one. The interval
+    /// between requests is `10^9 / rate` nanoseconds, computed exactly and
+    /// rounded up to a whole nanosecond (never faster than the rate). A value
+    /// that is not finite and greater than zero, or whose interval is shorter
+    /// than one nanosecond (above 10^9) or, rounded up, longer than
+    /// `u64::MAX` nanoseconds (about 584 years: a rate below about
+    /// 5.4 · 10^-11, such as 2^-35), fails with `INVALID_INPUT` before any
+    /// request; it is never clamped.
     /// Default `None`.
     pub requests_per_second: Option<f64>,
     /// TLS verification, trusted roots, and client identity.
@@ -960,13 +970,24 @@ pub struct RetryPolicy {
     /// `INVALID_INPUT`.
     /// Default 1, so nothing is retried.
     pub max_attempts: u32,
-    /// Delay before the first retry, in milliseconds. Default 500.
+    /// Delay before the first retry, in milliseconds (at most
+    /// `max_backoff_ms`). Zero means no retry ever waits, whatever the
+    /// factor. Default 500.
     pub backoff_base_ms: u64,
-    /// Multiplier applied to the delay after each retry; a value below 1 or
-    /// not finite fails with `INVALID_INPUT`. Default 2.0.
+    /// Multiplier of the backoff. The n-th retry (from 0) waits
+    /// `min(max_backoff_ms, floor(D_n))` milliseconds, where
+    /// `D_0 = backoff_base_ms` and `D_{n+1} = D_n · backoff_factor`, computed
+    /// in integer arithmetic on the exact value of the factor and truncated to
+    /// a multiple of `2^-128` ms at each step. The result is never longer
+    /// than `min(max_backoff_ms, floor(base · factor^n))` and at most 1 ms
+    /// shorter; it is equal to it with an integer factor, with a factor
+    /// `p / 2^k` for the first `128 / k` retries, and once the cap is
+    /// reached. The delay never stops growing before the cap (with base 1
+    /// and factor 1.5 it reaches 30 000 ms at the 27th retry). A value below 1
+    /// or not finite fails with `INVALID_INPUT`. Default 2.0.
     pub backoff_factor: f64,
-    /// Ceiling of the computed backoff delay, in milliseconds.
-    /// Default 30 000.
+    /// Ceiling of the backoff delay, in milliseconds: a delay whose exact
+    /// value exceeds it waits this long. Default 30 000.
     pub max_backoff_ms: u64,
     /// HTTP statuses that trigger a retry. Default 429, 500, 502, 503, 504.
     pub retry_on_status: Vec<u16>,
@@ -1263,8 +1284,11 @@ pub struct PollingConfig {
     pub failure_values: Vec<String>,
     /// Wait before each status request, in milliseconds. Default 1 000.
     pub interval_ms: u64,
-    /// Multiplier applied to the wait after each status request; must be
-    /// finite and at least 1, otherwise `INVALID_INPUT`. Default 1.0.
+    /// Multiplier applied to the wait after each status request, with the
+    /// same exact definition as `RetryPolicy::backoff_factor`: the n-th wait
+    /// is `interval_ms · interval_backoff^n` within 1 ms below, capped at
+    /// `max_interval_ms` from the second wait on. Must be finite and at least
+    /// 1, otherwise `INVALID_INPUT`. Default 1.0.
     pub interval_backoff: f64,
     /// Ceiling of the wait between status requests, in milliseconds.
     /// Default 30 000.

@@ -12,6 +12,7 @@ mod contract;
 mod control;
 mod engine;
 mod error;
+mod exact;
 // Surface for the detached fuzz crate only: behind a non-default feature,
 // hidden from the documentation, and outside the frozen v1 contract (its
 // items are not re-exported, so contracts/compatibility-v1.json does not see

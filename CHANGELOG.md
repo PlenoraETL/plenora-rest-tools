@@ -217,6 +217,34 @@ proposed_rejection_probes_hold_on_the_rest_request_vector).
   `requests_per_second` a zero (attesa di secoli) fanno fallire ogni
   esecuzione con INVALID_INPUT: `Engine::new` non può fallire.
 
+### Limiti numerici esatti (incompatibile)
+
+- `max_concurrent_requests` sopra `Semaphore::MAX_PERMITS` di tokio
+  (`usize::MAX >> 3`) mandava in panic `Engine::new`. Ora `Engine::new` resta
+  infallibile e ogni esecuzione lo rifiuta con INVALID_INPUT, come lo zero.
+- L'intervallo del rate limiter era `(10^9 / rate)` in virgola mobile
+  limitato e convertito: un rate sopra 10^9 dava intervallo zero, un rate
+  subnormale circa 584 anni. Ora è `10^9 / rate` ns in aritmetica intera
+  esatta, arrotondato per eccesso al nanosecondo; un rate il cui intervallo
+  non sta fra 1 ns e `u64::MAX` ns (circa 584 anni) è INVALID_INPUT prima
+  della rete, per la connessione e per l'Engine (sopra 10^9). Il limite è
+  quello dei nanosecondi in `u64`, non della `Duration` più lunga: 2^-35
+  richieste al secondo è rifiutato.
+- Il backoff del retry era `base · factor^(n-1)` in virgola mobile: con base
+  0 e fattore enorme il prodotto diventava NaN e l'attesa `max_backoff_ms`.
+  Ora l'n-esimo retry aspetta `min(max_backoff_ms, floor(D_n))` con
+  `D_0 = backoff_base_ms` e `D_{n+1} = D_n · backoff_factor`, in aritmetica
+  intera sul valore esatto del fattore e in virgola fissa a 128 bit
+  frazionari (troncati a ogni passo). Rispetto a
+  `min(max_backoff_ms, floor(base · factor^n))` l'attesa non è mai più lunga
+  e al più 1 ms più corta; coincide con un fattore intero, con un fattore
+  `p / 2^k` per i primi `128 / k` retry e dal tetto in poi. Base 0 non
+  aspetta mai, un valore esatto oltre il tetto aspetta il tetto, e l'attesa
+  non smette di crescere prima del tetto (base 1 e fattore 1,5 arrivano a
+  30 000 ms). Lo stesso calcolo vale per `polling.interval_backoff`. Un test
+  di proprietà lo confronta con `floor(base · factor^n)` calcolato in
+  razionali esatti, compreso il fattore `1 + EPSILON`.
+
 ### Licenza
 
 - La licenza è proprietaria (LICENSE, come le altre librerie Plenora) e

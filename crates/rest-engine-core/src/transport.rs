@@ -535,7 +535,16 @@ impl Transport {
     pub fn new(config: EngineConfig) -> Self {
         let config_sessions = config.max_cookie_sessions;
         Self {
-            concurrency: Arc::new(Semaphore::new(config.max_concurrent_requests.max(1))),
+            // tokio admits at most Semaphore::MAX_PERMITS permits and panics
+            // beyond. Engine::new cannot fail, so the value is kept in range
+            // here and refused by every execution instead
+            // (validate_engine_configuration): a semaphore built from an
+            // out-of-range value never admits a request.
+            concurrency: Arc::new(Semaphore::new(
+                config
+                    .max_concurrent_requests
+                    .clamp(1, Semaphore::MAX_PERMITS),
+            )),
             config,
             clients: Arc::new(Mutex::new(HashMap::new())),
             tokens: Arc::new(Mutex::new(HashMap::new())),
@@ -1192,6 +1201,7 @@ impl Transport {
         let can_retry = request.method.is_idempotent() || request.retry.retry_non_idempotent;
         let mut network_requests = 0_u64;
         let mut rate_limit_wait_ms = 0_u64;
+        let mut backoff = backoff_for(&request.retry)?;
 
         for attempt in 1..=max_attempts {
             match self.send_once(request, attempt > 1).await {
@@ -1204,7 +1214,7 @@ impl Transport {
                         && retry_status
                         && attempt < max_attempts
                         && let Some(delay) =
-                            retry_wait(&request.retry, attempt, response.retry_after_ms)
+                            retry_wait(&request.retry, &mut backoff, response.retry_after_ms)
                     {
                         sleep(delay).await;
                         continue;
@@ -1219,7 +1229,7 @@ impl Transport {
                         && attempt < max_attempts
                         && is_retryable_transport_error(&error) =>
                 {
-                    sleep(retry_delay(&request.retry, attempt, None)).await;
+                    sleep(retry_delay(&request.retry, &mut backoff, None)).await;
                 }
                 Err(error) => return Err(error),
             }
@@ -1289,6 +1299,7 @@ impl Transport {
         let can_retry = request.method.is_idempotent() || request.retry.retry_non_idempotent;
         let mut network_requests = 0_u64;
         let mut rate_limit_wait_ms = 0_u64;
+        let mut backoff = backoff_for(&request.retry)?;
 
         for attempt in 1..=max_attempts {
             let mut attempt_request = request.clone();
@@ -1313,7 +1324,7 @@ impl Transport {
                         && attempt < max_attempts
                         && is_retryable_transport_error(&error) =>
                 {
-                    sleep(retry_delay(&request.retry, attempt, None)).await;
+                    sleep(retry_delay(&request.retry, &mut backoff, None)).await;
                     continue;
                 }
                 Err(error) => return Err(error),
@@ -1325,7 +1336,7 @@ impl Transport {
             if can_retry
                 && request.retry.retry_on_status.contains(&status)
                 && attempt < max_attempts
-                && let Some(delay) = retry_wait(&request.retry, attempt, retry_after_ms)
+                && let Some(delay) = retry_wait(&request.retry, &mut backoff, retry_after_ms)
             {
                 sleep(delay).await;
                 continue;
@@ -1352,7 +1363,7 @@ impl Transport {
                     {
                         reset_download_state(state).await?;
                     }
-                    sleep(retry_delay(&request.retry, attempt, None)).await;
+                    sleep(retry_delay(&request.retry, &mut backoff, None)).await;
                 }
                 Err(error) => return Err(error),
             }
@@ -1831,13 +1842,13 @@ impl Transport {
         &self,
         connection_rate: Option<f64>,
     ) -> Result<(OwnedSemaphorePermit, u64), EngineError> {
-        let rate = connection_rate
-            .filter(|rate| rate.is_finite() && *rate > 0.0)
-            .or_else(|| self.config.requests_per_second.map(f64::from));
+        let rate = connection_rate.or_else(|| self.config.requests_per_second.map(f64::from));
         let wait = if let Some(requests_per_second) = rate {
-            let interval = Duration::from_nanos(
-                (1_000_000_000_f64 / requests_per_second).clamp(0.0, u64::MAX as f64) as u64,
-            );
+            // Both rates are validated before any request; an interval that
+            // cannot be represented here is an internal invariant failure.
+            let interval = crate::exact::rate_interval(requests_per_second).ok_or_else(|| {
+                EngineError::Runtime(ErrorDetail::from("request rate has no exact interval"))
+            })?;
             let mut state = self.rate_state.lock().await;
             let now = Instant::now();
             let wait = state.next_allowed.saturating_duration_since(now);
@@ -2785,25 +2796,43 @@ fn is_retryable_transport_error(error: &EngineError) -> bool {
 /// retrying before the time the server named would ignore its instruction and
 /// add load where it asked for less. The response is returned as it is, so
 /// the operation fails with its HTTP status instead of retrying early.
-fn retry_wait(policy: &RetryPolicy, attempt: u32, retry_after_ms: Option<u64>) -> Option<Duration> {
+fn retry_wait(
+    policy: &RetryPolicy,
+    backoff: &mut crate::exact::Backoff,
+    retry_after_ms: Option<u64>,
+) -> Option<Duration> {
     match retry_after_ms {
         Some(delay) if policy.respect_retry_after && delay > policy.max_retry_after_ms => None,
-        _ => Some(retry_delay(policy, attempt, retry_after_ms)),
+        _ => Some(retry_delay(policy, backoff, retry_after_ms)),
     }
 }
 
-fn retry_delay(policy: &RetryPolicy, attempt: u32, retry_after_ms: Option<u64>) -> Duration {
+/// The backoff of a retry loop. The factor is validated before any request,
+/// so a refusal here is an internal invariant failure.
+fn backoff_for(policy: &RetryPolicy) -> Result<crate::exact::Backoff, EngineError> {
+    crate::exact::Backoff::new(
+        policy.backoff_base_ms,
+        policy.backoff_factor,
+        policy.max_backoff_ms,
+    )
+    .ok_or_else(|| EngineError::Runtime(ErrorDetail::from("retry backoff factor is invalid")))
+}
+
+/// Wait before the next retry: the server's `Retry-After` when honoured,
+/// otherwise the next exact backoff delay. The backoff advances on every
+/// retry either way, so the n-th retry always uses the n-th delay.
+fn retry_delay(
+    policy: &RetryPolicy,
+    backoff: &mut crate::exact::Backoff,
+    retry_after_ms: Option<u64>,
+) -> Duration {
+    let backoff_ms = backoff.next_ms();
     if policy.respect_retry_after
         && let Some(delay) = retry_after_ms
     {
         return Duration::from_millis(delay.min(policy.max_retry_after_ms));
     }
-
-    let exponent = attempt.saturating_sub(1) as i32;
-    let delay = (policy.backoff_base_ms as f64 * policy.backoff_factor.max(1.0).powi(exponent))
-        .min(policy.max_backoff_ms as f64)
-        .max(0.0) as u64;
-    Duration::from_millis(delay)
+    Duration::from_millis(backoff_ms)
 }
 
 pub(crate) fn parse_retry_after(value: &str, now: SystemTime) -> Option<u64> {
@@ -2945,10 +2974,11 @@ mod tests {
             Some(u64::MAX)
         );
         let policy = crate::RetryPolicy::default();
+        let mut backoff = super::backoff_for(&policy).unwrap();
         assert_eq!(
             super::retry_delay(
                 &policy,
-                1,
+                &mut backoff,
                 parse_retry_after("99999999999999999999999", now)
             ),
             Duration::from_millis(policy.max_retry_after_ms)
