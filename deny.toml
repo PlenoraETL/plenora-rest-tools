@@ -45,6 +45,20 @@ allow = [
     "Zlib",
 ]
 confidence-threshold = 0.9
+# The detached fuzz crate (fuzz/Cargo.lock, audited by the same policy) links
+# LLVM's libFuzzer through libfuzzer-sys, whose bundled C++ sources are under
+# the University of Illinois/NCSA licence (OSI approved, permissive). The
+# exception is scoped to that crate: it never enters the published crate or
+# the wheel, and NCSA stays refused for every other dependency.
+exceptions = [
+    { allow = ["NCSA"], crate = "libfuzzer-sys" },
+]
+
+# The workspace crates are proprietary and unpublished (publish = false), not
+# third-party dependencies. This does not touch the allowlist above: every
+# external dependency is still checked against it.
+[licenses.private]
+ignore = true
 
 [bans]
 multiple-versions = "allow"

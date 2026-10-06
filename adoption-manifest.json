@@ -3,7 +3,7 @@
   "component": "plenora-rest-tools",
   "contracts_source": {
     "repository": "https://github.com/PlenoraETL/plenora-contracts.git",
-    "revision": "83ed391212b28100ffa6097a2963f746b6209b37"
+    "revision": "1e902dfaab5819c1d9ce785878d5b26dbeae48b3"
   },
   "profile": "plenora-rest-tools-profile-v1",
   "artifacts": [
@@ -11,7 +11,7 @@
       "name": "plenora-rest-core",
       "surface": "rust",
       "version": "0.2.2",
-      "digest": "sha256:8f4832826f596f22bbf59399341a8c35cc525d58d16555a56486753dfe20a991",
+      "digest": "sha256:08316b9b12ec241a8f7db702e6e4e7e7b69fd92d80cb2136ccde2a6d2bcfa867",
       "verification": [
         "powershell -File scripts/release.ps1",
         "cargo test -p plenora-rest-core --test public_surface",
@@ -22,7 +22,7 @@
       "name": "plenora-rest",
       "surface": "python_sdk",
       "version": "0.2.2",
-      "digest": "sha256:0882a7103a18e7701bfdfecafa6d5ef9651a960954ea8d1af6a7ecd65475f25d",
+      "digest": "sha256:ff28eef0685e5de4fbae12bdc43b1b8962399d4d69b6bafee16a7479d6fcaeed",
       "api_modes": ["sync"],
       "verification": [
         "powershell -File scripts/release.ps1",
@@ -30,13 +30,24 @@
       ]
     },
     {
+      "name": "plenora-rest-linux-x86_64",
+      "surface": "cli",
+      "version": "0.2.2",
+      "digest": "sha256:c94ebd49d3e33da6d65aacf39613c0b2c6337affbab97915fa4f68f465c4fbb6",
+      "verification": [
+        "powershell -File scripts/release.ps1",
+        "cargo test -p plenora-rest-cli --test cli"
+      ]
+    },
+    {
       "name": "plenora.rest-tools",
       "surface": "runtime",
       "version": "0.2.2",
-      "digest": "sha256:8f4832826f596f22bbf59399341a8c35cc525d58d16555a56486753dfe20a991",
+      "digest": "sha256:08316b9b12ec241a8f7db702e6e4e7e7b69fd92d80cb2136ccde2a6d2bcfa867",
       "verification": [
         "powershell -File scripts/release.ps1",
-        "cargo test -p plenora-rest-core --test runtime_binding"
+        "cargo test -p plenora-rest-core --test runtime_binding",
+        "cargo test -p plenora-rest-core --test runtime_vectors"
       ]
     }
   ],
@@ -62,7 +73,8 @@
       "status": "conforming",
       "verification": [
         "cargo test -p plenora-rest-core --test black_box",
-        "cargo test -p plenora-rest-core --test runtime_binding"
+        "cargo test -p plenora-rest-core --test runtime_binding",
+        "cargo test -p plenora-rest-core --test runtime_vectors"
       ]
     },
     {
@@ -70,7 +82,8 @@
       "status": "conforming",
       "verification": [
         "cargo test -p plenora-rest-core --test black_box",
-        "cargo test -p plenora-rest-core --test runtime_binding"
+        "cargo test -p plenora-rest-core --test runtime_binding",
+        "cargo test -p plenora-rest-core --test runtime_vectors"
       ]
     },
     {
@@ -84,7 +97,16 @@
       "id": "plenora-runtime-binding-v1",
       "status": "conforming",
       "verification": [
-        "cargo test -p plenora-rest-core --test runtime_binding"
+        "cargo test -p plenora-rest-core --test runtime_binding",
+        "cargo test -p plenora-rest-core --test runtime_vectors"
+      ]
+    },
+    {
+      "id": "plenora-cli-v2",
+      "status": "conforming",
+      "verification": [
+        "cargo test -p plenora-rest-cli --test cli",
+        "cargo test -p plenora-rest-cli --bin plenora-rest"
       ]
     },
     {
@@ -97,7 +119,8 @@
       "verification": [
         "cargo test -p plenora-rest-core --test public_surface",
         "cargo test -p plenora-rest-core --test runtime_binding",
-        "installed-wheel black-box unittest suite"
+        "installed-wheel black-box unittest suite",
+        "cargo test -p plenora-rest-core --test runtime_vectors"
       ]
     },
     {

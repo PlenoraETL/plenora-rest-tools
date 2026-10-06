@@ -1,5 +1,7 @@
 [build-system]
-requires = ["maturin>=1.9,<2.0"]
+# Exact pin, the same maturin every gate builds with: a range would let an
+# sdist build pick a release the gates never qualified.
+requires = ["maturin==1.14.1"]
 build-backend = "maturin"
 
 [project]
@@ -7,7 +9,7 @@ name = "plenora-rest"
 version = "0.2.2"
 description = "Self-contained, service-agnostic REST execution engine for Python"
 requires-python = ">=3.10,<3.15"
-license = "MIT OR Apache-2.0"
+license = { text = "Proprietary" }
 readme = "README.md"
 classifiers = [
     "Programming Language :: Rust",
@@ -17,6 +19,7 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
+    "Operating System :: Microsoft :: Windows",
     "Operating System :: POSIX :: Linux",
     "Typing :: Typed",
 ]

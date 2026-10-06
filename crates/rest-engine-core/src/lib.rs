@@ -5,13 +5,23 @@
 //! types never cross this boundary.
 
 #![forbid(unsafe_code)]
+#![deny(missing_docs)]
 
 mod capability;
 mod contract;
 mod control;
 mod engine;
 mod error;
+// Surface for the detached fuzz crate only: behind a non-default feature,
+// hidden from the documentation, and outside the frozen v1 contract (its
+// items are not re-exported, so contracts/compatibility-v1.json does not see
+// them). See fuzz/README.md.
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub mod fuzzing;
 mod json_path;
+#[cfg(test)]
+mod property_tests;
 mod response_body;
 mod runtime;
 mod transport;

@@ -1,0 +1,1 @@
+{"connection":{"url":"https://files.example.com/a.bin"},"input":{"file":{"overwrite":true,"path":"a.bin"}},"operation":"download","schema_version":1}

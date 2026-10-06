@@ -1,0 +1,34 @@
+{
+  "repository": "https://github.com/PlenoraETL/plenora-contracts.git",
+  "revision": "1e902dfaab5819c1d9ce785878d5b26dbeae48b3",
+  "files": {
+    "runtime-v1/rest-download-success.json": {
+      "upstream": "vectors/runtime-v1/rest-download-success.json",
+      "sha256": "70ba004a5b27b327ccef60d1f2c5685aa9aeb6ee1848077f702270139bc1b69e"
+    },
+    "runtime-v1/rest-upload-request.json": {
+      "upstream": "vectors/runtime-v1/rest-upload-request.json",
+      "sha256": "3974975b00334604cd1618df15248f7fa7dc9cde2da918921e690a65fef1fbb3"
+    },
+    "runtime-v1/rest-upload-unknown-error.json": {
+      "upstream": "vectors/runtime-v1/rest-upload-unknown-error.json",
+      "sha256": "a3dd966ca18a00ac665a867531c6ec662a4e5cc062566b7243709ffd58d21a43"
+    },
+    "schemas/adoption-manifest-v4.schema.json": {
+      "upstream": "schemas/adoption-manifest-v4.schema.json",
+      "sha256": "0dff938948709a34ed0436e971160ceaf5ebb757da290ebade10976f30925ace"
+    },
+    "schemas/error-v1.schema.json": {
+      "upstream": "schemas/error-v1.schema.json",
+      "sha256": "15795d92adea7a6df15dd25a045699c43ad1c79949702c70158f4725f4fed4c0"
+    },
+    "schemas/runtime-vector-v1.schema.json": {
+      "upstream": "schemas/runtime-vector-v1.schema.json",
+      "sha256": "3ec6148b8fb3db111ca0d1ff29283c3f8a46a7727c3051a777a123c102ca1f9e"
+    },
+    "specs/RUNTIME-VECTORS-1.0.md": {
+      "upstream": "specs/runtime/RUNTIME-VECTORS-1.0.md",
+      "sha256": "d7f9c42b2b6d50ee844425b77cbce59db8bc6a945726b67635d62884aacabd34"
+    }
+  }
+}

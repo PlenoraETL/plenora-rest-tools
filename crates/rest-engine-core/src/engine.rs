@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
     sync::{
@@ -28,11 +29,23 @@ use crate::{
     QueryStyle, ResponseConfig, ResponseTransform, SCHEMA_VERSION, capabilities, json_path,
     response_body,
     transport::{
-        DownloadTarget, PreparedBody, PreparedFile, PreparedFileSource, PreparedRequest,
-        PreparedStream, ResponseData, Transport, same_origin,
+        DownloadTarget, EXECUTION_TALLY, ExecutionTally, PreparedBody, PreparedFile,
+        PreparedFileSource, PreparedRequest, PreparedStream, ResponseData, Transport, same_origin,
     },
 };
 
+/// REST execution engine.
+///
+/// An `Engine` owns everything that outlives a single execution: the
+/// [`EngineConfig`] policies, HTTP connection pools, cached OAuth tokens, the
+/// HTTP cache, circuit breaker state, the request rate limiter, cookie
+/// sessions and the registry of admitted idempotency keys. Executions take
+/// `&self`, so one engine can serve concurrent executions from several tasks;
+/// the engine-wide limits (`max_concurrent_requests`, `requests_per_second`)
+/// apply across all of them.
+///
+/// Executions never panic and never return a Rust error: every failure is
+/// reported in the [`ExecutionResult`] with status `failed`.
 pub struct Engine {
     config: EngineConfig,
     transport: Transport,
@@ -110,6 +123,8 @@ struct EnrichmentOutcome {
 }
 
 impl Engine {
+    /// Creates an engine with the given configuration. Nothing is validated
+    /// or connected here: policies are enforced when an execution uses them.
     pub fn new(config: EngineConfig) -> Self {
         Self {
             transport: Transport::new(config.clone()),
@@ -119,16 +134,31 @@ impl Engine {
         }
     }
 
+    /// Runs one execution with no external cancellation.
+    ///
+    /// Identical to [`execute_with_control`](Self::execute_with_control)
+    /// with a default control: only `options.deadline` bounds the execution.
     pub async fn execute(&self, request: ExecutionRequest) -> ExecutionResult {
-        let control = match ExecutionControl::default()
-            .with_optional_deadline(request.options.deadline.as_deref())
-        {
-            Ok(control) => control,
-            Err(error) => return failed_result(error),
-        };
-        self.execute_with_control(request, control).await
+        self.execute_with_control(request, ExecutionControl::default())
+            .await
     }
 
+    /// Runs one execution under the cancellation token of `control` and the
+    /// earlier of its deadline and `options.deadline` (RFC 3339 in UTC; a
+    /// non-zero offset or `-00:00` is `INVALID_INPUT`).
+    ///
+    /// Before any network activity the engine checks, in order: that it is
+    /// not closed (`ENGINE_CLOSED`), the deadline spelling and the request
+    /// configuration (`INVALID_INPUT`), the cookie session handle
+    /// (`POLICY_VIOLATION`), the idempotency key (`INVALID_INPUT`,
+    /// `POLICY_VIOLATION`, `IDEMPOTENCY_CONFLICT`) and whether the deadline has
+    /// already passed (`DEADLINE_EXPIRED`: timeout, phase validate, no remote
+    /// effect). A cancellation fails the execution with `CANCELLED` and a
+    /// deadline reached during it with `TIMEOUT`; in both cases asynchronous
+    /// jobs being polled are cancelled
+    /// remotely when their polling configuration asks for it, within a shared
+    /// budget of 5 seconds, and their recovery data is returned in
+    /// `recoveries`.
     pub async fn execute_with_control(
         &self,
         request: ExecutionRequest,
@@ -137,6 +167,10 @@ impl Engine {
         if self.is_closed() {
             return failed_result(EngineError::EngineClosed);
         }
+        let control = match control.with_request_deadline(request.options.deadline.as_deref()) {
+            Ok(control) => control,
+            Err(error) => return failed_result(error),
+        };
         if let Err(error) = validate_engine_configuration(&self.config) {
             return failed_result(error);
         }
@@ -157,15 +191,19 @@ impl Engine {
         if let Err(error) = self.admit_idempotency(&request) {
             return failed_result(error);
         }
-        if control
-            .deadline
-            .is_some_and(|deadline| deadline <= Instant::now())
-        {
-            return failed_result(EngineError::Timeout);
+        // An expired deadline refuses the operation before anything runs:
+        // nothing was sent, so the failure is in validation with no remote
+        // effect, unlike a deadline that fires during the execution.
+        if control.deadline_expired() {
+            return failed_result(EngineError::DeadlineExpired);
         }
         let active_jobs = Arc::new(Mutex::new(BTreeMap::new()));
         let deadline = control.deadline.map(tokio::time::Instant::from_std);
-        let execution = ACTIVE_ASYNC_JOBS.scope(active_jobs.clone(), self.execute_inner(request));
+        let tally = Arc::new(ExecutionTally::default());
+        let execution = EXECUTION_TALLY.scope(
+            tally.clone(),
+            ACTIVE_ASYNC_JOBS.scope(active_jobs.clone(), self.execute_inner(request)),
+        );
         enum Controlled<T> {
             Finished(T),
             Cancelled,
@@ -188,21 +226,44 @@ impl Engine {
                 }
             }
         };
-        match outcome {
+        let mut result = match outcome {
             Controlled::Finished(result) => result,
             Controlled::Cancelled => {
-                self.cancel_active_jobs(&active_jobs, RemoteCancelTrigger::Cancellation)
+                // The remote cancellation is a request of this execution too.
+                EXECUTION_TALLY
+                    .scope(
+                        tally.clone(),
+                        self.cancel_active_jobs(&active_jobs, RemoteCancelTrigger::Cancellation),
+                    )
                     .await;
                 failed_result_with_recoveries(EngineError::Cancelled, recoveries_from(&active_jobs))
             }
             Controlled::Deadline => {
-                self.cancel_active_jobs(&active_jobs, RemoteCancelTrigger::Deadline)
+                // The remote cancellation is a request of this execution too.
+                EXECUTION_TALLY
+                    .scope(
+                        tally.clone(),
+                        self.cancel_active_jobs(&active_jobs, RemoteCancelTrigger::Deadline),
+                    )
                     .await;
                 failed_result_with_recoveries(EngineError::Timeout, recoveries_from(&active_jobs))
             }
-        }
+        };
+        // Never fewer requests or retries than were actually sent: the
+        // response-based counts miss the attempts of a failure.
+        result.metrics.requests = result
+            .metrics
+            .requests
+            .max(tally.requests.load(Ordering::Relaxed));
+        result.metrics.retries = result
+            .metrics
+            .retries
+            .max(tally.retries.load(Ordering::Relaxed));
+        result
     }
 
+    /// The capability document of this build; the same value as the free
+    /// function [`capabilities`](crate::capabilities).
     pub fn capabilities(&self) -> CapabilityDocument {
         capabilities()
     }
@@ -230,10 +291,15 @@ impl Engine {
         self.transport.close_cookie_session(session).await
     }
 
+    /// Closes the engine. From now on new executions fail with
+    /// `ENGINE_CLOSED` and cookie session calls return
+    /// [`EngineError::EngineClosed`]; executions already admitted run to
+    /// completion. Idempotent and irreversible.
     pub fn close(&self) {
         self.closed.store(true, Ordering::Release);
     }
 
+    /// Whether [`close`](Self::close) has been called.
     pub fn is_closed(&self) -> bool {
         self.closed.load(Ordering::Acquire)
     }
@@ -405,33 +471,52 @@ impl Engine {
                 } else {
                     ExecutionStatus::Failed
                 };
+                with_recoveries(
+                    ExecutionResult {
+                        schema_version: SCHEMA_VERSION,
+                        status,
+                        output: operation.output,
+                        metrics,
+                        responses,
+                        errors: operation.errors,
+                        recoveries: Vec::new(),
+                    },
+                    active_recoveries(),
+                )
+            }
+            Err(error) => with_recoveries(
                 ExecutionResult {
                     schema_version: SCHEMA_VERSION,
-                    status,
-                    output: operation.output,
+                    status: ExecutionStatus::Failed,
+                    output: ExecutionOutput::None,
                     metrics,
                     responses,
-                    errors: operation.errors,
-                    recoveries: active_recoveries(),
-                }
-            }
-            Err(error) => ExecutionResult {
-                schema_version: SCHEMA_VERSION,
-                status: ExecutionStatus::Failed,
-                output: ExecutionOutput::None,
-                metrics,
-                responses,
-                errors: vec![error.execution_error(None)],
-                recoveries: active_recoveries(),
-            },
+                    errors: vec![error.execution_error(None)],
+                    recoveries: Vec::new(),
+                },
+                active_recoveries(),
+            ),
         }
     }
 
+    /// JSON form of [`execute`](Self::execute): parses a
+    /// `plenora-rest-execution-request-v1` document and returns the
+    /// serialized `plenora-rest-execution-result-v1` document.
+    ///
+    /// Only failures outside the execution are a Rust error: a closed engine
+    /// ([`EngineError::EngineClosed`]), text that does not parse as the
+    /// request contract or an invalid `options.deadline`
+    /// ([`EngineError::InvalidInput`], with only the line and column of a
+    /// parse failure), or a result that cannot be serialized
+    /// ([`EngineError::Runtime`]). A failed execution is a successful call
+    /// returning a result with status `failed`.
     pub async fn execute_json(&self, request_json: &str) -> Result<String, EngineError> {
         self.execute_json_with_cancellation(request_json, CancellationToken::new())
             .await
     }
 
+    /// [`execute_json`](Self::execute_json) with an external cancellation
+    /// token; the deadline still comes from `options.deadline`.
     pub async fn execute_json_with_cancellation(
         &self,
         request_json: &str,
@@ -447,9 +532,9 @@ impl Engine {
                 error.column(),
             ))
         })?;
-        let control = ExecutionControl::new(cancellation)
-            .with_optional_deadline(request.options.deadline.as_deref())?;
-        let result = self.execute_with_control(request, control).await;
+        let result = self
+            .execute_with_control(request, ExecutionControl::new(cancellation))
+            .await;
         serde_json::to_string(&result)
             .map_err(|_| EngineError::Runtime(ErrorDetail::from("result could not be serialized")))
     }
@@ -726,6 +811,7 @@ impl Engine {
         responses: &mut Vec<HttpResponseMetadata>,
     ) -> Result<OperationResult, EngineError> {
         let parameters = resolve_parameters(&request.connection, &request.input.params)?;
+        let mut limit = None;
         let values = match &request.connection.pagination {
             None => {
                 let (value, _, _, _) = self
@@ -741,22 +827,30 @@ impl Engine {
                 response_records(&request.connection, &value)?
             }
             Some(pagination) => {
-                self.paginated(
-                    &request.connection,
-                    &parameters,
-                    pagination,
-                    metrics,
-                    responses,
-                    &request.options,
-                )
-                .await?
+                let (values, stopped) = self
+                    .paginated(
+                        &request.connection,
+                        &parameters,
+                        pagination,
+                        metrics,
+                        responses,
+                        &request.options,
+                    )
+                    .await?;
+                limit = stopped;
+                values
             }
         };
         let records = map_records(values, &request.connection.response)?;
         let succeeded = records.len();
+        // Rows cut off by a pagination limit are not a complete result: the
+        // records read so far are returned with an error saying so, which
+        // makes the status partial (or failed with no rows).
         Ok(OperationResult {
             output: ExecutionOutput::Records { records },
-            errors: Vec::new(),
+            errors: limit
+                .map(|error| vec![error.execution_error(None)])
+                .unwrap_or_default(),
             succeeded,
         })
     }
@@ -887,17 +981,34 @@ impl Engine {
         .collect::<Vec<_>>()
         .await;
 
+        // Every record yields exactly one outcome at its own index. A missing,
+        // repeated or out-of-range outcome would silently drop or duplicate a
+        // record, so it fails the operation instead.
         let mut ordered: Vec<Option<EnrichmentOutcome>> =
             (0..request.input.records.len()).map(|_| None).collect();
         for outcome in outcomes {
-            let index = outcome.index;
-            ordered[index] = Some(outcome);
+            let slot = ordered.get_mut(outcome.index).ok_or_else(|| {
+                EngineError::Runtime(ErrorDetail::from(
+                    "enrichment outcome index is out of range",
+                ))
+            })?;
+            if slot.replace(outcome).is_some() {
+                return Err(EngineError::Runtime(ErrorDetail::from(
+                    "enrichment record produced more than one outcome",
+                )));
+            }
         }
+        let ordered = ordered
+            .into_iter()
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| {
+                EngineError::Runtime(ErrorDetail::from("enrichment record produced no outcome"))
+            })?;
 
         let mut output = Vec::with_capacity(request.input.records.len());
         let mut errors = Vec::new();
         let mut succeeded = 0_usize;
-        for outcome in ordered.into_iter().flatten() {
+        for outcome in ordered {
             merge_execution_metrics(metrics, &outcome.metrics);
             responses.extend(outcome.responses);
             match outcome.result {
@@ -1048,8 +1159,14 @@ impl Engine {
         metrics: &mut ExecutionMetrics,
         responses: &mut Vec<HttpResponseMetadata>,
         options: &crate::ExecutionOptions,
-    ) -> Result<Vec<Value>, EngineError> {
+    ) -> Result<(Vec<Value>, Option<EngineError>), EngineError> {
         let mut output = Vec::new();
+        // Set when the source itself says it has no more data: a short page,
+        // no next cursor or link, or one already followed. Leaving a loop for
+        // any other reason (max_rows, max_pages), or dropping rows of the last
+        // page to fit max_rows, means the source still had data.
+        let mut finished = false;
+        let mut dropped = false;
         // Origin that owns the credentials for the whole pagination run. It is
         // fixed by the first page and never re-derived, so no later page can
         // become the origin that owns them. Cursor, offset, and page values are
@@ -1088,8 +1205,9 @@ impl Engine {
                         .await?;
                     let page = response_records(connection, &value)?;
                     let page_len = page.len();
-                    append_limited(&mut output, page, *max_rows);
+                    dropped |= append_limited(&mut output, page, *max_rows);
                     if page_len < limit {
+                        finished = true;
                         break;
                     }
                     offset = offset.saturating_add(*page_size);
@@ -1107,7 +1225,11 @@ impl Engine {
                 let mut page_number = *start_page;
                 let mut request_index = 0_usize;
                 while output.len() < *max_rows {
-                    let limit = (*page_size).min(max_rows.saturating_sub(output.len()));
+                    // The page size stays the same on every request: page N
+                    // of a smaller size is a different slice of the data
+                    // (page 2 of size 1 is the second row, not the third).
+                    // Rows beyond max_rows are cut locally instead.
+                    let limit = *page_size;
                     let mut parameters = base_parameters.clone();
                     parameters.insert(page_param.clone(), usize_value(page_number)?);
                     parameters.insert(page_size_param.clone(), usize_value(limit)?);
@@ -1125,8 +1247,9 @@ impl Engine {
                         .await?;
                     let page = response_records(connection, &value)?;
                     let page_len = page.len();
-                    append_limited(&mut output, page, *max_rows);
+                    dropped |= append_limited(&mut output, page, *max_rows);
                     if page_len < limit {
+                        finished = true;
                         break;
                     }
                     page_number = page_number.saturating_add(1);
@@ -1161,7 +1284,7 @@ impl Engine {
                             &scoped_options,
                         )
                         .await?;
-                    append_limited(
+                    dropped |= append_limited(
                         &mut output,
                         response_records(connection, &value)?,
                         *max_rows,
@@ -1169,7 +1292,10 @@ impl Engine {
                     cursor = json_path::get(&value, cursor_path).and_then(value_as_string);
                     match &cursor {
                         Some(value) if seen.insert(value.clone()) => {}
-                        _ => break,
+                        _ => {
+                            finished = true;
+                            break;
+                        }
                     }
                 }
             }
@@ -1203,18 +1329,20 @@ impl Engine {
                             &scoped_options,
                         )
                         .await?;
-                    append_limited(
+                    dropped |= append_limited(
                         &mut output,
                         response_records(connection, &value)?,
                         *max_rows,
                     );
                     let Some(link) = json_path::get(&value, link_path).and_then(Value::as_str)
                     else {
+                        finished = true;
                         break;
                     };
                     let resolved =
                         pagination_url(&final_url, link, *allow_cross_origin)?.to_string();
                     if !seen.insert(resolved.clone()) {
+                        finished = true;
                         break;
                     }
                     next_url = Some(resolved);
@@ -1255,17 +1383,19 @@ impl Engine {
                             &scoped_options,
                         )
                         .await?;
-                    append_limited(
+                    dropped |= append_limited(
                         &mut output,
                         response_records(connection, &value)?,
                         *max_rows,
                     );
                     let Some(link) = link_header_target(&headers, relation)? else {
+                        finished = true;
                         break;
                     };
                     let resolved =
                         pagination_url(&final_url, &link, *allow_cross_origin)?.to_string();
                     if !seen.insert(resolved.clone()) {
+                        finished = true;
                         break;
                     }
                     next_url = Some(resolved);
@@ -1273,7 +1403,8 @@ impl Engine {
             }
         }
 
-        Ok(output)
+        let stopped = (dropped || !finished).then(|| pagination_limit(pagination));
+        Ok((output, stopped))
     }
 
     async fn request_json(
@@ -2258,17 +2389,18 @@ async fn hash_file(path: &Path, limit: u64) -> Result<String, EngineError> {
         if read == 0 {
             break;
         }
+        let chunk = buffer.get(..read).ok_or_else(|| {
+            EngineError::Runtime(ErrorDetail::from(
+                "file read reported more bytes than its buffer",
+            ))
+        })?;
         let read = u64::try_from(read).map_err(|_| {
             EngineError::Runtime(ErrorDetail::from("file read length overflowed u64"))
         })?;
         if total.saturating_add(read) > limit {
             return Err(EngineError::FileTooLarge { limit_bytes: limit });
         }
-        digest.update(
-            &buffer[..usize::try_from(read).map_err(|_| {
-                EngineError::Runtime(ErrorDetail::from("file read length overflowed usize"))
-            })?],
-        );
+        digest.update(chunk);
         total = total.saturating_add(read);
     }
     Ok(format!("{:x}", digest.finalize()))
@@ -2712,11 +2844,10 @@ fn expand_iterations(
     context: &JsonObject,
     output: &mut Vec<Value>,
 ) {
-    if level >= iterations.len() {
+    let Some(iteration) = iterations.get(level) else {
         output.push(Value::Object(context.clone()));
         return;
-    }
-    let iteration = &iterations[level];
+    };
     let selected = if iteration.path.is_empty() {
         Some(current)
     } else {
@@ -3633,9 +3764,42 @@ fn ensure_page_size(page_size: usize) -> Result<(), EngineError> {
     }
 }
 
-fn append_limited(output: &mut Vec<Value>, values: Vec<Value>, max_rows: usize) {
+/// Appends at most `max_rows - output.len()` values; true when some were left
+/// out, which means the source had more rows than the limit admits.
+fn append_limited(output: &mut Vec<Value>, values: Vec<Value>, max_rows: usize) -> bool {
     let remaining = max_rows.saturating_sub(output.len());
+    let available = values.len();
     output.extend(values.into_iter().take(remaining));
+    available > remaining
+}
+
+fn pagination_limit(pagination: &PaginationConfig) -> EngineError {
+    match pagination {
+        PaginationConfig::Offset { max_rows, .. } | PaginationConfig::Page { max_rows, .. } => {
+            EngineError::PaginationLimit {
+                max_rows: *max_rows,
+                max_pages: None,
+            }
+        }
+        PaginationConfig::Cursor {
+            max_rows,
+            max_pages,
+            ..
+        }
+        | PaginationConfig::Link {
+            max_rows,
+            max_pages,
+            ..
+        }
+        | PaginationConfig::HeaderLink {
+            max_rows,
+            max_pages,
+            ..
+        } => EngineError::PaginationLimit {
+            max_rows: *max_rows,
+            max_pages: Some(*max_pages),
+        },
+    }
 }
 
 fn merge_execution_metrics(target: &mut ExecutionMetrics, source: &ExecutionMetrics) {
@@ -3664,7 +3828,7 @@ fn pagination_url(base: &Url, target: &str, allow_cross_origin: bool) -> Result<
     Ok(resolved)
 }
 
-fn link_header_target(
+pub(crate) fn link_header_target(
     headers: &BTreeMap<String, String>,
     expected_relation: &str,
 ) -> Result<Option<String>, EngineError> {
@@ -3694,6 +3858,9 @@ fn link_header_target(
             {
                 return Ok(Some(target.to_owned()));
             }
+            // RFC 8288, 3.3: occurrences of rel after the first in a link
+            // value are ignored, so `rel=prev; rel=next` is not a next link.
+            break;
         }
     }
     Ok(None)
@@ -3762,13 +3929,34 @@ fn split_quoted(value: &str, separator: char) -> Result<Vec<&str>, EngineError> 
     Ok(values)
 }
 
-fn unquote_header_value(value: &str) -> Result<&str, EngineError> {
-    match (value.strip_prefix('"'), value.strip_suffix('"')) {
-        (Some(value), Some(_)) if value.ends_with('"') => Ok(&value[..value.len() - 1]),
-        (None, None) => Ok(value),
-        _ => Err(EngineError::InvalidResponse(ErrorDetail::from(
+/// The value of a Link parameter: a token as written, or a quoted-string with
+/// its quoted-pairs resolved (RFC 9110, 5.6.4). Comparing the escaped text
+/// would make `rel="n\ext"` miss `next` and end the pagination silently.
+fn unquote_header_value(value: &str) -> Result<Cow<'_, str>, EngineError> {
+    let invalid = || {
+        EngineError::InvalidResponse(ErrorDetail::from(
             "Link header contains an invalid quoted value",
-        ))),
+        ))
+    };
+    match (value.strip_prefix('"'), value.strip_suffix('"')) {
+        (Some(inner), Some(_)) if inner.ends_with('"') => {
+            let inner = &inner[..inner.len() - 1];
+            if !inner.contains('\\') {
+                return Ok(Cow::Borrowed(inner));
+            }
+            let mut unescaped = String::with_capacity(inner.len());
+            let mut characters = inner.chars();
+            while let Some(character) = characters.next() {
+                if character == '\\' {
+                    unescaped.push(characters.next().ok_or_else(invalid)?);
+                } else {
+                    unescaped.push(character);
+                }
+            }
+            Ok(Cow::Owned(unescaped))
+        }
+        (None, None) => Ok(Cow::Borrowed(value)),
+        _ => Err(invalid()),
     }
 }
 
@@ -4203,7 +4391,7 @@ fn has_credential_compound(name: &str) -> bool {
     }
     (0..components.len()).any(|start| {
         let mut joined = String::new();
-        components[start..].iter().any(|component| {
+        components.iter().skip(start).any(|component| {
             joined.push_str(component);
             is_marker(&joined)
         })
@@ -4257,22 +4445,57 @@ fn is_transferable_cross_origin_header(name: &str) -> bool {
 }
 
 fn failed_result(error: EngineError) -> ExecutionResult {
-    failed_result_with_recoveries(error, Vec::new())
+    failed_result_with_recoveries(error, RecoveryHandles::default())
 }
 
 fn failed_result_with_recoveries(
     error: EngineError,
-    recoveries: Vec<AsyncJobRecovery>,
+    recoveries: RecoveryHandles,
 ) -> ExecutionResult {
-    ExecutionResult {
-        schema_version: SCHEMA_VERSION,
-        status: ExecutionStatus::Failed,
-        output: ExecutionOutput::None,
-        metrics: ExecutionMetrics::default(),
-        responses: Vec::new(),
-        errors: vec![error.execution_error(None)],
+    with_recoveries(
+        ExecutionResult {
+            schema_version: SCHEMA_VERSION,
+            status: ExecutionStatus::Failed,
+            output: ExecutionOutput::None,
+            metrics: ExecutionMetrics::default(),
+            responses: Vec::new(),
+            errors: vec![error.execution_error(None)],
+            recoveries: Vec::new(),
+        },
         recoveries,
+    )
+}
+
+/// Puts the recovery handles into `result`, saying how many did not fit.
+///
+/// The contract caps `recoveries` at [`MAX_RECOVERIES`]. A handle left out is
+/// a remote job the caller can no longer resume, so the cut is never silent:
+/// the first error carries `recoveries_omitted` with the number left out. A
+/// result with omitted handles and no error cannot be produced by the engine
+/// (a job still running always comes with the failure that interrupted it);
+/// it is reported as an internal error rather than as a clean success.
+fn with_recoveries(mut result: ExecutionResult, recoveries: RecoveryHandles) -> ExecutionResult {
+    result.recoveries = recoveries.handles;
+    if recoveries.omitted > 0 {
+        let omitted = Value::from(u64::try_from(recoveries.omitted).unwrap_or(u64::MAX));
+        if result.errors.is_empty() {
+            result.errors.push(
+                EngineError::Runtime(ErrorDetail::from(
+                    "recovery handles were omitted without a failure",
+                ))
+                .execution_error(None),
+            );
+            if result.status == ExecutionStatus::Success {
+                result.status = ExecutionStatus::Partial;
+            }
+        }
+        if let Some(first) = result.errors.first_mut() {
+            first
+                .details
+                .insert("recoveries_omitted".to_owned(), omitted);
+        }
     }
+    result
 }
 
 fn validate_idempotency_key(key: &str) -> Result<(), EngineError> {
@@ -4362,6 +4585,7 @@ fn validate_numeric_settings(connection: &ConnectionConfig) -> Result<(), Engine
 
 fn validate_execution_configuration(request: &ExecutionRequest) -> Result<(), EngineError> {
     validate_transforms(&request.connection.response)?;
+    validate_json_paths(&request.connection)?;
     validate_numeric_settings(&request.connection)?;
     let Some(polling) = request.connection.polling.as_ref() else {
         return Ok(());
@@ -4423,6 +4647,54 @@ fn validate_execution_configuration(request: &ExecutionRequest) -> Result<(), En
     Ok(())
 }
 
+/// Every JSON path a request reads from a response must be well formed.
+///
+/// At run time a path that does not resolve means "the response does not have
+/// it", which the operation may legitimately turn into null or a default. A
+/// malformed path never resolves, so without this check a typo in the
+/// configuration would be indistinguishable from a response that lacks the
+/// field.
+fn validate_json_paths(connection: &ConnectionConfig) -> Result<(), EngineError> {
+    let response = &connection.response;
+    let mut paths: Vec<&str> = Vec::new();
+    paths.extend(response.records_path.as_deref());
+    paths.extend(response.error_path.as_deref());
+    paths.extend(
+        response
+            .output_mapping
+            .iter()
+            .map(|mapping| mapping.path.as_str()),
+    );
+    paths.extend(
+        response
+            .iterate_on
+            .iter()
+            .map(|iteration| iteration.path.as_str()),
+    );
+    if let Some(batch) = connection.batch.as_ref() {
+        paths.push(&batch.output_path);
+    }
+    if let Some(polling) = connection.polling.as_ref() {
+        paths.push(&polling.id_path);
+        paths.push(&polling.status_path);
+        paths.extend(polling.url_path.as_deref());
+        paths.extend(polling.result_path.as_deref());
+        paths.extend(polling.result_url_path.as_deref());
+    }
+    match connection.pagination.as_ref() {
+        Some(PaginationConfig::Cursor { cursor_path, .. }) => paths.push(cursor_path),
+        Some(PaginationConfig::Link { link_path, .. }) => paths.push(link_path),
+        _ => {}
+    }
+    if paths.into_iter().all(json_path::is_valid) {
+        Ok(())
+    } else {
+        Err(EngineError::InvalidInput(ErrorDetail::from(
+            "connection contains a malformed JSON path",
+        )))
+    }
+}
+
 fn execution_fingerprint(request: &ExecutionRequest) -> Result<String, EngineError> {
     let mut normalized = request.clone();
     normalized.options.deadline = None;
@@ -4481,7 +4753,7 @@ fn remove_active_job(key: &str) {
         .remove(key);
 }
 
-fn active_recoveries() -> Vec<AsyncJobRecovery> {
+fn active_recoveries() -> RecoveryHandles {
     active_jobs_handle()
         .map(|jobs| recoveries_from(&jobs))
         .unwrap_or_default()
@@ -4490,15 +4762,25 @@ fn active_recoveries() -> Vec<AsyncJobRecovery> {
 /// Contract bound on `recoveries` in the execution and file transfer results.
 const MAX_RECOVERIES: usize = 128;
 
-fn recoveries_from(jobs: &Arc<Mutex<BTreeMap<String, ActiveAsyncJob>>>) -> Vec<AsyncJobRecovery> {
-    // The map is keyed by poll URL, so truncation at the contract bound is
+/// The recovery handles a result can carry, and how many did not fit.
+#[derive(Default)]
+struct RecoveryHandles {
+    handles: Vec<AsyncJobRecovery>,
+    omitted: usize,
+}
+
+fn recoveries_from(jobs: &Arc<Mutex<BTreeMap<String, ActiveAsyncJob>>>) -> RecoveryHandles {
+    // The map is keyed by poll URL, so the cut at the contract bound is
     // deterministic rather than dependent on iteration order.
-    jobs.lock()
+    let mut handles = jobs
+        .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .values()
         .filter_map(|job| job.recovery.clone())
-        .take(MAX_RECOVERIES)
-        .collect()
+        .collect::<Vec<_>>();
+    let omitted = handles.len().saturating_sub(MAX_RECOVERIES);
+    handles.truncate(MAX_RECOVERIES);
+    RecoveryHandles { handles, omitted }
 }
 
 #[cfg(test)]
@@ -4583,6 +4865,45 @@ mod tests {
             link_header_target(&headers, "last").unwrap().as_deref(),
             Some("/last")
         );
+    }
+
+    #[test]
+    fn a_quoted_relation_is_compared_without_its_escapes() {
+        // Found by the property test against RFC 8288: the quoted-pair was
+        // compared as written, so the next page was never found and the
+        // pagination ended as if the service had no more pages.
+        let headers = BTreeMap::from([(
+            "link".to_owned(),
+            r#"</a>; rel="n\ext", </b>; rel="http://example.com/\Rel""#.to_owned(),
+        )]);
+        assert_eq!(
+            link_header_target(&headers, "next").unwrap().as_deref(),
+            Some("/a")
+        );
+        assert_eq!(
+            link_header_target(&headers, "http://example.com/Rel")
+                .unwrap()
+                .as_deref(),
+            Some("/b")
+        );
+    }
+
+    #[test]
+    fn only_the_first_rel_parameter_of_a_link_counts() {
+        // Found by the property test against RFC 8288: a second rel in the
+        // same link value was honoured, so a link declared as prev was
+        // followed as the next page.
+        let headers = BTreeMap::from([(
+            "link".to_owned(),
+            "</prev>; rel=prev; rel=next, </next>; rel=next".to_owned(),
+        )]);
+        assert_eq!(
+            link_header_target(&headers, "next").unwrap().as_deref(),
+            Some("/next")
+        );
+        let headers =
+            BTreeMap::from([("link".to_owned(), "</prev>; rel=prev; rel=next".to_owned())]);
+        assert_eq!(link_header_target(&headers, "next").unwrap(), None);
     }
 
     #[test]
