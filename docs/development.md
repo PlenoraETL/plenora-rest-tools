@@ -19,8 +19,8 @@ Per lavorare senza Docker sono utili:
 - CPython da 3.10 a 3.14;
 - Maturin compatibile con pyproject.toml.
 
-La CI usa Linux. Windows e macOS possono essere ambienti di sviluppo, ma non
-sono ancora piattaforme distribuite o supportate.
+La CI usa Linux (gate Docker) e Windows (job nativo). macOS può essere un
+ambiente di sviluppo, ma non è una piattaforma distribuita o supportata.
 
 ## Struttura del repository
 
@@ -78,7 +78,11 @@ La baseline breve usa server locali e carichi deterministici. Non sostituisce
 la campagna finale di staging descritta nella roadmap.
 
 Il workflow Verify esegue lo stesso script su pull request, push a main e
-avvio manuale.
+avvio manuale. Nello stesso workflow il job Windows esegue rustfmt, Clippy con
+`-D warnings` e `cargo test --workspace --locked` con lo stesso compilatore
+del gate Docker, costruisce la wheel abi3 win_amd64 con maturin 1.14.1 e la
+prova installata su CPython 3.10-3.14 con scripts/test_wheel.ps1, che esegue
+python/tests da fuori del checkout.
 
 ## Campagna operativa
 
@@ -179,13 +183,23 @@ Lo script:
 - confronta nomi e byte degli artefatti;
 - copia il risultato in dist;
 - genera un SBOM SPDX 2.3;
+- aggiunge la wheel Windows indicata con -ExtraArtifacts (nel workflow
+  Release);
 - genera SHA256SUMS;
 - confronta i digest con adoption-manifest.json.
+
+adoption-manifest.json registra i digest degli artefatti riproducibili
+costruiti nell'immagine Linux fissata per digest (crate e wheel manylinux). La
+wheel Windows è linkata su un runner la cui immagine non è fissata: è in
+SHA256SUMS, nell'SBOM e nelle attestazioni di provenance, ma non ha un digest
+nel manifesto da confrontare.
 
 Gli artefatti prodotti sono:
 
 - plenora-rest-core versione corrente in formato crate;
 - wheel plenora-rest ABI3 manylinux2014 x86_64;
+- wheel plenora-rest ABI3 win_amd64, costruita dal workflow Release su
+  Windows e provata su CPython 3.10-3.14 prima di entrare nel pacchetto;
 - SBOM SPDX JSON;
 - SHA256SUMS.
 

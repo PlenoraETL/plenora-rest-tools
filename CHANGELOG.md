@@ -155,6 +155,13 @@ proposed_rejection_probes_hold_on_the_rest_request_vector).
   servissero, andrebbero consegnati come dato remoto in un campo dichiarato del
   risultato, non nell'errore.
 
+### Piattaforme
+
+- Windows x86_64 è una piattaforma supportata: il workflow Verify esegue su
+  Windows formato, Clippy e test Rust, costruisce la wheel abi3 win_amd64 e la
+  prova installata su CPython 3.10-3.14; il workflow Release la costruisce, la
+  prova sulla stessa matrice e la include in SHA256SUMS, SBOM e attestazioni.
+
 ### Correzioni trovate dalla campagna operativa
 
 - `options.deadline` vale per ogni punto d'ingresso: Engine::execute_with_control

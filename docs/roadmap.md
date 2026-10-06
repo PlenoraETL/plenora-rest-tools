@@ -28,7 +28,7 @@ in Plenora.
 | Artifact | completato | upload/download streaming, resume e SHA-256 |
 | Gate CI | completato | MSRV, format, Clippy, test, wheel e matrice Python |
 | Release | completato | build riproducibile, checksum, SBOM e attestazioni |
-| Support matrix | definita | Linux manylinux2014 x86_64, CPython 3.10-3.14 |
+| Support matrix | definita | Linux manylinux2014 x86_64 e Windows x86_64, CPython 3.10-3.14 |
 
 Il gate breve include già test deterministici per concorrenza limitata, retry
 su fault transitori e streaming multi-megabyte. Questi test impediscono
@@ -323,7 +323,7 @@ La libreria può essere dichiarata pronta per la produzione quando:
 Dopo il go-live iniziale possono essere valutati:
 
 - supporto Linux ARM;
-- wheel per Windows e macOS;
+- wheel per macOS;
 - target musl;
 - SDK Python asincrono;
 - ulteriori formati o strategie di paginazione generiche;
