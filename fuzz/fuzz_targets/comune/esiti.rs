@@ -100,7 +100,17 @@ fn vocabolario() -> &'static str {
             EngineError::PollingTimeout { attempts: 0 },
             EngineError::Runtime("x".into()),
         ];
-        let mut testo = String::from("input_index");
+        // Identificatori pubblici del binding che i messaggi statici di
+        // rifiuto nominano (per esempio «runtime capability name is not
+        // plenora.rest-tools»): compaiono nel testo reso perché il motore li
+        // scrive, non perché li ricopia dall'input.
+        let mut testo = format!(
+            "input_index
+{}
+plenora.execution.idempotency_key
+plenora.execution.deadline",
+            plenora_rest_core::CAPABILITY_NAME
+        );
         for errore in errori {
             testo.push('\n');
             testo.push_str(&serde_json::to_string(&errore.payload()).expect("payload"));
