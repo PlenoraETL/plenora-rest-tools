@@ -19,8 +19,8 @@ Per lavorare senza Docker sono utili:
 - CPython da 3.10 a 3.14;
 - Maturin compatibile con pyproject.toml.
 
-La CI usa Linux. Windows e macOS possono essere ambienti di sviluppo, ma non
-sono ancora piattaforme distribuite o supportate.
+La CI usa Linux (gate Docker) e Windows (job nativo). macOS può essere un
+ambiente di sviluppo, ma non è una piattaforma distribuita o supportata.
 
 ## Struttura del repository
 
@@ -28,6 +28,8 @@ sono ancora piattaforme distribuite o supportate.
 .github/workflows             verifica PR/main e pubblicazione dei tag
 crates/rest-engine-core       motore Rust e runtime binding
 crates/rest-engine-python     estensione PyO3
+crates/rest-campaign          campagna operativa (smoke, load, soak), non pubblicata
+campaign                      profili, soglie e report della campagna
 python/plenora_rest           SDK Python pubblico
 python/tests                  test black-box della wheel installata
 contracts/schemas             schemi JSON component-owned
@@ -110,7 +112,31 @@ La baseline breve usa server locali e carichi deterministici. Non sostituisce
 la campagna finale di staging descritta nella roadmap.
 
 Il workflow Verify esegue lo stesso script su pull request, push a main e
-avvio manuale.
+avvio manuale. Nello stesso workflow il job Windows esegue rustfmt, Clippy con
+`-D warnings` e `cargo test --workspace --locked` con lo stesso compilatore
+del gate Docker, costruisce la wheel abi3 win_amd64 con maturin 1.14.1 e la
+prova installata su CPython 3.10-3.14 con scripts/test_wheel.ps1, che esegue
+python/tests da fuori del checkout.
+
+## Campagna operativa
+
+La campagna operativa è separata dal gate: dura da minuti a ore e il suo esito
+dipende dalla macchina. cargo test esegue soltanto i test dell'harness (una
+campagna in-process di pochi secondi e il verificatore su report con
+violazioni). Le fasi si lanciano con:
+
+~~~bash
+scripts/campaign.sh smoke|load|soak [--quick] [--duration-min N] [--seed N]
+~~~
+
+Lo script compila il binario in release con la toolchain dei gate
+(CAMPAIGN_RUST_TOOLCHAIN, default 1.98.1) e scrive
+campaign-out/<data>-<fase>.json e .md. RSS, descriptor e thread si misurano
+solo su Linux; load e soak su altre piattaforme falliscono per misure mancanti
+invece di passare. I report delle esecuzioni reali da conservare vanno in
+campaign/reports. Il workflow Campaign esegue le stesse fasi su runner GitHub.
+Profili, soglie, criteri e lavoro residuo sono descritti nella
+[roadmap](roadmap.md#campagna-come-codice).
 
 ## Versioni delle dipendenze
 
@@ -194,13 +220,23 @@ Lo script:
 - confronta nomi e byte degli artefatti;
 - copia il risultato in dist;
 - genera un SBOM SPDX 2.3;
+- aggiunge la wheel Windows indicata con -ExtraArtifacts (nel workflow
+  Release);
 - genera SHA256SUMS;
 - confronta i digest con adoption-manifest.json.
+
+adoption-manifest.json registra i digest degli artefatti riproducibili
+costruiti nell'immagine Linux fissata per digest (crate e wheel manylinux). La
+wheel Windows è linkata su un runner la cui immagine non è fissata: è in
+SHA256SUMS, nell'SBOM e nelle attestazioni di provenance, ma non ha un digest
+nel manifesto da confrontare.
 
 Gli artefatti prodotti sono:
 
 - plenora-rest-core versione corrente in formato crate;
 - wheel plenora-rest ABI3 manylinux2014 x86_64;
+- wheel plenora-rest ABI3 win_amd64, costruita dal workflow Release su
+  Windows e provata su CPython 3.10-3.14 prima di entrare nel pacchetto;
 - SBOM SPDX JSON;
 - SHA256SUMS.
 

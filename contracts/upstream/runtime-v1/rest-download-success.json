@@ -1,0 +1,25 @@
+{
+  "$schema": "../../schemas/runtime-vector-v1.schema.json",
+  "schema_version": 1,
+  "contract": "plenora-runtime-vector-v1",
+  "kind": "success",
+  "content_type": "application/json",
+  "metadata": {
+    "plenora.message.id": "018f3d84-7b2c-7f00-8000-000000000109",
+    "plenora.capability.operation": "rest.download",
+    "plenora.operation.version": "1",
+    "plenora.output.contract": "plenora-rest-file-transfer-result-v1",
+    "plenora.trace.correlation_id": "018f3d84-7b2c-7f00-8000-000000000009"
+  },
+  "payload": {
+    "artifact": {
+      "ref": "artifact://output/rest-download-vector",
+      "content_type": "application/octet-stream",
+      "byte_count": 17,
+      "checksum": {
+        "algorithm": "sha256",
+        "value": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+      }
+    }
+  }
+}

@@ -26,3 +26,82 @@ jobs:
       - name: Run the self-contained verification gate
         shell: pwsh
         run: ./scripts/verify.ps1
+
+  # The Docker gate proves Linux. Windows is a supported platform too, so the
+  # same Rust gates run natively here, and the abi3 wheel this job builds is
+  # installed and exercised on every supported CPython by `windows-abi3`.
+  windows:
+    name: Windows gate and wheel
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The same compiler as the Linux gate image in Dockerfile.verify.
+      - name: Install Rust 1.97.1 with rustfmt and Clippy
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # 1.98.1
+        with:
+          toolchain: '1.97.1'
+          components: rustfmt, clippy
+
+      - name: Formatting
+        run: cargo +1.97.1 fmt --all -- --check
+
+      - name: Clippy with every warning denied
+        run: cargo +1.97.1 clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Rust tests
+        run: cargo +1.97.1 test --workspace --locked
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+
+      - name: Build the abi3 wheel
+        shell: pwsh
+        env:
+          RUSTUP_TOOLCHAIN: '1.97.1'
+        run: |
+          python -m pip install --disable-pip-version-check --no-cache-dir "maturin==1.14.1"
+          python -m maturin build --release --locked --out dist
+          if ($LASTEXITCODE -ne 0) { throw "maturin build failed" }
+          $wheels = @(Get-ChildItem dist -Filter "plenora_rest-*-cp310-abi3-win_amd64.whl")
+          if ($wheels.Count -ne 1) { throw "expected exactly one cp310-abi3-win_amd64 wheel" }
+
+      - name: Keep the wheel for the CPython matrix
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: wheel-windows-x86_64
+          path: dist/*.whl
+          if-no-files-found: error
+          retention-days: 7
+
+  windows-abi3:
+    name: Windows wheel on CPython ${{ matrix.python }}
+    needs: windows
+    runs-on: windows-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.10', '3.11', '3.12', '3.13', '3.14']
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: wheel-windows-x86_64
+          path: dist
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python }}
+
+      # The installed wheel, not the source tree: the suite runs from a
+      # directory outside the checkout, so `plenora_rest` can only come from
+      # the virtual environment.
+      - name: Install the wheel in a clean environment and run the SDK suite
+        shell: pwsh
+        run: ./scripts/test_wheel.ps1 -WheelDirectory dist

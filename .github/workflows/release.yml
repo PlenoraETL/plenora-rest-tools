@@ -16,9 +16,84 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # The Windows abi3 wheel is built natively and tested installed on every
+  # supported CPython before the release job may use it. It joins the release
+  # bundle, the SBOM, SHA256SUMS and both attestations; it has no committed
+  # digest in adoption-manifest.json because the runner image that links it is
+  # not pinned the way the Linux builder image is.
+  windows-wheel:
+    name: Windows abi3 wheel
+    if: github.repository == 'PlenoraETL/plenora-rest-tools'
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out the tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+
+      - name: Validate tag and component versions
+        shell: bash
+        run: python scripts/release.py validate-version "${GITHUB_REF_NAME}"
+
+      - name: Install Rust 1.97.1
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # 1.98.1
+        with:
+          toolchain: '1.97.1'
+
+      - name: Build the wheel
+        shell: pwsh
+        env:
+          RUSTUP_TOOLCHAIN: '1.97.1'
+        run: |
+          $env:SOURCE_DATE_EPOCH = (python scripts/release.py source-date-epoch).Trim()
+          python -m pip install --disable-pip-version-check --no-cache-dir "maturin==1.14.1"
+          python -m maturin build --release --locked --strip --out windows-wheel
+          if ($LASTEXITCODE -ne 0) { throw "maturin build failed" }
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-wheel-windows-x86_64
+          path: windows-wheel/*.whl
+          if-no-files-found: error
+          retention-days: 7
+
+  windows-abi3:
+    name: Windows wheel on CPython ${{ matrix.python }}
+    needs: windows-wheel
+    runs-on: windows-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: true
+      matrix:
+        python: ['3.10', '3.11', '3.12', '3.13', '3.14']
+    steps:
+      - name: Check out the tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-wheel-windows-x86_64
+          path: windows-wheel
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install the wheel in a clean environment and run the SDK suite
+        shell: pwsh
+        run: ./scripts/test_wheel.ps1 -WheelDirectory windows-wheel
+
   github-release:
     name: Reproducible GitHub release
     if: github.repository == 'PlenoraETL/plenora-rest-tools'
+    needs: windows-abi3
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -39,9 +114,14 @@ jobs:
         shell: pwsh
         run: ./scripts/verify.ps1
 
-      - name: Build twice, compare, and generate the SBOM
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-wheel-windows-x86_64
+          path: ${{ runner.temp }}/windows-wheel
+
+      - name: Build twice, compare, add the Windows wheel, and generate the SBOM
         shell: pwsh
-        run: ./scripts/release.ps1
+        run: ./scripts/release.ps1 -ExtraArtifacts "${{ runner.temp }}/windows-wheel"
 
       - name: Attest build provenance
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2

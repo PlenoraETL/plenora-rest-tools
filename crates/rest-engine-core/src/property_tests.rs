@@ -928,19 +928,53 @@ fn runtime_reference() -> impl Strategy<Value = String> {
         })
 }
 
-/// La regola dichiarata nel contratto runtime: un riferimento è opaco, cioè
-/// non vuoto, al più 512 byte, non un path assoluto (`/`, `\`, unità `X:`),
-/// non un URL `file:` e senza segmenti `..` con nessuno dei due separatori.
+/// La grammatica dei riferimenti opachi dei contratti adottati
+/// (`^[a-z][a-z0-9+.-]{1,31}:(//)?[^\s\\]+$`, mai `file:`, un segmento `.` o
+/// `..`, `%2E`), riscritta byte per byte come oracolo indipendente, con le due
+/// strette dichiarate dal motore: al più 512 byte e un resto non vuoto dopo
+/// `//` (`artifact://` da solo non nomina niente), niente caratteri di
+/// controllo.
 fn reference_is_opaque(reference: &str) -> bool {
     let bytes = reference.as_bytes();
-    !reference.is_empty()
-        && bytes.len() <= 512
-        && !matches!(bytes.first(), Some(b'/' | b'\\'))
-        && bytes.get(1) != Some(&b':')
-        && !reference
-            .get(..5)
-            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("file:"))
-        && !reference.split(['/', '\\']).any(|segment| segment == "..")
+    if bytes.len() < 4 || bytes.len() > 512 {
+        return false;
+    }
+    let Some(colon) = bytes.iter().position(|byte| *byte == b':') else {
+        return false;
+    };
+    let scheme = &bytes[..colon];
+    let scheme_ok = (2..=32).contains(&scheme.len())
+        && scheme[0].is_ascii_lowercase()
+        && scheme[1..].iter().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"+.-".contains(byte)
+        });
+    let rest = &reference[colon + 1..];
+    let body = rest.strip_prefix("//").unwrap_or(rest);
+    let forbidden_character = reference.chars().any(|character| {
+        character == '\\'
+            || character.is_whitespace()
+            || character.is_control()
+            || ('\u{1c}'..='\u{1f}').contains(&character)
+    });
+    let segments_with_delimiter: Vec<&str> = reference.split(['/', ':']).collect();
+    // Un segmento `.` o `..` seguito da `/` o dalla fine: l'ultimo pezzo dopo
+    // un `:` seguito da altro testo non conta, come nella regex.
+    let mut dot_segment = false;
+    let mut offset = 0;
+    for segment in &segments_with_delimiter {
+        let next = reference.as_bytes().get(offset + segment.len());
+        if (*segment == "." || *segment == "..") && matches!(next, None | Some(b'/')) {
+            dot_segment = true;
+        }
+        offset += segment.len() + 1;
+    }
+    scheme_ok
+        && scheme != b"file"
+        && !body.is_empty()
+        && !forbidden_character
+        && !reference.contains("%2E")
+        && !reference.contains("%2e")
+        && !dot_segment
 }
 
 proptest! {

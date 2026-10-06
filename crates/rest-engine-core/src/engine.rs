@@ -29,8 +29,8 @@ use crate::{
     QueryStyle, ResponseConfig, ResponseTransform, SCHEMA_VERSION, capabilities, json_path,
     response_body,
     transport::{
-        DownloadTarget, PreparedBody, PreparedFile, PreparedFileSource, PreparedRequest,
-        PreparedStream, ResponseData, Transport, same_origin,
+        DownloadTarget, EXECUTION_TALLY, ExecutionTally, PreparedBody, PreparedFile,
+        PreparedFileSource, PreparedRequest, PreparedStream, ResponseData, Transport, same_origin,
     },
 };
 
@@ -121,13 +121,8 @@ impl Engine {
     }
 
     pub async fn execute(&self, request: ExecutionRequest) -> ExecutionResult {
-        let control = match ExecutionControl::default()
-            .with_optional_deadline(request.options.deadline.as_deref())
-        {
-            Ok(control) => control,
-            Err(error) => return failed_result(error),
-        };
-        self.execute_with_control(request, control).await
+        self.execute_with_control(request, ExecutionControl::default())
+            .await
     }
 
     pub async fn execute_with_control(
@@ -138,6 +133,10 @@ impl Engine {
         if self.is_closed() {
             return failed_result(EngineError::EngineClosed);
         }
+        let control = match control.with_request_deadline(request.options.deadline.as_deref()) {
+            Ok(control) => control,
+            Err(error) => return failed_result(error),
+        };
         if let Err(error) = validate_execution_configuration(&request) {
             return failed_result(error);
         }
@@ -155,15 +154,19 @@ impl Engine {
         if let Err(error) = self.admit_idempotency(&request) {
             return failed_result(error);
         }
-        if control
-            .deadline
-            .is_some_and(|deadline| deadline <= Instant::now())
-        {
-            return failed_result(EngineError::Timeout);
+        // An expired deadline refuses the operation before anything runs:
+        // nothing was sent, so the failure is in validation with no remote
+        // effect, unlike a deadline that fires during the execution.
+        if control.deadline_expired() {
+            return failed_result(EngineError::DeadlineExpired);
         }
         let active_jobs = Arc::new(Mutex::new(BTreeMap::new()));
         let deadline = control.deadline.map(tokio::time::Instant::from_std);
-        let execution = ACTIVE_ASYNC_JOBS.scope(active_jobs.clone(), self.execute_inner(request));
+        let tally = Arc::new(ExecutionTally::default());
+        let execution = EXECUTION_TALLY.scope(
+            tally.clone(),
+            ACTIVE_ASYNC_JOBS.scope(active_jobs.clone(), self.execute_inner(request)),
+        );
         enum Controlled<T> {
             Finished(T),
             Cancelled,
@@ -186,19 +189,40 @@ impl Engine {
                 }
             }
         };
-        match outcome {
+        let mut result = match outcome {
             Controlled::Finished(result) => result,
             Controlled::Cancelled => {
-                self.cancel_active_jobs(&active_jobs, RemoteCancelTrigger::Cancellation)
+                // The remote cancellation is a request of this execution too.
+                EXECUTION_TALLY
+                    .scope(
+                        tally.clone(),
+                        self.cancel_active_jobs(&active_jobs, RemoteCancelTrigger::Cancellation),
+                    )
                     .await;
                 failed_result_with_recoveries(EngineError::Cancelled, recoveries_from(&active_jobs))
             }
             Controlled::Deadline => {
-                self.cancel_active_jobs(&active_jobs, RemoteCancelTrigger::Deadline)
+                // The remote cancellation is a request of this execution too.
+                EXECUTION_TALLY
+                    .scope(
+                        tally.clone(),
+                        self.cancel_active_jobs(&active_jobs, RemoteCancelTrigger::Deadline),
+                    )
                     .await;
                 failed_result_with_recoveries(EngineError::Timeout, recoveries_from(&active_jobs))
             }
-        }
+        };
+        // Never fewer requests or retries than were actually sent: the
+        // response-based counts miss the attempts of a failure.
+        result.metrics.requests = result
+            .metrics
+            .requests
+            .max(tally.requests.load(Ordering::Relaxed));
+        result.metrics.retries = result
+            .metrics
+            .retries
+            .max(tally.retries.load(Ordering::Relaxed));
+        result
     }
 
     pub fn capabilities(&self) -> CapabilityDocument {
@@ -445,9 +469,9 @@ impl Engine {
                 error.column(),
             ))
         })?;
-        let control = ExecutionControl::new(cancellation)
-            .with_optional_deadline(request.options.deadline.as_deref())?;
-        let result = self.execute_with_control(request, control).await;
+        let result = self
+            .execute_with_control(request, ExecutionControl::new(cancellation))
+            .await;
         serde_json::to_string(&result)
             .map_err(|_| EngineError::Runtime(ErrorDetail::from("result could not be serialized")))
     }

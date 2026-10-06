@@ -1,0 +1,155 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.plenora.dev/error-v1.schema.json",
+  "title": "Plenora typed error v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "category",
+    "phase",
+    "remote_effect",
+    "retry",
+    "message"
+  ],
+  "properties": {
+    "category": {
+      "type": "string",
+      "enum": [
+        "invalid_plan",
+        "invalid_configuration",
+        "schema",
+        "data_mapping",
+        "crs",
+        "unsupported",
+        "not_found",
+        "conflict",
+        "concurrent_modification",
+        "authentication",
+        "authorization",
+        "timeout",
+        "cancelled",
+        "resource_limit",
+        "io",
+        "protocol",
+        "transient",
+        "execution",
+        "internal"
+      ]
+    },
+    "phase": {
+      "type": "string",
+      "enum": [
+        "validate",
+        "connect",
+        "probe",
+        "prepare",
+        "read",
+        "write",
+        "finalize",
+        "commit",
+        "rollback",
+        "cleanup"
+      ]
+    },
+    "remote_effect": {
+      "type": "string",
+      "enum": ["none", "rolled_back", "partial", "committed", "unknown"]
+    },
+    "retry": {
+      "$ref": "#/$defs/retry"
+    },
+    "code": {
+      "type": "string",
+      "pattern": "^[A-Z][A-Z0-9_]{1,63}$"
+    },
+    "provider": {
+      "type": ["string", "null"],
+      "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+    },
+    "execution_id": {
+      "type": ["string", "null"],
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "message": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048
+    },
+    "details": {
+      "type": "object"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {"remote_effect": {"const": "unknown"}},
+        "required": ["remote_effect"]
+      },
+      "then": {
+        "properties": {
+          "retry": {
+            "oneOf": [
+              {"$ref": "#/$defs/retryNever"},
+              {"$ref": "#/$defs/retryQuarantine"},
+              {"$ref": "#/$defs/retryRecovery"}
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "retryNever": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {"kind": {"const": "never"}}
+    },
+    "retryQuarantine": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {"kind": {"const": "quarantine"}}
+    },
+    "retryRecovery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {"kind": {"const": "requires_recovery"}}
+    },
+    "retry": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind"],
+          "properties": {
+            "kind": {
+              "enum": [
+                "never",
+                "quarantine",
+                "safe",
+                "requires_idempotency_key",
+                "requires_recovery"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "delay_ms"],
+          "properties": {
+            "kind": {"const": "after"},
+            "delay_ms": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 86400000
+            }
+          }
+        }
+      ]
+    }
+  }
+}

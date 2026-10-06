@@ -1,0 +1,95 @@
+{
+  "status": "proposed, not normative: plenora-contracts pull request 21 (draft/runtime-binding-chiarimenti), not in main",
+  "repository": "https://github.com/PlenoraETL/plenora-contracts.git",
+  "revision": "4890d27c120b3819bbadf6560ba9e730dfcb57aa",
+  "files": {
+    "runtime-probe-v1.schema.json": {
+      "upstream": "schemas/runtime-probe-v1.schema.json",
+      "sha256": "5188813894c59c67c5c9b1aab551c6c783e13b021e5a4896c033d1636e705c47"
+    },
+    "runtime-probes-v1/data-run-input-contract-malformed.json": {
+      "upstream": "vectors/runtime-probes-v1/data-run-input-contract-malformed.json",
+      "sha256": "67723dae7b7e3306354a9db7548b8ec282d47524a9683632f81a93cd1f5e9115"
+    },
+    "runtime-probes-v1/data-run-input-contract-mismatch.json": {
+      "upstream": "vectors/runtime-probes-v1/data-run-input-contract-mismatch.json",
+      "sha256": "6df1dd05888fd98e73ee41620089e2df380c4e79fa072193823cbdd3127731a2"
+    },
+    "runtime-probes-v1/database-read-capability-name-other.json": {
+      "upstream": "vectors/runtime-probes-v1/database-read-capability-name-other.json",
+      "sha256": "3532bb55733be7eed228d8fc3870d44a30dfde4b21df9f441565f14104169ad3"
+    },
+    "runtime-probes-v1/database-read-correlation-uppercase.json": {
+      "upstream": "vectors/runtime-probes-v1/database-read-correlation-uppercase.json",
+      "sha256": "f4b6e801ed2b44a0de9cfc425f9f6579b49e2d01558bde8f5d90d26d3bcbe86c"
+    },
+    "runtime-probes-v1/io-read-binding-version-leading-zero.json": {
+      "upstream": "vectors/runtime-probes-v1/io-read-binding-version-leading-zero.json",
+      "sha256": "8eb5f77415c630ea070243b60f81d8b01c04a3a0d32975f66e0cc7f46373627c"
+    },
+    "runtime-probes-v1/io-read-binding-version-number.json": {
+      "upstream": "vectors/runtime-probes-v1/io-read-binding-version-number.json",
+      "sha256": "1f6f692f550a3293750cdc088bbd30172109347f2e584bb47e3b1b56019ed8c2"
+    },
+    "runtime-probes-v1/io-read-binding-version-unsupported.json": {
+      "upstream": "vectors/runtime-probes-v1/io-read-binding-version-unsupported.json",
+      "sha256": "f89c987df5e706616a9de33a45941fdb5e3c967b062b5f92a5d4c6d8232e6d42"
+    },
+    "runtime-probes-v1/io-read-deadline-expired.json": {
+      "upstream": "vectors/runtime-probes-v1/io-read-deadline-expired.json",
+      "sha256": "e7fca723678ec7c0ac08888f37c64508f6231de4599201575151a1df0099fd32"
+    },
+    "runtime-probes-v1/io-read-deadline-negative-zero.json": {
+      "upstream": "vectors/runtime-probes-v1/io-read-deadline-negative-zero.json",
+      "sha256": "57e579e151c99c19a2a3de662233561388e36929be058a162d3a269d0631d8ec"
+    },
+    "runtime-probes-v1/io-read-deadline-offset.json": {
+      "upstream": "vectors/runtime-probes-v1/io-read-deadline-offset.json",
+      "sha256": "e72e2842d23e5f0337f70a3d280291c4f45c769a2dd22975ea3a7ef0ef29feb1"
+    },
+    "runtime-probes-v1/io-read-message-id-braces.json": {
+      "upstream": "vectors/runtime-probes-v1/io-read-message-id-braces.json",
+      "sha256": "06f53ccf50de9826207594102cbdf1a25a73f8a959e3d4248fe6c8e4b586c394"
+    },
+    "runtime-probes-v1/io-read-message-id-missing.json": {
+      "upstream": "vectors/runtime-probes-v1/io-read-message-id-missing.json",
+      "sha256": "d7105072c272c3a96b3a5dee584fb2ef95a36f8d674155f98e50eeb0a9ed4b8d"
+    },
+    "runtime-probes-v1/io-read-operation-version-leading-zero.json": {
+      "upstream": "vectors/runtime-probes-v1/io-read-operation-version-leading-zero.json",
+      "sha256": "647d373b5bb60f840d2fe5e9016e4ba17c7047a1392cfee395b52e618b41efd5"
+    },
+    "runtime-probes-v1/io-read-operation-version-missing.json": {
+      "upstream": "vectors/runtime-probes-v1/io-read-operation-version-missing.json",
+      "sha256": "a0438ca43545719ba800c816e6028c20833e41f75a0752987b6a6a2fb1f17e7f"
+    },
+    "runtime-probes-v1/io-read-operation-version-number.json": {
+      "upstream": "vectors/runtime-probes-v1/io-read-operation-version-number.json",
+      "sha256": "bf090d9e77b4470543552d4a2ee816e860e8015c614a45c180bf6543b01afb19"
+    },
+    "runtime-probes-v1/io-read-operation-version-unknown.json": {
+      "upstream": "vectors/runtime-probes-v1/io-read-operation-version-unknown.json",
+      "sha256": "35b98de94a3f4ee0125dd55d71d773b65c1f011a2a3ff011bf8113592771b2cc"
+    },
+    "runtime-probes-v1/rest-upload-idempotency-key-empty.json": {
+      "upstream": "vectors/runtime-probes-v1/rest-upload-idempotency-key-empty.json",
+      "sha256": "7c45f463cb43c6bd103136f05088c5bcad621ce5f0f8ffaea7b5e1d20c50695a"
+    },
+    "runtime-probes-v1/rest-upload-idempotency-key-null.json": {
+      "upstream": "vectors/runtime-probes-v1/rest-upload-idempotency-key-null.json",
+      "sha256": "f82d67d9bac0d7f7c00277596f6311fd6a3b4fe731c56f897b4c0681642a0571"
+    },
+    "runtime-probes-v1/storage-get-idempotency-key-unsupported.json": {
+      "upstream": "vectors/runtime-probes-v1/storage-get-idempotency-key-unsupported.json",
+      "sha256": "41e7dafb43c76183b167f688bdf43bf1742f3ba4d8a5332d203d7a5ebeeca035"
+    },
+    "runtime-probes-v1/storage-get-operation-malformed.json": {
+      "upstream": "vectors/runtime-probes-v1/storage-get-operation-malformed.json",
+      "sha256": "e40f680345cdffd03f5011a11d6e989503c3cab4ecfc06fdec24e91279e6ae68"
+    },
+    "runtime-probes-v1/storage-get-operation-unknown.json": {
+      "upstream": "vectors/runtime-probes-v1/storage-get-operation-unknown.json",
+      "sha256": "6ce399132fe3984304f48aa85f710c9442c692b759a5becfae85d9ee62abb1c9"
+    }
+  }
+}

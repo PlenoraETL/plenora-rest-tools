@@ -69,8 +69,9 @@ Redis, RabbitMQ, SQS o altri broker.
 
 ## SDK Python
 
-Lo SDK supportato è sincrono e richiede CPython da 3.10 a 3.14. La stessa wheel
-ABI3 py310 viene verificata su tutte queste versioni.
+Lo SDK supportato è sincrono e richiede CPython da 3.10 a 3.14. Per ogni
+piattaforma esiste una sola wheel ABI3 py310 (manylinux2014 x86_64 e Windows
+x86_64), verificata installata su tutte queste versioni.
 
 Installazione dalla working copy:
 
@@ -149,14 +150,14 @@ risolve artifact_source e artifact_sink tramite risorse autorizzate dall'host.
 
 | Area | Supporto dichiarato |
 | --- | --- |
-| Sistema | GNU/Linux manylinux2014, glibc 2.17 o successiva |
+| Sistema | GNU/Linux manylinux2014 (glibc 2.17 o successiva); Windows x86_64 |
 | Architettura | x86_64 |
-| Rust | MSRV 1.85.1, target x86_64-unknown-linux-gnu |
-| Python | CPython 3.10-3.14, ABI3 py310, API sincrona |
+| Rust | MSRV 1.85.1, target x86_64-unknown-linux-gnu e x86_64-pc-windows-msvc |
+| Python | CPython 3.10-3.14, ABI3 py310, API sincrona, wheel Linux e Windows |
 | Distribuzione | crate e wheel allegati alla GitHub Release |
 
-Windows, macOS, ARM, musl, PyPy, CPython 3.15 e uno SDK Python asincrono non
-fanno parte della matrice supportata attuale.
+macOS, ARM, musl, PyPy, CPython 3.15 e uno SDK Python asincrono non fanno
+parte della matrice supportata attuale.
 
 La base funzionale e i gate di qualità sono consolidati. Il go-live richiede
 ancora la campagna operativa in staging, una release candidata e
@@ -180,10 +181,16 @@ pwsh ./scripts/verify.ps1
 ~~~
 
 Il comando valida contratti e compatibilità v1, MSRV, formato, Clippy, test
-Rust, wheel installata e matrice ABI3 CPython 3.10-3.14. Le release aggiungono
-doppia build riproducibile, checksum, SBOM e attestazioni. I test Rust
-comprendono i test di proprietà dei parser dell'input remoto; i target di fuzz
-degli stessi parser stanno in [fuzz/](fuzz/README.md), con un workflow proprio.
+Rust (compresi i test di proprietà dei parser dell'input remoto), wheel
+installata e matrice ABI3 CPython 3.10-3.14. Il workflow Verify esegue anche,
+su Windows, formato, Clippy, test Rust e la wheel win_amd64 installata su
+CPython 3.10-3.14. Le release aggiungono doppia build riproducibile, checksum,
+SBOM e attestazioni. I target di fuzz degli stessi parser stanno in
+[fuzz/](fuzz/README.md), con un workflow proprio.
+
+La campagna operativa (smoke, carico con iniezione di guasti, soak) è separata
+dal gate e si lancia con `scripts/campaign.sh` o con il workflow Campaign; vedi
+[Campagna come codice](docs/roadmap.md#campagna-come-codice).
 
 ## Licenza
 
