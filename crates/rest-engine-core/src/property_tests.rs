@@ -998,3 +998,118 @@ fn property_configuration_is_deterministic() {
     assert_eq!(first.rng_seed, RngSeed::Fixed(0x5EED_2026));
     assert!(first.failure_persistence.is_none());
 }
+
+// ---------------------------------------------------------------------------
+// Limiti numerici esatti: intervallo del rate, scala e backoff.
+//
+// L'oracolo costruisce il fattore come frazione intera nota (a / 2^b oppure
+// a · 2^c, esattamente rappresentabile in f64) e calcola il risultato in
+// aritmetica intera a 128 bit, senza passare dalla scomposizione dyadic del
+// codice verificato.
+// ---------------------------------------------------------------------------
+
+/// Un fattore >= 1 con la sua frazione esatta: `numeratore / 2^b` o
+/// `numeratore · 2^c`.
+#[derive(Clone, Debug)]
+enum Fattore {
+    Frazione { a: u64, b: u32 },
+    Multiplo { a: u64, c: u32 },
+}
+
+impl Fattore {
+    fn valore(&self) -> f64 {
+        match *self {
+            #[allow(clippy::cast_precision_loss)]
+            Self::Frazione { a, b } => a as f64 / 2_f64.powi(i32::try_from(b).unwrap()),
+            #[allow(clippy::cast_precision_loss)]
+            Self::Multiplo { a, c } => a as f64 * 2_f64.powi(i32::try_from(c).unwrap()),
+        }
+    }
+
+    /// `min(cap, floor(value · fattore))` in aritmetica intera.
+    fn scala(&self, value: u64, cap: u64) -> u64 {
+        if value == 0 {
+            return 0;
+        }
+        let esatto = match *self {
+            Self::Frazione { a, b } => Some((u128::from(value) * u128::from(a)) >> b),
+            Self::Multiplo { a, c } => (u128::from(value) * u128::from(a))
+                .checked_mul(1_u128.checked_shl(c).unwrap_or(0))
+                .filter(|_| c < 128),
+        };
+        esatto.map_or(cap, |valore| {
+            u64::try_from(valore).map_or(cap, |v| v.min(cap))
+        })
+    }
+}
+
+fn fattore() -> impl Strategy<Value = Fattore> {
+    prop_oneof![
+        (0_u32..=30, 0_u64..=1_000_000).prop_map(|(b, extra)| Fattore::Frazione {
+            a: (1_u64 << b) + extra,
+            b
+        }),
+        (1_u64..=(1 << 20), 0_u32..=1000).prop_map(|(a, c)| Fattore::Multiplo { a, c }),
+    ]
+}
+
+proptest! {
+    #![proptest_config(config(1024))]
+
+    #[test]
+    fn scale_floor_is_the_exact_floor_or_the_cap(
+        value in prop_oneof![Just(0_u64), 1_u64..=1000, any::<u64>()],
+        fattore in fattore(),
+        cap in prop_oneof![Just(30_000_u64), any::<u64>()],
+    ) {
+        prop_assume!(fattore.valore().is_finite());
+        let atteso = fattore.scala(value, cap);
+        prop_assert_eq!(crate::exact::scale_floor(value, fattore.valore(), cap), Some(atteso));
+    }
+
+    #[test]
+    fn backoff_follows_the_exact_recurrence(
+        base in prop_oneof![Just(0_u64), 1_u64..=10_000, any::<u64>()],
+        fattore in fattore(),
+        max in prop_oneof![Just(30_000_u64), any::<u64>()],
+        passi in 1_usize..=40,
+    ) {
+        prop_assume!(fattore.valore().is_finite());
+        let mut backoff = crate::exact::Backoff::new(base, fattore.valore(), max).unwrap();
+        let mut atteso = base.min(max);
+        for _ in 0..passi {
+            prop_assert_eq!(backoff.next_ms(), atteso);
+            prop_assert!(atteso <= max);
+            atteso = fattore.scala(atteso, max);
+        }
+        if base == 0 {
+            prop_assert_eq!(backoff.next_ms(), 0);
+        }
+    }
+
+    #[test]
+    fn rate_interval_is_the_exact_ceiling_or_refused(
+        fattore in prop_oneof![
+            fattore(),
+            // Rate sotto 1 al secondo, fino all'intervallo non rappresentabile.
+            (1_u64..=(1 << 20), 0_u32..=80).prop_map(|(a, b)| Fattore::Frazione { a, b }),
+        ]
+    ) {
+        let rate = fattore.valore();
+        prop_assume!(rate.is_finite());
+        // intervallo = 10^9 / rate in nanosecondi, arrotondato per eccesso.
+        let (numeratore, denominatore) = match fattore {
+            Fattore::Frazione { a, b } => (1_000_000_000_u128 << b, u128::from(a)),
+            Fattore::Multiplo { a, c } => match 1_u128.checked_shl(c).filter(|_| c < 100) {
+                Some(potenza) => (1_000_000_000_u128, u128::from(a) * potenza),
+                None => (0, 1),
+            },
+        };
+        let atteso = if numeratore < denominatore {
+            None
+        } else {
+            u64::try_from(numeratore.div_ceil(denominatore)).ok().map(Duration::from_nanos)
+        };
+        prop_assert_eq!(crate::exact::rate_interval(rate), atteso);
+    }
+}

@@ -1842,8 +1842,17 @@ impl Engine {
                     )));
                 }
             }
-            interval_ms = ((interval_ms as f64 * polling.interval_backoff.max(1.0))
-                .min(polling.max_interval_ms as f64)) as u64;
+            // Exact: the factor is validated (finite, at least one) before any
+            // request; a product above max_interval_ms is max_interval_ms
+            // because the true value exceeds it.
+            interval_ms = crate::exact::scale_floor(
+                interval_ms,
+                polling.interval_backoff,
+                polling.max_interval_ms,
+            )
+            .ok_or_else(|| {
+                EngineError::Runtime(ErrorDetail::from("polling interval backoff is invalid"))
+            })?;
         }
 
         self.cancel_active_job(&active_key, RemoteCancelTrigger::PollTimeout)
@@ -4517,11 +4526,16 @@ fn validate_engine_configuration(config: &EngineConfig) -> Result<(), EngineErro
     if config.request_timeout_ms == 0 {
         return invalid("engine request_timeout_ms must be greater than zero");
     }
-    if config.max_concurrent_requests == 0 {
-        return invalid("engine max_concurrent_requests must be greater than zero");
+    if config.max_concurrent_requests == 0
+        || config.max_concurrent_requests > tokio::sync::Semaphore::MAX_PERMITS
+    {
+        return invalid("engine max_concurrent_requests is zero or above the supported maximum");
     }
-    if config.requests_per_second == Some(0) {
-        return invalid("engine requests_per_second must be greater than zero");
+    if config
+        .requests_per_second
+        .is_some_and(|rate| crate::exact::rate_interval(f64::from(rate)).is_none())
+    {
+        return invalid("engine requests_per_second must be between 1 and 10^9");
     }
     Ok(())
 }
@@ -4535,9 +4549,11 @@ fn validate_numeric_settings(connection: &ConnectionConfig) -> Result<(), Engine
     let invalid = |reason: &'static str| Err(EngineError::InvalidInput(ErrorDetail::from(reason)));
     if connection
         .requests_per_second
-        .is_some_and(|rate| !rate.is_finite() || rate <= 0.0)
+        .is_some_and(|rate| crate::exact::rate_interval(rate).is_none())
     {
-        return invalid("requests_per_second must be a finite number greater than zero");
+        return invalid(
+            "requests_per_second must give an interval between 1 ns and the longest duration",
+        );
     }
     if connection.request.timeout_ms == Some(0) {
         return invalid("request timeout_ms must be greater than zero");

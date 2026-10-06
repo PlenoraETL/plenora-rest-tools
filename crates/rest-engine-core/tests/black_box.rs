@@ -5407,3 +5407,125 @@ async fn a_retried_download_whose_staging_cannot_be_reopened_keeps_the_remote_ef
     assert_eq!(error["retry"]["kind"], "requires_recovery");
     let _ = fs::remove_dir_all(directory).await;
 }
+
+#[tokio::test]
+async fn numeric_limits_without_an_exact_value_are_refused_before_the_network() {
+    // Each value used to be clamped or saturated: a rate above 10^9 per second
+    // gave a zero interval, a subnormal rate an interval of centuries, and a
+    // concurrency above the semaphore maximum panicked inside Engine::new.
+    // Port 9 is never contacted: validation fails first.
+    let base: ExecutionRequest = serde_json::from_value(json!({
+        "schema_version": 1,
+        "operation": "test",
+        "connection": {"url": "http://127.0.0.1:9/", "method": "GET"}
+    }))
+    .unwrap();
+
+    for rate in [2e9, 1e9 + 1.0, f64::MAX, f64::MIN_POSITIVE, 5e-324, 5e-11] {
+        let mut request = base.clone();
+        request.connection.requests_per_second = Some(rate);
+        let result = serde_json::to_value(local_engine().execute(request).await).unwrap();
+        assert_eq!(
+            result["errors"][0]["code"], "INVALID_INPUT",
+            "{rate}: {result}"
+        );
+        assert_eq!(result["metrics"]["requests"], 0, "{rate}");
+    }
+
+    for config in [
+        EngineConfig {
+            max_concurrent_requests: usize::MAX,
+            ..EngineConfig::default()
+        },
+        EngineConfig {
+            max_concurrent_requests: tokio::sync::Semaphore::MAX_PERMITS + 1,
+            ..EngineConfig::default()
+        },
+        EngineConfig {
+            requests_per_second: Some(1_000_000_001),
+            ..EngineConfig::default()
+        },
+        EngineConfig {
+            requests_per_second: Some(u32::MAX),
+            ..EngineConfig::default()
+        },
+    ] {
+        // Engine::new stays infallible: it must not panic, and every
+        // execution refuses the setting.
+        let engine = Engine::new(EngineConfig {
+            allow_private_networks: true,
+            ..config
+        });
+        let result = serde_json::to_value(engine.execute(base.clone()).await).unwrap();
+        assert_eq!(result["errors"][0]["code"], "INVALID_INPUT", "{result}");
+        assert_eq!(result["metrics"]["requests"], 0);
+    }
+
+    // The boundaries themselves are accepted.
+    for config in [
+        EngineConfig {
+            max_concurrent_requests: tokio::sync::Semaphore::MAX_PERMITS,
+            ..EngineConfig::default()
+        },
+        EngineConfig {
+            requests_per_second: Some(1_000_000_000),
+            ..EngineConfig::default()
+        },
+    ] {
+        let (url, server) = server(vec![(200, r#"{"ok":true}"#)]).await;
+        let engine = Engine::new(EngineConfig {
+            allow_private_networks: true,
+            ..config
+        });
+        let result = execute(
+            &engine,
+            json!({
+                "schema_version": 1,
+                "operation": "test",
+                "connection": {"url": url, "method": "GET", "requests_per_second": 1e9}
+            }),
+        )
+        .await;
+        server.await.unwrap();
+        assert_eq!(result["status"], "success", "{result}");
+    }
+}
+
+#[tokio::test]
+async fn a_zero_backoff_base_never_waits_whatever_the_factor() {
+    // base 0 with factor f64::MAX: the old formula computed 0 · inf = NaN on
+    // the second retry and waited max_backoff_ms. The cap here is ten minutes,
+    // so the old behaviour cannot finish inside the guard below; the exact
+    // backoff waits zero on every retry.
+    let (url, server) = server(vec![
+        (503, r#"{"error":"busy"}"#),
+        (503, r#"{"error":"busy"}"#),
+        (503, r#"{"error":"busy"}"#),
+        (200, r#"{"ok":true}"#),
+    ])
+    .await;
+    let request = json!({
+        "schema_version": 1,
+        "operation": "test",
+        "connection": {
+            "url": url,
+            "method": "GET",
+            "retry": {
+                "max_attempts": 4,
+                "backoff_base_ms": 0,
+                "backoff_factor": f64::MAX,
+                "max_backoff_ms": 600_000,
+                "retry_on_status": [503]
+            }
+        }
+    });
+
+    let result = timeout(Duration::from_secs(120), execute(&local_engine(), request))
+        .await
+        .expect("a zero backoff base must not wait max_backoff_ms");
+    server.await.unwrap();
+
+    assert_eq!(result["status"], "success", "{result}");
+    assert_eq!(result["metrics"]["requests"], 4);
+    assert_eq!(result["metrics"]["retries"], 3);
+}
