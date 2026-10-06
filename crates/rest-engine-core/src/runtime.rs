@@ -137,27 +137,37 @@ where
                 error.column(),
             ))
         })?;
+        let not_an_envelope = || {
+            EngineError::InvalidInput(ErrorDetail::from(
+                "request is not valid JSON for the contract",
+            ))
+        };
         let response = match non_string_metadata(&parsed) {
-            Some(strings) => error_message(
-                &RuntimeMessage {
-                    schema_version: RUNTIME_BINDING_VERSION,
-                    contract: RUNTIME_INTERFACE_CONTRACT.to_owned(),
-                    kind: RuntimeMessageKind::Request,
-                    content_type: JSON_CONTENT_TYPE.to_owned(),
-                    metadata: strings,
-                    payload: Value::Null,
-                },
-                refusal(
-                    ErrorCategory::Protocol,
-                    "runtime metadata values must be strings",
-                ),
-            ),
+            // The document is an envelope in every other respect: answer it
+            // with a protocol refusal that carries its string metadata. A
+            // document that would not be an envelope even with those values
+            // removed is not answered (`Err`), as before.
+            Some(strings) => {
+                let mut with_strings = parsed;
+                with_strings["metadata"] = Value::Object(
+                    strings
+                        .iter()
+                        .map(|(key, value)| (key.clone(), Value::String(value.clone())))
+                        .collect(),
+                );
+                let envelope = serde_json::from_value::<RuntimeMessage>(with_strings)
+                    .map_err(|_| not_an_envelope())?;
+                error_message(
+                    &envelope,
+                    refusal(
+                        ErrorCategory::Protocol,
+                        "runtime metadata values must be strings",
+                    ),
+                )
+            }
             None => {
-                let request = serde_json::from_value::<RuntimeMessage>(parsed).map_err(|_| {
-                    EngineError::InvalidInput(ErrorDetail::from(
-                        "request is not valid JSON for the contract",
-                    ))
-                })?;
+                let request = serde_json::from_value::<RuntimeMessage>(parsed)
+                    .map_err(|_| not_an_envelope())?;
                 self.invoke(request, cancellation).await
             }
         };
