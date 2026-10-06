@@ -163,9 +163,8 @@ fuzz_target!(|dati: &[u8]| {
     if !scadenza {
         let senza_id = |message: &RuntimeMessage| {
             let mut metadata = message.metadata.clone();
-            for chiave in id_casuali {
-                metadata.remove(*chiave);
-            }
+            // L'identificativo del risultato è nuovo a ogni invocazione.
+            metadata.remove("plenora.message.id");
             (metadata, message.payload.clone())
         };
         assert_eq!(
@@ -196,6 +195,7 @@ fn operazione_canonica(valore: &str) -> bool {
         && segmenti.iter().all(|segmento| {
             let mut byte = segmento.bytes();
             byte.next().is_some_and(|primo| primo.is_ascii_lowercase())
-                && byte.all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+                && byte
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
         })
 }
