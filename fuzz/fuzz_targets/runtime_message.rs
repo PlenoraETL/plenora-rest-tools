@@ -71,8 +71,27 @@ fuzz_target!(|dati: &[u8]| {
 
     let primo = invoca(&testo);
     let Some(richiesta) = richiesta else {
-        let Err(error) = primo else {
-            panic!("un testo che non è un RuntimeMessage è stato accettato");
+        let error = match primo {
+            Err(error) => error,
+            // Un envelope che lo sarebbe se non avesse un metadato non
+            // stringa riceve un rifiuto protocol (RT-017), mai un'esecuzione.
+            Ok(risposta) => {
+                let metadati_non_stringa = serde_json::from_str::<serde_json::Value>(&testo)
+                    .ok()
+                    .and_then(|valore| valore.get("metadata").cloned())
+                    .and_then(|metadati| metadati.as_object().cloned())
+                    .is_some_and(|metadati| metadati.values().any(|valore| !valore.is_string()));
+                assert!(
+                    metadati_non_stringa,
+                    "un testo che non è un RuntimeMessage è stato accettato"
+                );
+                let message = serde_json::from_str::<RuntimeMessage>(&risposta)
+                    .expect("la risposta è un RuntimeMessage");
+                assert_eq!(message.payload["category"], "protocol");
+                assert_eq!(message.payload["phase"], "validate");
+                assert_eq!(message.payload["remote_effect"], "none");
+                return;
+            }
         };
         let EngineError::InvalidInput(detail) = &error else {
             panic!("errore inatteso: {}", error.payload().code);
