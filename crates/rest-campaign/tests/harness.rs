@@ -425,7 +425,15 @@ fn the_verifier_fails_on_every_injected_violation() {
 #[test]
 fn shipped_configuration_is_valid_and_motivated() {
     let limits = limits();
-    assert!(limits.approval.contains("da approvare"));
+    // The report copies the approval state: it must say who approved what,
+    // and that the thresholds are a loopback regression gate, not the limits
+    // of the Plenora environment.
+    assert!(
+        limits.approval.starts_with("approvate"),
+        "{}",
+        limits.approval
+    );
+    assert!(limits.approval.contains("loopback"), "{}", limits.approval);
     let profiles = config::load_profiles(&repository_file("campaign/profiles.json")).unwrap();
     for phase in [Phase::Smoke, Phase::Load, Phase::Soak] {
         let profile = profiles.phase(phase);
