@@ -22,8 +22,8 @@ ciascuna con il motivo.
 | `max_request_bytes` | 32 MiB | body costruito in memoria (JSON, form, multipart, raw) | `REQUEST_TOO_LARGE` prima dell'invio, `details.limit_bytes` |
 | `max_response_bytes` | 32 MiB | body di risposta letto in memoria | `RESPONSE_TOO_LARGE`, la lettura si interrompe al limite |
 | `max_file_transfer_bytes` | 1 GiB | upload e download in streaming (abbassabile per richiesta con `input.file.max_bytes`) | `FILE_TOO_LARGE`; un download non pubblica mai il file di staging incompleto |
-| `max_concurrent_requests` | 64 | richieste HTTP in volo nello stesso Engine | le richieste in più **aspettano** un permesso (entro deadline e cancellazione); 0 vale come 1 |
-| `requests_per_second` | nessuno | ritmo delle richieste (sovrascrivibile per connessione) | le richieste aspettano; l'attesa è in `metrics.rate_limit_wait_ms` |
+| `max_concurrent_requests` | 64 | richieste HTTP in volo nello stesso Engine | le richieste in più **aspettano** un permesso (entro deadline e cancellazione); 0 fa fallire ogni esecuzione con `INVALID_INPUT` |
+| `requests_per_second` | nessuno | ritmo delle richieste (sovrascrivibile per connessione) | le richieste aspettano; l'attesa è in `metrics.rate_limit_wait_ms`; 0 nell'Engine, o un valore della connessione non finito o non positivo, è `INVALID_INPUT` |
 | `max_pooled_origins` | 128 | client HTTP tenuti nel pool, uno per origin e configurazione | il meno recente viene chiuso; la richiesta successiva verso quell'origin ne crea uno nuovo |
 | `pool_max_idle_per_host` | 50 | connessioni inattive per host | chiuse dal pool |
 | `pool_idle_timeout_ms` | 90 000 | vita di una connessione inattiva | chiusa dal pool |
@@ -37,12 +37,14 @@ ciascuna con il motivo.
 | Campo | Default | Oltre il limite |
 | --- | --- | --- |
 | `request.max_redirects` | 5 (redirect spenti per default) | `INVALID_RESPONSE`, nessun redirect seguito oltre il limite |
-| `retry.max_attempts` | 1 | si restituisce l'ultimo esito; i tentativi non superano mai il limite |
+| `retry.max_attempts` | 1 | si restituisce l'ultimo esito; i tentativi non superano mai il limite; 0 è `INVALID_INPUT` |
 | `retry.max_backoff_ms` | 30 000 | l'attesa calcolata viene limitata a questo valore |
+| `retry.backoff_factor` | 2 | non finito o minore di 1: `INVALID_INPUT` |
+| `request.timeout_ms` | timeout dell'Engine | 0 è `INVALID_INPUT`; lo stesso per `connect_timeout_ms` e `request_timeout_ms` a 0 nell'Engine, a ogni esecuzione |
 | `retry.max_retry_after_ms` | 300 000 | un `Retry-After` più lungo, anche oltre il rappresentabile, **non** viene accorciato: niente nuovo tentativo, l'operazione fallisce con lo status HTTP ricevuto |
 | `pagination.page_size` | 100 | 0 è `INVALID_INPUT` |
-| `pagination.max_rows` | 10 000 | vedi [Paginazione](#paginazione) |
-| `pagination.max_pages` (cursor, link, header_link) | 100 | vedi [Paginazione](#paginazione) |
+| `pagination.max_rows` | 10 000 | vedi [Paginazione](#paginazione); 0 è `INVALID_INPUT` |
+| `pagination.max_pages` (cursor, link, header_link) | 100 | vedi [Paginazione](#paginazione); 0 è `INVALID_INPUT` |
 | `polling.max_attempts` | 60 | `POLLING_TIMEOUT` con l'handle di recovery del job; 0 è `INVALID_INPUT` |
 | `polling.max_wait_ms` | nessuno | `POLLING_TIMEOUT`; 0 è `INVALID_INPUT` |
 | `polling.max_interval_ms` | 30 000 | l'intervallo con backoff non lo supera |

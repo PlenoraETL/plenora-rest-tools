@@ -27,12 +27,13 @@ pub type JsonObject = Map<String, Value>;
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct EngineConfig {
-    /// Timeout for establishing a TCP/TLS connection, in milliseconds.
-    /// Default 5 000.
+    /// Timeout for establishing a TCP/TLS connection, in milliseconds; every
+    /// execution fails with `INVALID_INPUT` when it is zero. Default 5 000.
     pub connect_timeout_ms: u64,
     /// Timeout of one HTTP request, in milliseconds, used when
     /// `connection.request.timeout_ms` is not set; it also bounds OAuth and
-    /// ArcGIS token requests. Expiry is a retryable `TIMEOUT`. Default 30 000.
+    /// ArcGIS token requests. Expiry is a retryable `TIMEOUT`; every execution
+    /// fails with `INVALID_INPUT` when it is zero. Default 30 000.
     pub request_timeout_ms: u64,
     /// Largest request body the engine builds, in bytes, for JSON, form,
     /// multipart, and raw bodies (file uploads are bounded by
@@ -60,12 +61,14 @@ pub struct EngineConfig {
     /// Default 90 000.
     pub pool_idle_timeout_ms: u64,
     /// HTTP requests in flight at once across the whole engine; further
-    /// requests wait for a slot. Zero is treated as one. Default 64.
+    /// requests wait for a slot. Every execution fails with `INVALID_INPUT`
+    /// when it is zero. Default 64.
     pub max_concurrent_requests: usize,
     /// Engine-wide request rate, in requests per second, applied when a
     /// connection does not set its own `requests_per_second`. One limiter is
     /// shared by every request of the engine; waiting time is reported in
-    /// `metrics.rate_limit_wait_ms`. `None` (the default) means no limit.
+    /// `metrics.rate_limit_wait_ms`. `None` (the default) means no limit;
+    /// `Some(0)` makes every execution fail with `INVALID_INPUT`.
     pub requests_per_second: Option<u32>,
     /// Allows connections to private, loopback, link-local, and other
     /// non-public addresses. When false (the default), every resolved address
@@ -270,7 +273,8 @@ pub struct ConnectionConfig {
     /// Request rate for this connection, in requests per second, replacing
     /// `EngineConfig::requests_per_second`. The engine has a single limiter,
     /// so the rate paces this request against every other one. A value that
-    /// is not finite and positive is ignored and the engine rate applies.
+    /// is not finite and greater than zero fails with `INVALID_INPUT` before
+    /// any request.
     /// Default `None`.
     pub requests_per_second: Option<f64>,
     /// TLS verification, trusted roots, and client identity.
@@ -745,7 +749,8 @@ pub struct RequestConfig {
     /// `EngineConfig::max_request_bytes`.
     pub raw_body: Option<String>,
     /// Timeout of each HTTP request of this connection, in milliseconds,
-    /// replacing `EngineConfig::request_timeout_ms`; `null` means unset.
+    /// replacing `EngineConfig::request_timeout_ms`; `null` means unset and
+    /// zero fails with `INVALID_INPUT`.
     pub timeout_ms: Option<u64>,
     /// Follows redirects, which the engine handles itself and only within
     /// the original origin: a cross-origin redirect fails with
@@ -951,13 +956,14 @@ where
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RetryPolicy {
-    /// Attempts per request, the first included; zero is treated as one.
+    /// Attempts per request, the first included; zero fails with
+    /// `INVALID_INPUT`.
     /// Default 1, so nothing is retried.
     pub max_attempts: u32,
     /// Delay before the first retry, in milliseconds. Default 500.
     pub backoff_base_ms: u64,
-    /// Multiplier applied to the delay after each retry; values below 1 are
-    /// treated as 1. Default 2.0.
+    /// Multiplier applied to the delay after each retry; a value below 1 or
+    /// not finite fails with `INVALID_INPUT`. Default 2.0.
     pub backoff_factor: f64,
     /// Ceiling of the computed backoff delay, in milliseconds.
     /// Default 30 000.
@@ -1407,8 +1413,9 @@ pub enum PaginationConfig {
         /// Default 100.
         #[serde(default = "default_page_size")]
         page_size: usize,
-        /// Records collected at most. Rows beyond it are cut and reported as
-        /// `PAGINATION_LIMIT_REACHED`. Default 10 000.
+        /// Records collected at most; zero fails with `INVALID_INPUT`. Rows
+        /// beyond it are cut and reported as `PAGINATION_LIMIT_REACHED`.
+        /// Default 10 000.
         #[serde(default = "default_max_rows")]
         max_rows: usize,
         /// Offset of the first page. Default 0.
@@ -1430,8 +1437,9 @@ pub enum PaginationConfig {
         /// Default 100.
         #[serde(default = "default_page_size")]
         page_size: usize,
-        /// Records collected at most. Rows beyond it are cut and reported as
-        /// `PAGINATION_LIMIT_REACHED`. Default 10 000.
+        /// Records collected at most; zero fails with `INVALID_INPUT`. Rows
+        /// beyond it are cut and reported as `PAGINATION_LIMIT_REACHED`.
+        /// Default 10 000.
         #[serde(default = "default_max_rows")]
         max_rows: usize,
         /// Number of the first page. Default 1.
@@ -1448,12 +1456,14 @@ pub enum PaginationConfig {
         /// JSON path of the next cursor in each page. Default `next_cursor`.
         #[serde(default = "default_cursor_path")]
         cursor_path: String,
-        /// Records collected at most. Rows beyond it are cut and reported as
-        /// `PAGINATION_LIMIT_REACHED`. Default 10 000.
+        /// Records collected at most; zero fails with `INVALID_INPUT`. Rows
+        /// beyond it are cut and reported as `PAGINATION_LIMIT_REACHED`.
+        /// Default 10 000.
         #[serde(default = "default_max_rows")]
         max_rows: usize,
-        /// Pages requested at most. A next page left unrequested is reported
-        /// as `PAGINATION_LIMIT_REACHED`. Default 100.
+        /// Pages requested at most; zero fails with `INVALID_INPUT`. A next
+        /// page left unrequested is reported as `PAGINATION_LIMIT_REACHED`.
+        /// Default 100.
         #[serde(default = "default_max_pages")]
         max_pages: usize,
     },
@@ -1465,12 +1475,14 @@ pub enum PaginationConfig {
         /// Default `next`.
         #[serde(default = "default_link_path")]
         link_path: String,
-        /// Records collected at most. Rows beyond it are cut and reported as
-        /// `PAGINATION_LIMIT_REACHED`. Default 10 000.
+        /// Records collected at most; zero fails with `INVALID_INPUT`. Rows
+        /// beyond it are cut and reported as `PAGINATION_LIMIT_REACHED`.
+        /// Default 10 000.
         #[serde(default = "default_max_rows")]
         max_rows: usize,
-        /// Pages requested at most. A next page left unrequested is reported
-        /// as `PAGINATION_LIMIT_REACHED`. Default 100.
+        /// Pages requested at most; zero fails with `INVALID_INPUT`. A next
+        /// page left unrequested is reported as `PAGINATION_LIMIT_REACHED`.
+        /// Default 100.
         #[serde(default = "default_max_pages")]
         max_pages: usize,
         /// Allows next-page URLs on another origin, which receive no
@@ -1487,12 +1499,14 @@ pub enum PaginationConfig {
         /// with `INVALID_INPUT`. Default `next`.
         #[serde(default = "default_next_relation")]
         relation: String,
-        /// Records collected at most. Rows beyond it are cut and reported as
-        /// `PAGINATION_LIMIT_REACHED`. Default 10 000.
+        /// Records collected at most; zero fails with `INVALID_INPUT`. Rows
+        /// beyond it are cut and reported as `PAGINATION_LIMIT_REACHED`.
+        /// Default 10 000.
         #[serde(default = "default_max_rows")]
         max_rows: usize,
-        /// Pages requested at most. A next page left unrequested is reported
-        /// as `PAGINATION_LIMIT_REACHED`. Default 100.
+        /// Pages requested at most; zero fails with `INVALID_INPUT`. A next
+        /// page left unrequested is reported as `PAGINATION_LIMIT_REACHED`.
+        /// Default 100.
         #[serde(default = "default_max_pages")]
         max_pages: usize,
         /// Allows next-page URLs on another origin, which receive no
