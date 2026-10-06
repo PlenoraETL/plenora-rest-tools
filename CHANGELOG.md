@@ -296,6 +296,14 @@ proposed_rejection_probes_hold_on_the_rest_request_vector).
   job; prima valevano 0 dopo errori di trasporto, timeout, deadline o
   cancellazione.
 
+### MSRV e dipendenze
+
+- MSRV pubblicata 1.98 (era 1.85.1), come plenora-database-tools; lo stage
+  msrv del gate Docker usa rust:1.98.0. Decisione dell'utente del 2026-10-06.
+- `time` passa da 0.3.45 a 0.3.55 (pin esatto), che corregge
+  RUSTSEC-2026-0009. L'esenzione di quell'advisory in deny.toml, giustificata
+  solo dalla MSRV 1.85.1, è rimossa: nessun advisory è esentato.
+
 ### Dipendenze
 
 - thiserror non è più una dipendenza diretta: Display di EngineError è scritto

@@ -1,16 +1,16 @@
-FROM rust:1.85.1-bookworm@sha256:e51d0265072d2d9d5d320f6a44dde6b9ef13653b035098febd68cce8fa7c0bc4 AS msrv
+FROM rust:1.98.0-bookworm@sha256:82150a52ec202c1b14d7817e14516c392bb7f5cfebd88f1ed531cb37ebd39922 AS msrv
 
 # rust-toolchain.toml names the gate compiler; this stage checks the
 # published MSRV instead, with the compiler of its own image.
 ENV CARGO_INCREMENTAL=0 \
     CARGO_TARGET_DIR=/tmp/cargo-msrv-target \
-    RUSTUP_TOOLCHAIN=1.85.1
+    RUSTUP_TOOLCHAIN=1.98.0
 
 WORKDIR /workspace
 COPY . .
 
 RUN cargo check --workspace --all-targets --locked \
-    && printf "rust-1.85.1\n" > /tmp/msrv-ok
+    && printf "rust-1.98.0\n" > /tmp/msrv-ok
 
 # The compiler rust-toolchain.toml pins.
 FROM rust:1.98.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e

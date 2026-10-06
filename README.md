@@ -199,7 +199,7 @@ risolve artifact_source e artifact_sink tramite risorse autorizzate dall'host.
 | --- | --- |
 | Sistema | GNU/Linux manylinux2014 (glibc 2.17 o successiva); Windows x86_64 |
 | Architettura | x86_64 |
-| Rust | MSRV 1.85.1, target x86_64-unknown-linux-gnu e x86_64-pc-windows-msvc |
+| Rust | MSRV 1.98, target x86_64-unknown-linux-gnu e x86_64-pc-windows-msvc |
 | Python | CPython 3.10-3.14, ABI3 py310, API sincrona, wheel Linux e Windows |
 | Distribuzione | crate, wheel e binari CLI (Linux x86_64, Windows x86_64) allegati alla GitHub Release |
 

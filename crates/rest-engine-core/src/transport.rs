@@ -1162,10 +1162,10 @@ impl Transport {
         }
         // A probe whose lease expired has likewise been superseded.
         let current_probe = state.half_open_probe.map(|(generation, _)| generation);
-        if let Some(generation) = admission.probe {
-            if current_probe != Some(generation) {
-                return;
-            }
+        if let Some(generation) = admission.probe
+            && current_probe != Some(generation)
+        {
+            return;
         }
         if failed {
             state.consecutive_failures = state.consecutive_failures.saturating_add(1);
@@ -1200,13 +1200,14 @@ impl Transport {
                     rate_limit_wait_ms =
                         rate_limit_wait_ms.saturating_add(response.rate_limit_wait_ms);
                     let retry_status = request.retry.retry_on_status.contains(&response.status);
-                    if can_retry && retry_status && attempt < max_attempts {
-                        if let Some(delay) =
+                    if can_retry
+                        && retry_status
+                        && attempt < max_attempts
+                        && let Some(delay) =
                             retry_wait(&request.retry, attempt, response.retry_after_ms)
-                        {
-                            sleep(delay).await;
-                            continue;
-                        }
+                    {
+                        sleep(delay).await;
+                        continue;
                     }
                     response.attempts = attempt;
                     response.network_requests = network_requests;
@@ -1324,11 +1325,10 @@ impl Transport {
             if can_retry
                 && request.retry.retry_on_status.contains(&status)
                 && attempt < max_attempts
+                && let Some(delay) = retry_wait(&request.retry, attempt, retry_after_ms)
             {
-                if let Some(delay) = retry_wait(&request.retry, attempt, retry_after_ms) {
-                    sleep(delay).await;
-                    continue;
-                }
+                sleep(delay).await;
+                continue;
             }
 
             match self
@@ -1805,10 +1805,10 @@ impl Transport {
         drop(state.file.take());
 
         let sha256 = format!("{:x}", state.digest.clone().finalize());
-        if let Some(expected) = &target.expected_sha256 {
-            if !sha256.eq_ignore_ascii_case(expected) {
-                return Err(EngineError::ChecksumMismatch);
-            }
+        if let Some(expected) = &target.expected_sha256
+            && !sha256.eq_ignore_ascii_case(expected)
+        {
+            return Err(EngineError::ChecksumMismatch);
         }
         persist_download(&state.temporary, &target.path, target.overwrite).await?;
         state.cleanup = false;
@@ -2673,15 +2673,15 @@ fn add_conditional_headers(
     request_headers: &mut BTreeMap<String, String>,
     cached_headers: &BTreeMap<String, String>,
 ) {
-    if !contains_header(request_headers, IF_NONE_MATCH.as_str()) {
-        if let Some(etag) = cached_headers.get(ETAG.as_str()) {
-            request_headers.insert(IF_NONE_MATCH.as_str().to_owned(), etag.clone());
-        }
+    if !contains_header(request_headers, IF_NONE_MATCH.as_str())
+        && let Some(etag) = cached_headers.get(ETAG.as_str())
+    {
+        request_headers.insert(IF_NONE_MATCH.as_str().to_owned(), etag.clone());
     }
-    if !contains_header(request_headers, IF_MODIFIED_SINCE.as_str()) {
-        if let Some(last_modified) = cached_headers.get(LAST_MODIFIED.as_str()) {
-            request_headers.insert(IF_MODIFIED_SINCE.as_str().to_owned(), last_modified.clone());
-        }
+    if !contains_header(request_headers, IF_MODIFIED_SINCE.as_str())
+        && let Some(last_modified) = cached_headers.get(LAST_MODIFIED.as_str())
+    {
+        request_headers.insert(IF_MODIFIED_SINCE.as_str().to_owned(), last_modified.clone());
     }
 }
 
@@ -2793,10 +2793,10 @@ fn retry_wait(policy: &RetryPolicy, attempt: u32, retry_after_ms: Option<u64>) -
 }
 
 fn retry_delay(policy: &RetryPolicy, attempt: u32, retry_after_ms: Option<u64>) -> Duration {
-    if policy.respect_retry_after {
-        if let Some(delay) = retry_after_ms {
-            return Duration::from_millis(delay.min(policy.max_retry_after_ms));
-        }
+    if policy.respect_retry_after
+        && let Some(delay) = retry_after_ms
+    {
+        return Duration::from_millis(delay.min(policy.max_retry_after_ms));
     }
 
     let exponent = attempt.saturating_sub(1) as i32;
