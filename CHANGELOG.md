@@ -4,12 +4,10 @@ Le modifiche che cambiano il comportamento osservabile, l'API pubblica o la
 politica delle dipendenze. La versione dei manifest resta quella dell'ultima
 release finché una release non viene preparata.
 
-## 0.3.0 (preparata, non ancora pubblicata)
+## 0.3.0 (2026-10-06)
 
 Contiene modifiche incompatibili dell'API Rust e del contratto delle
-richieste, raccolte in un'unica rottura. I cinque manifest dichiarano 0.3.0 e
-adoption-manifest.json porta i digest degli artefatti costruiti da questo
-albero; la data di pubblicazione si scrive qui insieme al tag v0.3.0.
+richieste, raccolte in un'unica rottura.
 
 ### Sessioni cookie (incompatibile)
 
@@ -38,6 +36,18 @@ albero; la data di pubblicazione si scrive qui insieme al tag v0.3.0.
   (polling ripreso, cancellazione remota).
 - Superficie congelata aggiornata con decisione esplicita: export CookieSession
   ed entrypoint di sessione in compatibility-v1.json e bindings/rust-v1.json.
+
+### Campagna operativa
+
+- Nuovo crate crates/rest-campaign (non pubblicato, nessuna dipendenza nuova)
+  con il binario plenora-rest-campaign: fasi smoke, load con iniezione di
+  guasti e soak contro un server HTTP locale in-process, campionamento di RSS,
+  descriptor e thread (Linux), file temporanei, latenze, throughput ed errori,
+  verifica dei criteri di accettazione della roadmap con exit code non zero e
+  report JSON e Markdown. Profili in campaign/profiles.json, soglie proposte e
+  da approvare in campaign/limits.json, esecuzione con scripts/campaign.sh e
+  con il workflow Campaign. Vedi
+  [Campagna come codice](docs/roadmap.md#campagna-come-codice).
 
 ### Comportamento
 
@@ -69,6 +79,116 @@ albero; la data di pubblicazione si scrive qui insieme al tag v0.3.0.
 - Un batch flat_array rifiuta i record che non si risolvono in esattamente un
   parametro non null.
 
+### Limiti espliciti (incompatibile)
+
+- La paginazione fermata da max_rows o max_pages mentre la sorgente ha ancora
+  dati restituisce un risultato partial: le righe lette più l'errore
+  PAGINATION_LIMIT_REACHED (resource_limit, details.max_rows/max_pages). Prima
+  il risultato era success con le righe troncate in silenzio. Nuova variante
+  EngineError::PaginationLimit. Vedi
+  [Paginazione](docs/limiti.md#paginazione).
+- Un Retry-After oltre retry.max_retry_after_ms non viene più accorciato al
+  massimo per riprovare prima del tempo chiesto dal server: l'operazione
+  fallisce con lo status ricevuto.
+- Oltre i 128 handle di recovery ammessi dal contratto, il primo errore porta
+  details.recoveries_omitted con il numero degli handle lasciati fuori; prima
+  venivano scartati in silenzio.
+- AGENTS.md raccoglie le regole del repository; docs/limiti.md è il registro
+  unico dei limiti, dei comportamenti oltre la soglia e delle deviazioni.
+
+### Parser dell'input remoto (trovati da fuzz e test di proprietà)
+
+- XML: il testo conserva gli spazi attorno ai riferimenti (`Fish &amp; Chips`
+  era letto `Fish&Chips`); nel contenuto misto il testo resta quello scritto
+  tra i figli, rifilato solo ai bordi.
+- XML: contenuto fuori dalla radice (`<a/>junk`, `junk<a/>`, riferimenti o
+  CDATA dopo la radice), nomi non UTF-8, nomi fuori dalla grammatica XML (per
+  esempio `<@id>`, `<x:#text>`, `<a:>`) e attributi che collidono una volta
+  tolto il prefisso (`x:id`, `y:id`) sono INVALID_RESPONSE invece di essere
+  scartati, alterati o sovrascritti.
+- JSON e NDJSON: i numeri sono letti con arrotondamento corretto; alcuni
+  decimali erano letti con un errore di un'unità sull'ultima cifra.
+- Header Link: i quoted-pair di una relazione quotata sono risolti
+  (`rel="n\ext"` vale `next`) e conta solo il primo `rel` di un link, come
+  vuole RFC 8288.
+- Retry-After: un numero di secondi oltre il rappresentabile satura all'attesa
+  massima (poi limitata da max_retry_after_ms) invece di essere ignorato.
+- L'header Cookie inviato elenca le coppie in ordine lessicografico: prima
+  l'ordine dipendeva dalle hash map del jar e cambiava da un Engine all'altro.
+
+### Verifica
+
+- Test di proprietà dei parser dell'input remoto e dei riferimenti runtime,
+  ciascuno con un oracolo scritto nel test, deterministici (seme e casi
+  fissati). Vedi [Fuzz e test di proprietà](docs/development.md#fuzz-e-test-di-proprietà).
+- Crate di fuzz in `fuzz/` (workspace e lock propri) con sei target senza rete:
+  corpo della risposta, percorsi JSON, header Link, altri header remoti,
+  ExecutionRequest e RuntimeMessage. I target raggiungono i parser privati con
+  la feature `fuzzing` del crate core: modulo `doc(hidden)`, non pubblico e
+  fuori dal contratto v1. Workflow Fuzz: fmt e check dei target su ogni pull
+  request, campagna settimanale, manuale e sulle pull request che toccano
+  `fuzz/`.
+
+### Runtime e contratti (incompatibile)
+
+- Adottata la revisione 1e902dfa di plenora-contracts. I tre vettori
+  runtime-v1 di REST (rest-upload-request, rest-download-success,
+  rest-upload-unknown-error) sono copiati in contracts/upstream con il loro
+  SHA-256 ed eseguiti attraverso RuntimeBinding (test runtime_vectors), con le
+  mutazioni negative dell'instradamento e gli esempi negativi REST del
+  contratto.
+- Un riferimento runtime (artifact_source, artifact_sink, credential_ref) deve
+  essere un riferimento opaco `schema:` o `schema://` secondo la grammatica dei
+  contratti. Prima bastava non sembrare un path assoluto, `file:` o `..`: un
+  path relativo come `dir/report.csv` o `report.csv` arrivava a
+  RuntimeResources. Ora è INVALID_INPUT prima della risoluzione.
+- scripts/validate_contracts.py verifica i pin dei file copiati, i vettori
+  contro lo schema runtime-vector-v1 e il manifesto di adozione contro lo
+  schema v4 e le regole incrociate di ADOPTION.md.
+
+### Binding runtime allineato alla matrice comune (incompatibile)
+
+Le quattro librerie con superficie runtime rispondono ora allo stesso modo agli
+stessi casi, secondo Runtime Binding 1.0 §11-13 (RT-016..RT-023) proposti in
+plenora-contracts #21 e non ancora normativi; le sonde di quella proposta sono
+copiate in contracts/proposte ed eseguite (test
+proposed_rejection_probes_hold_on_the_rest_request_vector).
+
+- Rifiuti prima dell'invocazione: fase validate, remote_effect none, retry
+  never (P). Categoria (P, R1): `unsupported` per un valore ben formato ma non
+  annunciato (capability, versione del binding, operazione, versione
+  dell'operazione, input contract, content type), `protocol` per un valore
+  assente, malformato o non canonico; codici RUNTIME_UNSUPPORTED e
+  RUNTIME_PROTOCOL_VIOLATION. Prima tutti erano INVALID_INPUT,
+  invalid_configuration.
+- Identità non canoniche (UUID maiuscoli, tra graffe, assenti) e valori di
+  metadato non stringa (un `null` come idempotency key) sono `protocol`. Le
+  chiavi `plenora.*` che il binding non riserva sono ignorate come membri
+  facoltativi. L'ordine delle categorie è quello di RT-018: prima `protocol`
+  su tutti i valori riservati, poi `unsupported`, poi `timeout`.
+- Metadati del risultato (P, R2): `plenora.message.id` sempre nuovo;
+  `plenora.message.causation_id` è il message id della richiesta;
+  correlazione, operazione e versione dell'operazione sono copiate byte per
+  byte solo se canoniche, altrimenti omesse. Prima un id non canonico veniva
+  riflesso (anche come causazione), una correlazione assente sostituita con
+  una nuova e una versione assente scritta come "1".
+- Deadline: ogni grafia RFC 3339 di UTC (`Z` o `z`, `+00:00`, `t`
+  minuscola, frazioni); un offset diverso da zero o `-00:00` è rifiutato
+  (`protocol` sul runtime, INVALID_INPUT in ExecutionControl e
+  `options.deadline`). Prima un offset qualunque era accettato. Una deadline già scaduta è DEADLINE_EXPIRED
+  (timeout, validate, none, never) prima di risolvere credenziali o artefatti;
+  prima era TIMEOUT (read, unknown, quarantine) e arrivava dopo la
+  risoluzione. Sul runtime una deadline nel payload ora vale; nei metadati e
+  nel payload insieme è rifiutata (invalid_configuration).
+- Idempotency key vuota, oltre 255 byte o con caratteri non visibili:
+  `protocol` prima dell'invocazione.
+- Download: un errore di scrittura locale dopo l'invio della richiesta è
+  DOWNLOAD_WRITE_FAILED (io, write, unknown, requires_recovery), perché la
+  richiesta può aver avuto effetto remoto (un download può usare POST); prima
+  FILE_IO con remote_effect none. Se la pubblicazione nel sink è avvenuta e
+  fallisce solo la rimozione del file di staging: CLEANUP_AFTER_PUBLISH_FAILED
+  (io, cleanup, committed, never).
+
 ### API Rust (incompatibile)
 
 - EngineError non contiene più testo di terzi: i campi testuali delle varianti
@@ -92,7 +212,112 @@ albero; la data di pubblicazione si scrive qui insieme al tag v0.3.0.
   titoli delle pull request: senza sezione, senza data o vuota il workflow
   Release fallisce.
 
+### Parametri numerici senza significato rifiutati (incompatibile)
+
+- Erano sostituiti in silenzio e ora sono INVALID_INPUT prima di ogni
+  richiesta: `requests_per_second` non finito o non positivo (ricadeva sul
+  rate dell'Engine), `request.timeout_ms` zero, `retry.max_attempts` zero
+  (diventava uno), `retry.backoff_factor` non finito o minore di uno
+  (diventava uno), `max_rows` o `max_pages` zero nella paginazione (successo
+  vuoto). Per l'Engine, `connect_timeout_ms`, `request_timeout_ms` e
+  `max_concurrent_requests` a zero (la concorrenza diventava uno) e
+  `requests_per_second` a zero (attesa di secoli) fanno fallire ogni
+  esecuzione con INVALID_INPUT: `Engine::new` non può fallire.
+
+### Licenza
+
+- La licenza è proprietaria (LICENSE, come le altre librerie Plenora) e
+  non più MIT OR Apache-2.0: `license-file` nei crate, `publish = false`
+  per tutto il workspace, `License: Proprietary` nei metadati della wheel.
+  cargo-deny ignora le licenze dei soli crate privati del workspace.
+
+### CLI
+
+- Nuova superficie: il binario plenora-rest (crate plenora-rest-cli, non
+  pubblicato su crates.io) implementa CLI 2.0 (plenora-cli-v2). Discovery con
+  `--help`, `--version --format json` (contratto
+  plenora-rest-version-result-v1) e `capabilities --format json` (il documento
+  del core con l'interfaccia `cli` e la superficie `cli` su ogni operazione);
+  comandi `test`, `generate`, `enrich`, `download` e `upload` con
+  `--input REQUEST.json` (anche `-`), `--config ENGINE.json` opzionale e
+  `--format json`.
+- In modalità JSON un solo documento e un newline su stdout, stderr vuoto,
+  exit code proiettato dalla categoria (2, 3, 4, 5, 6, 70, 130); un panic è un
+  errore internal senza dettagli. Parser chiuso: comandi e flag sconosciuti,
+  `--flag=valore`, flag ripetuti, valori mancanti e posizionali in più sono
+  rifiutati con exit 2 e messaggi che non citano gli argomenti.
+- Ctrl-C (e SIGTERM su Unix) è una cancellazione cooperativa: errore
+  cancelled, exit 130. tokio usa ora anche le feature `signal` e `io-std`;
+  Cargo.lock aggiunge signal-hook-registry ed errno (solo Unix).
+- La release include plenora-rest-linux-x86_64, costruito nella doppia build
+  riproducibile con il suo digest in adoption-manifest.json, e
+  plenora-rest-windows-x86_64.exe dal job Windows; entrambi sono in
+  SHA256SUMS, nell'SBOM e nelle attestazioni. Il gate anti-panic di Clippy
+  copre anche i binari (`--lib --bins`).
+
+### Copertura
+
+- Nuovo workflow Coverage: core Rust, binding PyO3 e SDK Python misurati
+  separatamente (cargo-llvm-cov 0.9.1, coverage.py 7.16.1) contro i minimi di
+  scripts/coverage_budget.json, con il verificatore fail-closed di
+  plenora-database-tools e i suoi self-test.
+
+### Piattaforme
+
+- Windows x86_64 è una piattaforma supportata: il workflow Verify esegue su
+  Windows formato, Clippy e test Rust, costruisce la wheel abi3 win_amd64 e la
+  prova installata su CPython 3.10-3.14; il workflow Release la costruisce, la
+  prova sulla stessa matrice e la include in SHA256SUMS, SBOM e attestazioni.
+
+### Robustezza e gate
+
+- Nessuna indicizzazione o slicing che possa andare in panic nelle
+  librerie: i 16 punti trovati da Clippy (engine, json_path,
+  response_body, transport) usano accessi controllati, e un invariante
+  interno violato diventa RUNTIME_ERROR. Nell'enrichment concorrente un
+  esito mancante, ripetuto o fuori indice fa fallire l'operazione invece
+  di perdere o duplicare un record. Il gate anti-panic gira nel Docker e
+  su Windows.
+- Un percorso JSON malformato in records_path, error_path,
+  output_mapping, iterate_on, batch.output_path, nei percorsi del polling
+  o della paginazione è INVALID_INPUT prima di ogni richiesta. Prima non si
+  risolveva mai e veniva letto come campo assente (null o default).
+- rust-toolchain.toml fissa il compilatore 1.98.1 per gate locali, CI
+  Linux e Windows e build di release; l'immagine del gate Docker è
+  rust:1.98.1 e lo stage msrv resta su 1.85.1.
+- `unsafe_code = "forbid"` vale per tutto il workspace ([workspace.lints]),
+  test compresi; maturin è fissato a 1.14.1 anche in build-system.requires;
+  rustdoc gira con `-D warnings` nel gate.
+- plenora-rest-core dichiara `#![deny(missing_docs)]`: tutta l'API
+  pubblica (tipi del contratto e loro campi, errori, capability, runtime
+  binding, controlli di esecuzione, Engine) è documentata con default,
+  unità, limiti ed errori reali; un elemento pubblico nuovo senza
+  documentazione non compila. Nessun cambiamento di superficie.
+
+### Correzioni trovate dalla campagna operativa
+
+- `options.deadline` vale per ogni punto d'ingresso: Engine::execute_with_control
+  e il RuntimeBinding (deadline nel payload) la ignoravano.
+- Un risultato fallito riporta in metrics.requests e metrics.retries le
+  richieste e i retry davvero inviati, compresa la cancellazione remota dei
+  job; prima valevano 0 dopo errori di trasporto, timeout, deadline o
+  cancellazione.
+
+### MSRV e dipendenze
+
+- MSRV pubblicata 1.98 (era 1.85.1), come plenora-database-tools; lo stage
+  msrv del gate Docker usa rust:1.98.0. Decisione dell'utente del 2026-10-06.
+- `time` passa da 0.3.45 a 0.3.55 (pin esatto), che corregge
+  RUSTSEC-2026-0009. L'esenzione di quell'advisory in deny.toml, giustificata
+  solo dalla MSRV 1.85.1, è rimossa: nessun advisory è esentato.
+
 ### Dipendenze
 
 - thiserror non è più una dipendenza diretta: Display di EngineError è scritto
   a mano.
+- serde_json attiva la feature float_roundtrip (stesso pin, Cargo.lock
+  invariato).
+- proptest =1.11.0 è una dev-dependency, senza feature di default.
+- `fuzz/Cargo.lock` è un grafo separato, controllato dall'Audit con la stessa
+  policy; libfuzzer-sys =0.4.13 vi entra come unica dipendenza propria, con
+  un'eccezione di licenza NCSA limitata a quel crate in deny.toml.
