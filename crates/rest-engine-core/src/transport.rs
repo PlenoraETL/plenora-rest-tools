@@ -328,8 +328,8 @@ impl SessionRegistry {
 
     /// Ends the session in `index`, moving the slot to its next generation or
     /// retiring it when the generation cannot advance.
-    fn end(&mut self, index: usize) -> Option<u64> {
-        let slot = &mut self.slots[index];
+    fn end(&mut self, index: usize) -> Result<Option<u64>, EngineError> {
+        let slot = self.slots.get_mut(index).ok_or_else(slot_out_of_range)?;
         let incarnation = match std::mem::replace(&mut slot.state, SlotState::Free) {
             SlotState::Open(session) => Some(session.jar.incarnation),
             SlotState::Closing(jar) => Some(jar.incarnation),
@@ -339,8 +339,19 @@ impl SessionRegistry {
             Some(next) => slot.generation = next,
             None => slot.state = SlotState::Retired,
         }
-        incarnation
+        Ok(incarnation)
     }
+}
+
+/// An index into the session slots that the registry did not produce.
+///
+/// Slot indexes come from the registry's own scan or from a handle that
+/// `resolve` has already matched to a slot, so this is an internal invariant
+/// failure, reported as such rather than as a panic.
+fn slot_out_of_range() -> EngineError {
+    EngineError::Runtime(ErrorDetail::from(
+        "cookie session slot index is out of range",
+    ))
 }
 /// Cookie store that drops implausibly long `Set-Cookie` headers.
 ///
@@ -571,7 +582,7 @@ impl Transport {
             if let Some(index) = registry.slots.iter().position(|slot| {
                 matches!(&slot.state, SlotState::Closing(jar) if jar.leases.load(Ordering::Acquire) == 0)
             }) {
-                if let Some(incarnation) = registry.end(index) {
+                if let Some(incarnation) = registry.end(index)? {
                     self.drop_session_clients(incarnation).await;
                 }
                 continue;
@@ -604,14 +615,17 @@ impl Transport {
                     "every cookie session is held by a running operation",
                 )));
             };
-            if let Some(incarnation) = registry.end(victim) {
+            if let Some(incarnation) = registry.end(victim)? {
                 self.drop_session_clients(incarnation).await;
             }
             // A retired slot is skipped by the next iteration; the loop ends
             // because every iteration either returns, or frees or retires one
             // of finitely many slots.
         };
-        let slot = &mut registry.slots[index];
+        let slot = registry
+            .slots
+            .get_mut(index)
+            .ok_or_else(slot_out_of_range)?;
         slot.state = SlotState::Open(OpenSession {
             nonce,
             jar: CookieJar {
@@ -649,7 +663,10 @@ impl Transport {
             EngineError::Runtime(ErrorDetail::from("cookie session slot index overflowed"))
         })?;
         if held {
-            let slot = &mut registry.slots[index];
+            let slot = registry
+                .slots
+                .get_mut(index)
+                .ok_or_else(slot_out_of_range)?;
             slot.state = match std::mem::replace(&mut slot.state, SlotState::Free) {
                 SlotState::Open(session) => SlotState::Closing(session.jar),
                 other => other,
@@ -657,7 +674,7 @@ impl Transport {
             // Idle pooled clients go now; one built by an operation still in
             // flight is removed when the slot is reclaimed.
             self.drop_session_clients(incarnation).await;
-        } else if let Some(incarnation) = registry.end(index) {
+        } else if let Some(incarnation) = registry.end(index)? {
             self.drop_session_clients(incarnation).await;
         }
         Ok(())
@@ -2000,15 +2017,15 @@ impl Transport {
                     })?
                     .map(|socket| socket.ip())
                     .collect();
-                if addresses.is_empty() {
+                let Some(first) = addresses.first().copied() else {
                     return Err(EngineError::DnsResolution(ErrorDetail::from(
                         "no addresses returned",
                     )));
-                }
+                };
                 for address in &addresses {
                     self.validate_address(*address)?;
                 }
-                (domain.to_owned(), addresses[0], true)
+                (domain.to_owned(), first, true)
             }
         };
         Ok((host, address, should_pin, port))

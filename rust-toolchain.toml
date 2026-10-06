@@ -1,0 +1,9 @@
+# Exact compiler for every gate, local and CI, Linux and Windows. It matches
+# plenora-database-tools; changing it is an explicit, reviewed edit that runs
+# the complete gate. The published MSRV (rust-version in Cargo.toml) is a
+# separate promise, checked by the msrv stage of Dockerfile.verify, which
+# overrides this file with RUSTUP_TOOLCHAIN.
+[toolchain]
+channel = "1.98.1"
+profile = "minimal"
+components = ["clippy", "rustfmt"]

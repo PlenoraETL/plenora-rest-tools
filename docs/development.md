@@ -14,8 +14,9 @@ Per il gate completo servono:
 
 Per lavorare senza Docker sono utili:
 
-- Rust 1.85.1 o successivo;
-- rustfmt e Clippy;
+- rustup: rust-toolchain.toml fissa il compilatore dei gate (1.98.1, con
+  rustfmt e Clippy) e rustup lo installa al primo comando cargo;
+- la toolchain 1.85.1 per controllare in locale la MSRV pubblicata;
 - CPython da 3.10 a 3.14;
 - Maturin compatibile con pyproject.toml.
 
@@ -47,12 +48,22 @@ Durante lo sviluppo è possibile eseguire controlli mirati:
 ~~~powershell
 cargo check --workspace --all-targets --locked
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo clippy --workspace --exclude plenora-rest-campaign --lib --locked -- -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic -D clippy::indexing_slicing -D clippy::unreachable -D clippy::todo -D clippy::unimplemented
+cargo test --workspace --locked
+cargo +1.85.1 check --workspace --all-targets --locked
 ~~~
 
-Il controllo con la toolchain locale non sostituisce il gate Docker che
-verifica la MSRV fissata.
+rust-toolchain.toml fissa lo stesso compilatore in locale, nella CI Linux
+e Windows e nella build di release; cambiarlo è una modifica esplicita che
+riesegue il gate completo. La MSRV pubblicata (rust-version in Cargo.toml)
+è una promessa distinta, verificata dallo stage msrv del gate Docker.
+
+Il secondo Clippy è il gate anti-panic: nel codice delle librerie niente
+unwrap, expect, panic, unreachable, todo, unimplemented e niente
+indicizzazioni o slicing che possano uscire dai limiti. Un invariante
+interno violato diventa un errore tipizzato (RUNTIME_ERROR), mai un panic
+dentro l'host. I test ne sono esenti.
 
 ## Fuzz e test di proprietà
 
@@ -102,19 +113,21 @@ Il gate costruisce ambienti self-contained e verifica:
    schema, e compatibilità delle superfici v1;
 3. rustfmt;
 4. Clippy con tutti i warning negati;
-5. test unitari e black-box Rust;
-6. baseline breve di concorrenza, fault transitori e streaming;
-7. build release della wheel;
-8. installazione e test dello SDK in un ambiente Python pulito;
-9. installazione della stessa wheel ABI3 su CPython 3.10-3.14.
+5. Clippy anti-panic sulle librerie;
+6. test unitari e black-box Rust;
+7. baseline breve di concorrenza, fault transitori e streaming;
+8. rustdoc dell'API con tutti i warning negati;
+9. build release della wheel;
+10. installazione e test dello SDK in un ambiente Python pulito;
+11. installazione della stessa wheel ABI3 su CPython 3.10-3.14.
 
 La baseline breve usa server locali e carichi deterministici. Non sostituisce
 la campagna finale di staging descritta nella roadmap.
 
 Il workflow Verify esegue lo stesso script su pull request, push a main e
 avvio manuale. Nello stesso workflow il job Windows esegue rustfmt, Clippy con
-`-D warnings` e `cargo test --workspace --locked` con lo stesso compilatore
-del gate Docker, costruisce la wheel abi3 win_amd64 con maturin 1.14.1 e la
+`-D warnings`, il Clippy anti-panic, `cargo test --workspace --locked` e
+rustdoc con il compilatore di rust-toolchain.toml, costruisce la wheel abi3 win_amd64 con maturin 1.14.1 e la
 prova installata su CPython 3.10-3.14 con scripts/test_wheel.ps1, che esegue
 python/tests da fuori del checkout.
 

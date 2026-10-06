@@ -69,14 +69,13 @@ fn csv_detail(text: &'static str, error: &csv::Error) -> ErrorDetail {
 }
 
 fn parse_csv(body: &[u8], delimiter: &str) -> Result<Value, EngineError> {
-    let delimiter = delimiter.as_bytes();
-    if delimiter.len() != 1 {
+    let &[delimiter] = delimiter.as_bytes() else {
         return Err(EngineError::InvalidInput(ErrorDetail::from(
             "CSV delimiter must be one ASCII byte",
         )));
-    }
+    };
     let mut reader = csv::ReaderBuilder::new()
-        .delimiter(delimiter[0])
+        .delimiter(delimiter)
         .from_reader(body);
     let headers = reader
         .headers()
