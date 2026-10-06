@@ -970,3 +970,33 @@ async fn a_document_that_is_not_an_envelope_is_not_answered_even_with_non_string
         .unwrap_err();
     assert_eq!(error.payload().code, "INVALID_INPUT");
 }
+
+#[tokio::test]
+async fn an_envelope_with_a_duplicate_member_is_not_answered() {
+    // Found by the runtime_message fuzz target: two `payload` members. A
+    // generic JSON reader keeps the last one in silence; the envelope is
+    // refused as malformed, as the typed reader always did.
+    let engine = local_engine();
+    let resources = EmptyResources;
+    let binding = RuntimeBinding::new(&engine, &resources);
+    let mut envelope = serde_json::to_value(runtime_request("http://127.0.0.1:9/")).unwrap();
+    envelope["metadata"]["plenora.capability.version"] = json!(1);
+    let text = envelope.to_string();
+    let duplicated = text.replacen("\"payload\":", "\"payload\":{},\"payload\":", 1);
+    assert!(
+        binding
+            .invoke_json(&duplicated, CancellationToken::new())
+            .await
+            .is_err()
+    );
+    // The same envelope without the duplicate is answered with a protocol
+    // refusal for its numeric metadata value.
+    let answered: RuntimeMessage = serde_json::from_str(
+        &binding
+            .invoke_json(&text, CancellationToken::new())
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(answered.payload["category"], "protocol");
+}

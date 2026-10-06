@@ -130,33 +130,42 @@ where
         request_json: &str,
         cancellation: CancellationToken,
     ) -> Result<String, EngineError> {
-        let parsed = serde_json::from_str::<Value>(request_json).map_err(|error| {
-            EngineError::InvalidInput(ErrorDetail::at(
-                "request is not valid JSON for the contract",
-                error.line(),
-                error.column(),
-            ))
-        })?;
-        let not_an_envelope = || {
-            EngineError::InvalidInput(ErrorDetail::from(
-                "request is not valid JSON for the contract",
-            ))
-        };
-        let response = match non_string_metadata(&parsed) {
-            // The document is an envelope in every other respect: answer it
-            // with a protocol refusal that carries its string metadata. A
-            // document that would not be an envelope even with those values
-            // removed is not answered (`Err`), as before.
-            Some(strings) => {
-                let mut with_strings = parsed;
-                with_strings["metadata"] = Value::Object(
-                    strings
-                        .iter()
-                        .map(|(key, value)| (key.clone(), Value::String(value.clone())))
+        // The envelope is read as a typed message first, so a duplicate
+        // member or an unknown one is refused exactly as before. Only a
+        // document that fails that because some metadata value is not a
+        // string is read again, with metadata of any JSON type, to answer it
+        // with a protocol refusal (RT-017): the metadata of the binding are
+        // strings, and a `null` or a number is neither absent nor valid.
+        let typed = serde_json::from_str::<RuntimeMessage>(request_json);
+        let response = match typed {
+            Ok(request) => self.invoke(request, cancellation).await,
+            Err(typed_error) => {
+                let not_an_envelope = EngineError::InvalidInput(ErrorDetail::at(
+                    "request is not valid JSON for the contract",
+                    typed_error.line(),
+                    typed_error.column(),
+                ));
+                let Ok(raw) = serde_json::from_str::<RawEnvelope>(request_json) else {
+                    return Err(not_an_envelope);
+                };
+                if raw.metadata.values().all(Value::is_string) {
+                    return Err(not_an_envelope);
+                }
+                let envelope = RuntimeMessage {
+                    schema_version: raw.schema_version,
+                    contract: raw.contract,
+                    kind: raw.kind,
+                    content_type: raw.content_type,
+                    metadata: raw
+                        .metadata
+                        .into_iter()
+                        .filter_map(|(key, value)| match value {
+                            Value::String(text) => Some((key, text)),
+                            _ => None,
+                        })
                         .collect(),
-                );
-                let envelope = serde_json::from_value::<RuntimeMessage>(with_strings)
-                    .map_err(|_| not_an_envelope())?;
+                    payload: raw.payload,
+                };
                 error_message(
                     &envelope,
                     refusal(
@@ -164,11 +173,6 @@ where
                         "runtime metadata values must be strings",
                     ),
                 )
-            }
-            None => {
-                let request = serde_json::from_value::<RuntimeMessage>(parsed)
-                    .map_err(|_| not_an_envelope())?;
-                self.invoke(request, cancellation).await
             }
         };
         serde_json::to_string(&response).map_err(|_| {
@@ -282,20 +286,18 @@ fn refusal(category: ErrorCategory, message: &'static str) -> ErrorPayload {
     }
 }
 
-/// The string-valued metadata of an envelope that also carries other
-/// values, or `None` when every metadata value is a string (or there is no
-/// metadata object to judge).
-fn non_string_metadata(envelope: &Value) -> Option<BTreeMap<String, String>> {
-    let metadata = envelope.get("metadata")?.as_object()?;
-    if metadata.values().all(Value::is_string) {
-        return None;
-    }
-    Some(
-        metadata
-            .iter()
-            .filter_map(|(key, value)| value.as_str().map(|text| (key.clone(), text.to_owned())))
-            .collect(),
-    )
+/// A runtime envelope whose metadata values may be of any JSON type, read
+/// only to answer one that carries a non-string value. Unknown and duplicate
+/// members are refused as for [`RuntimeMessage`].
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawEnvelope {
+    schema_version: u32,
+    contract: String,
+    kind: RuntimeMessageKind,
+    content_type: String,
+    metadata: BTreeMap<String, Value>,
+    payload: Value,
 }
 
 /// `tchar` of RFC 9110 §5.6.2.
