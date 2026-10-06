@@ -1711,7 +1711,7 @@ impl Transport {
                 })?
                 .write_all(&chunk)
                 .await
-                .map_err(file_io)?;
+                .map_err(download_write_io)?;
             state.digest.update(&chunk);
             state.bytes_written = state.bytes_written.saturating_add(chunk_length);
             state.bytes_received = state.bytes_received.saturating_add(chunk_length);
@@ -1730,8 +1730,8 @@ impl Transport {
         let file = state.file.as_mut().ok_or_else(|| {
             EngineError::Runtime(ErrorDetail::from("download staging file is closed"))
         })?;
-        file.flush().await.map_err(file_io)?;
-        file.sync_all().await.map_err(file_io)?;
+        file.flush().await.map_err(download_write_io)?;
+        file.sync_all().await.map_err(download_write_io)?;
         drop(state.file.take());
 
         let sha256 = format!("{:x}", state.digest.clone().finalize());
@@ -2240,7 +2240,9 @@ async fn reset_download_state(state: &mut DownloadState) -> Result<(), EngineErr
         .truncate(true)
         .open(&state.temporary)
         .await
-        .map_err(file_io)?;
+        // A retry of a download whose request already went out: the remote
+        // side may have acted, so this is not a failure without effect.
+        .map_err(download_write_io)?;
     state.file = Some(file);
     state.bytes_written = 0;
     state.digest = Sha256::new();
@@ -2289,8 +2291,14 @@ async fn persist_download(
     overwrite: bool,
 ) -> Result<(), EngineError> {
     if !overwrite {
-        fs::hard_link(temporary, target).await.map_err(file_io)?;
-        fs::remove_file(temporary).await.map_err(file_io)?;
+        fs::hard_link(temporary, target)
+            .await
+            .map_err(download_write_io)?;
+        // The sink now holds the download: a failure from here on leaves the
+        // publication in place and only the staging file behind.
+        fs::remove_file(temporary)
+            .await
+            .map_err(|error| EngineError::CleanupAfterPublish(crate::error::io_detail(&error)))?;
         return Ok(());
     }
     match fs::rename(temporary, target).await {
@@ -2299,17 +2307,26 @@ async fn persist_download(
             if matches!(
                 error.kind(),
                 std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::PermissionDenied
-            ) && fs::try_exists(target).await.map_err(file_io)? =>
+            ) && fs::try_exists(target).await.map_err(download_write_io)? =>
         {
-            fs::remove_file(target).await.map_err(file_io)?;
-            fs::rename(temporary, target).await.map_err(file_io)
+            fs::remove_file(target).await.map_err(download_write_io)?;
+            fs::rename(temporary, target)
+                .await
+                .map_err(download_write_io)
         }
-        Err(error) => Err(file_io(error)),
+        Err(error) => Err(download_write_io(error)),
     }
 }
 
 fn file_io(error: std::io::Error) -> EngineError {
     EngineError::FileIo(crate::error::io_detail(&error))
+}
+
+/// A local write of a download, after its HTTP request went out. The request
+/// may have had a remote effect (a download is not restricted to safe
+/// methods), so the failure cannot claim that nothing happened remotely.
+fn download_write_io(error: std::io::Error) -> EngineError {
+    EngineError::DownloadWrite(crate::error::io_detail(&error))
 }
 
 type TokenRequestParts = (String, BTreeMap<String, String>, AuthConfig, bool, u64);
