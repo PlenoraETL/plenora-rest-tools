@@ -9,6 +9,7 @@
         "regions": 78.0
       },
       "sources": [
+        "crates/rest-cli/src/",
         "crates/rest-engine-core/src/"
       ]
     },
