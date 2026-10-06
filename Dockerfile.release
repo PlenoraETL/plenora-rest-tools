@@ -2,6 +2,11 @@ FROM ghcr.io/pyo3/maturin:v1.14.1@sha256:2665227312dd1eab1c29c70a001dc8aac53155a
 
 ARG SOURCE_DATE_EPOCH
 
+# The CLI binary is built in the same stage as the crate and the wheel,
+# with the same compiler, SOURCE_DATE_EPOCH, path remapping and symbol
+# stripping, so the double build of release.ps1 covers it too. The
+# manylinux2014 image links it against an old glibc, which keeps it
+# portable across Linux distributions.
 ENV CARGO_INCREMENTAL=0 \
     CARGO_TARGET_DIR=/tmp/cargo-target \
     RUSTFLAGS="--remap-path-prefix=/io=/workspace -C strip=symbols" \
@@ -42,7 +47,15 @@ RUN test -n "${SOURCE_DATE_EPOCH}" \
         --compatibility manylinux2014 \
         --interpreter /opt/python/cp310-cp310/bin/python \
         --out /tmp/wheels \
-    && cp /tmp/wheels/*.whl /tmp/release-artifacts/
+    && cp /tmp/wheels/*.whl /tmp/release-artifacts/ \
+    && cargo build \
+        --release \
+        --locked \
+        --package plenora-rest-cli \
+        --bin plenora-rest \
+    && cp /tmp/cargo-target/release/plenora-rest \
+        /tmp/release-artifacts/plenora-rest-linux-x86_64 \
+    && /tmp/release-artifacts/plenora-rest-linux-x86_64 --version --format json
 
 FROM build AS python-abi3
 

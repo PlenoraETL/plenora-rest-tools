@@ -17,12 +17,14 @@ concurrency:
 
 jobs:
   # The Windows abi3 wheel is built natively and tested installed on every
-  # supported CPython before the release job may use it. It joins the release
-  # bundle, the SBOM, SHA256SUMS and both attestations; it has no committed
-  # digest in adoption-manifest.json because the runner image that links it is
-  # not pinned the way the Linux builder image is.
+  # supported CPython before the release job may use it. The Windows CLI
+  # executable is built by the same job and answers --version before it is
+  # kept. Both join the release bundle, the SBOM, SHA256SUMS and both
+  # attestations; they have no committed digest in adoption-manifest.json
+  # because the runner image that links them is not pinned the way the Linux
+  # builder image is.
   windows-wheel:
-    name: Windows abi3 wheel
+    name: Windows abi3 wheel and CLI
     if: github.repository == 'PlenoraETL/plenora-rest-tools'
     runs-on: windows-latest
     timeout-minutes: 45
@@ -57,6 +59,29 @@ jobs:
         with:
           name: release-wheel-windows-x86_64
           path: windows-wheel/*.whl
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Build and smoke-test the CLI executable
+        shell: pwsh
+        run: |
+          $env:SOURCE_DATE_EPOCH = (python scripts/release.py source-date-epoch).Trim()
+          cargo build --release --locked --package plenora-rest-cli --bin plenora-rest
+          if ($LASTEXITCODE -ne 0) { throw "cargo build failed" }
+          New-Item -ItemType Directory -Force -Path windows-cli | Out-Null
+          Copy-Item -LiteralPath target/release/plenora-rest.exe -Destination windows-cli/plenora-rest-windows-x86_64.exe
+          $version = (python scripts/release.py current-version 2>$null | Select-Object -Last 1).Trim()
+          $answer = & ./windows-cli/plenora-rest-windows-x86_64.exe --version --format json
+          if ($LASTEXITCODE -ne 0) { throw "the CLI executable does not answer --version" }
+          $document = $answer | ConvertFrom-Json
+          if ($document.status -ne "ok" -or $document.result.component_version -ne $version) {
+            throw "the CLI executable reports an unexpected version"
+          }
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-cli-windows-x86_64
+          path: windows-cli/plenora-rest-windows-x86_64.exe
           if-no-files-found: error
           retention-days: 7
 
@@ -115,11 +140,16 @@ jobs:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: release-wheel-windows-x86_64
-          path: ${{ runner.temp }}/windows-wheel
+          path: ${{ runner.temp }}/windows-extra
 
-      - name: Build twice, compare, add the Windows wheel, and generate the SBOM
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-cli-windows-x86_64
+          path: ${{ runner.temp }}/windows-extra
+
+      - name: Build twice, compare, add the Windows wheel and CLI, and generate the SBOM
         shell: pwsh
-        run: ./scripts/release.ps1 -ExtraArtifacts "${{ runner.temp }}/windows-wheel"
+        run: ./scripts/release.ps1 -ExtraArtifacts "${{ runner.temp }}/windows-extra"
 
       - name: Attest build provenance
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
@@ -132,6 +162,8 @@ jobs:
           subject-path: |
             dist/*.crate
             dist/*.whl
+            dist/plenora-rest-linux-x86_64
+            dist/plenora-rest-windows-x86_64.exe
           sbom-path: dist/plenora-rest-tools-${{ steps.version.outputs.value }}.spdx.json
 
       - name: Retain the release bundle in Actions

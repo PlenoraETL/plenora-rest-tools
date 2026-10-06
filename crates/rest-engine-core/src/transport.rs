@@ -2,6 +2,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     hash::{Hash, Hasher},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    num::IntErrorKind,
     path::{Path, PathBuf},
     sync::Arc,
     sync::atomic::{AtomicU64, AtomicUsize, Ordering},
@@ -40,6 +41,30 @@ use crate::{
 
 static DOWNLOAD_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+/// Requests sent and retries started by one execution, counted at the moment
+/// they happen.
+///
+/// The metrics of a result are otherwise assembled from the responses that
+/// came back, so a failure (transport error, timeout, deadline, cancellation)
+/// would report zero requests while the remote side had received every
+/// attempt. The tally survives the failure: `Engine::execute_with_control`
+/// scopes it around the execution and reads it for the result.
+#[derive(Default)]
+pub(crate) struct ExecutionTally {
+    pub(crate) requests: AtomicU64,
+    pub(crate) retries: AtomicU64,
+}
+
+tokio::task_local! {
+    pub(crate) static EXECUTION_TALLY: Arc<ExecutionTally>;
+}
+
+fn tally(update: impl FnOnce(&ExecutionTally)) {
+    // Outside an execution (a best-effort remote cancellation after the
+    // operation has ended) there is no result to account into.
+    let _ = EXECUTION_TALLY.try_with(|tally| update(tally));
+}
+
 /// Upper bound for cached OAuth tokens; keeps secret material from accumulating
 /// for an unbounded number of credential references.
 const MAX_CACHED_TOKENS: usize = 256;
@@ -47,7 +72,7 @@ const MAX_CACHED_TOKENS: usize = 256;
 /// Longest `Set-Cookie` header the engine will accept. Well above any real
 /// cookie; anything larger is a remote service pushing bulk data into
 /// engine-held state.
-const MAX_SET_COOKIE_BYTES: usize = 8 * 1024;
+pub(crate) const MAX_SET_COOKIE_BYTES: usize = 8 * 1024;
 
 /// SHA-256 fingerprint used by the client, token, and cache isolation keys.
 type Fingerprint = [u8; 32];
@@ -334,7 +359,7 @@ fn slot_out_of_range() -> EngineError {
 /// be able to push arbitrarily large values into engine-held state one header at
 /// a time. A legitimate `Set-Cookie` is far below this limit.
 #[derive(Default)]
-struct BoundedJar {
+pub(crate) struct BoundedJar {
     inner: Jar,
 }
 
@@ -351,7 +376,19 @@ impl CookieStore for BoundedJar {
     }
 
     fn cookies(&self, url: &Url) -> Option<HeaderValue> {
-        self.inner.cookies(url)
+        // The inner jar keeps its cookies in hash maps, so the order of the
+        // pairs in the Cookie header changed from one jar to the next for the
+        // same cookies. Sorted, the header depends only on the cookies. A
+        // pair never contains `;`: the cookie-octet grammar excludes it.
+        let value = self.inner.cookies(url)?;
+        let mut pairs = value
+            .as_bytes()
+            .split(|byte| *byte == b';')
+            .map(<[u8]>::trim_ascii)
+            .filter(|pair| !pair.is_empty())
+            .collect::<Vec<_>>();
+        pairs.sort_unstable();
+        Some(HeaderValue::from_bytes(&pairs.join(&b"; "[..])).unwrap_or(value))
     }
 }
 
@@ -1157,20 +1194,19 @@ impl Transport {
         let mut rate_limit_wait_ms = 0_u64;
 
         for attempt in 1..=max_attempts {
-            match self.send_once(request).await {
+            match self.send_once(request, attempt > 1).await {
                 Ok(mut response) => {
                     network_requests = network_requests.saturating_add(response.network_requests);
                     rate_limit_wait_ms =
                         rate_limit_wait_ms.saturating_add(response.rate_limit_wait_ms);
                     let retry_status = request.retry.retry_on_status.contains(&response.status);
                     if can_retry && retry_status && attempt < max_attempts {
-                        sleep(retry_delay(
-                            &request.retry,
-                            attempt,
-                            response.retry_after_ms,
-                        ))
-                        .await;
-                        continue;
+                        if let Some(delay) =
+                            retry_wait(&request.retry, attempt, response.retry_after_ms)
+                        {
+                            sleep(delay).await;
+                            continue;
+                        }
                     }
                     response.attempts = attempt;
                     response.network_requests = network_requests;
@@ -1269,7 +1305,7 @@ impl Transport {
                 );
                 set_request_header(&mut attempt_request.headers, IF_RANGE.as_str(), etag);
             }
-            let pending = match self.send_once_response(&attempt_request).await {
+            let pending = match self.send_once_response(&attempt_request, attempt > 1).await {
                 Ok(pending) => pending,
                 Err(error)
                     if can_retry
@@ -1289,8 +1325,10 @@ impl Transport {
                 && request.retry.retry_on_status.contains(&status)
                 && attempt < max_attempts
             {
-                sleep(retry_delay(&request.retry, attempt, retry_after_ms)).await;
-                continue;
+                if let Some(delay) = retry_wait(&request.retry, attempt, retry_after_ms) {
+                    sleep(delay).await;
+                    continue;
+                }
             }
 
             match self
@@ -1470,14 +1508,23 @@ impl Transport {
         Ok((token, stats))
     }
 
-    async fn send_once(&self, request: &PreparedRequest) -> Result<ResponseData, EngineError> {
-        let pending = self.send_once_response(request).await?;
+    async fn send_once(
+        &self,
+        request: &PreparedRequest,
+        retry: bool,
+    ) -> Result<ResponseData, EngineError> {
+        let pending = self.send_once_response(request, retry).await?;
         self.read_response(pending).await
     }
 
+    /// Sends `request`, following redirects. `retry` says this is a new
+    /// attempt of a request already sent: it counts as a retry of the
+    /// execution only once it actually goes out, so a backoff cut short by a
+    /// deadline or a cancellation is not reported as a retry.
     async fn send_once_response(
         &self,
         request: &PreparedRequest,
+        retry: bool,
     ) -> Result<PendingResponse, EngineError> {
         let origin = request.url.clone();
         let mut url = request.url.clone();
@@ -1523,6 +1570,12 @@ impl Transport {
 
             let (permit, waited_ms) = self.admit_request(request.requests_per_second).await?;
             network_requests = network_requests.saturating_add(1);
+            tally(|tally| {
+                tally.requests.fetch_add(1, Ordering::Relaxed);
+                if retry && redirects == 0 {
+                    tally.retries.fetch_add(1, Ordering::Relaxed);
+                }
+            });
             rate_limit_wait_ms = rate_limit_wait_ms.saturating_add(waited_ms);
             let response = builder.send().await.map_err(map_reqwest_error)?;
             if response.status().is_redirection() && request.allow_redirects {
@@ -1728,7 +1781,7 @@ impl Transport {
                 })?
                 .write_all(&chunk)
                 .await
-                .map_err(file_io)?;
+                .map_err(download_write_io)?;
             state.digest.update(&chunk);
             state.bytes_written = state.bytes_written.saturating_add(chunk_length);
             state.bytes_received = state.bytes_received.saturating_add(chunk_length);
@@ -1747,8 +1800,8 @@ impl Transport {
         let file = state.file.as_mut().ok_or_else(|| {
             EngineError::Runtime(ErrorDetail::from("download staging file is closed"))
         })?;
-        file.flush().await.map_err(file_io)?;
-        file.sync_all().await.map_err(file_io)?;
+        file.flush().await.map_err(download_write_io)?;
+        file.sync_all().await.map_err(download_write_io)?;
         drop(state.file.take());
 
         let sha256 = format!("{:x}", state.digest.clone().finalize());
@@ -2114,12 +2167,29 @@ async fn stream_body(
     Ok(builder.header(CONTENT_LENGTH, stream.length).body(body))
 }
 
+/// The text of a header value, never dropped.
+///
+/// HTTP field values are bytes. Visible ASCII is the common case, but a
+/// parameter such as a Link `title` may carry UTF-8, and obs-text is legal:
+/// a value that is not valid UTF-8 is read byte for byte as ISO-8859-1, which
+/// maps every byte to one character. Skipping such a value, as before, made a
+/// Link header with `title="café"` disappear and pagination end in silence.
+fn header_text(value: &reqwest::header::HeaderValue) -> String {
+    match std::str::from_utf8(value.as_bytes()) {
+        Ok(text) => text.to_owned(),
+        Err(_) => value
+            .as_bytes()
+            .iter()
+            .map(|byte| char::from(*byte))
+            .collect(),
+    }
+}
+
 fn response_headers(response: &reqwest::Response) -> BTreeMap<String, String> {
     let mut headers = BTreeMap::<String, String>::new();
     for (name, value) in response.headers() {
-        let Ok(value) = value.to_str() else {
-            continue;
-        };
+        let value = header_text(value);
+        let value = value.as_str();
         headers
             .entry(name.as_str().to_owned())
             .and_modify(|existing| {
@@ -2148,7 +2218,12 @@ fn response_content_length(response: &reqwest::Response) -> Option<u64> {
 }
 
 fn strong_response_etag(response: &reqwest::Response) -> Option<String> {
-    let value = response.headers().get(ETAG)?.to_str().ok()?.trim();
+    strong_etag(response.headers().get(ETAG)?.to_str().ok()?)
+}
+
+/// The strong validator carried by an `ETag` value, if it is one.
+pub(crate) fn strong_etag(value: &str) -> Option<String> {
+    let value = value.trim();
     if value.starts_with("W/")
         || value.len() < 2
         || !value.starts_with('"')
@@ -2160,10 +2235,10 @@ fn strong_response_etag(response: &reqwest::Response) -> Option<String> {
     }
 }
 
-struct ContentRange {
-    start: u64,
-    end: u64,
-    total: u64,
+pub(crate) struct ContentRange {
+    pub(crate) start: u64,
+    pub(crate) end: u64,
+    pub(crate) total: u64,
 }
 
 fn satisfied_content_range(response: &reqwest::Response) -> Result<ContentRange, EngineError> {
@@ -2181,6 +2256,11 @@ fn satisfied_content_range(response: &reqwest::Response) -> Result<ContentRange,
                 "download Content-Range is not valid text",
             ))
         })?;
+    parse_content_range(value)
+}
+
+/// A satisfied `Content-Range` value: `bytes <start>-<end>/<total>`.
+pub(crate) fn parse_content_range(value: &str) -> Result<ContentRange, EngineError> {
     let (unit, range_and_total) = value.trim().split_once(' ').ok_or_else(|| {
         EngineError::InvalidResponse(ErrorDetail::from("download Content-Range is malformed"))
     })?;
@@ -2257,7 +2337,9 @@ async fn reset_download_state(state: &mut DownloadState) -> Result<(), EngineErr
         .truncate(true)
         .open(&state.temporary)
         .await
-        .map_err(file_io)?;
+        // A retry of a download whose request already went out: the remote
+        // side may have acted, so this is not a failure without effect.
+        .map_err(download_write_io)?;
     state.file = Some(file);
     state.bytes_written = 0;
     state.digest = Sha256::new();
@@ -2306,8 +2388,14 @@ async fn persist_download(
     overwrite: bool,
 ) -> Result<(), EngineError> {
     if !overwrite {
-        fs::hard_link(temporary, target).await.map_err(file_io)?;
-        fs::remove_file(temporary).await.map_err(file_io)?;
+        fs::hard_link(temporary, target)
+            .await
+            .map_err(download_write_io)?;
+        // The sink now holds the download: a failure from here on leaves the
+        // publication in place and only the staging file behind.
+        fs::remove_file(temporary)
+            .await
+            .map_err(|error| EngineError::CleanupAfterPublish(crate::error::io_detail(&error)))?;
         return Ok(());
     }
     match fs::rename(temporary, target).await {
@@ -2316,17 +2404,26 @@ async fn persist_download(
             if matches!(
                 error.kind(),
                 std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::PermissionDenied
-            ) && fs::try_exists(target).await.map_err(file_io)? =>
+            ) && fs::try_exists(target).await.map_err(download_write_io)? =>
         {
-            fs::remove_file(target).await.map_err(file_io)?;
-            fs::rename(temporary, target).await.map_err(file_io)
+            fs::remove_file(target).await.map_err(download_write_io)?;
+            fs::rename(temporary, target)
+                .await
+                .map_err(download_write_io)
         }
-        Err(error) => Err(file_io(error)),
+        Err(error) => Err(download_write_io(error)),
     }
 }
 
 fn file_io(error: std::io::Error) -> EngineError {
     EngineError::FileIo(crate::error::io_detail(&error))
+}
+
+/// A local write of a download, after its HTTP request went out. The request
+/// may have had a remote effect (a download is not restricted to safe
+/// methods), so the failure cannot claim that nothing happened remotely.
+fn download_write_io(error: std::io::Error) -> EngineError {
+    EngineError::DownloadWrite(crate::error::io_detail(&error))
 }
 
 type TokenRequestParts = (String, BTreeMap<String, String>, AuthConfig, bool, u64);
@@ -2602,18 +2699,18 @@ fn merge_headers(cached: &mut BTreeMap<String, String>, revalidated: &BTreeMap<S
     }
 }
 
-fn response_forbids_store(headers: &BTreeMap<String, String>) -> bool {
+pub(crate) fn response_forbids_store(headers: &BTreeMap<String, String>) -> bool {
     header_has_directive(headers, CACHE_CONTROL.as_str(), "no-store")
         || headers
             .get(VARY.as_str())
             .is_some_and(|value| value.split(',').any(|value| value.trim() == "*"))
 }
 
-fn response_requires_revalidation(headers: &BTreeMap<String, String>) -> bool {
+pub(crate) fn response_requires_revalidation(headers: &BTreeMap<String, String>) -> bool {
     header_has_directive(headers, CACHE_CONTROL.as_str(), "no-cache")
 }
 
-fn cache_max_age_ms(headers: &BTreeMap<String, String>) -> Option<u64> {
+pub(crate) fn cache_max_age_ms(headers: &BTreeMap<String, String>) -> Option<u64> {
     headers
         .get(CACHE_CONTROL.as_str())?
         .split(',')
@@ -2681,6 +2778,20 @@ fn is_retryable_transport_error(error: &EngineError) -> bool {
     )
 }
 
+/// Wait before retrying a response the server asked to retry later, or
+/// `None` when the retry must not happen.
+///
+/// A `Retry-After` longer than `max_retry_after_ms` is not shortened to fit:
+/// retrying before the time the server named would ignore its instruction and
+/// add load where it asked for less. The response is returned as it is, so
+/// the operation fails with its HTTP status instead of retrying early.
+fn retry_wait(policy: &RetryPolicy, attempt: u32, retry_after_ms: Option<u64>) -> Option<Duration> {
+    match retry_after_ms {
+        Some(delay) if policy.respect_retry_after && delay > policy.max_retry_after_ms => None,
+        _ => Some(retry_delay(policy, attempt, retry_after_ms)),
+    }
+}
+
 fn retry_delay(policy: &RetryPolicy, attempt: u32, retry_after_ms: Option<u64>) -> Duration {
     if policy.respect_retry_after {
         if let Some(delay) = retry_after_ms {
@@ -2695,10 +2806,17 @@ fn retry_delay(policy: &RetryPolicy, attempt: u32, retry_after_ms: Option<u64>) 
     Duration::from_millis(delay)
 }
 
-fn parse_retry_after(value: &str, now: SystemTime) -> Option<u64> {
+pub(crate) fn parse_retry_after(value: &str, now: SystemTime) -> Option<u64> {
     let value = value.trim();
-    if let Ok(seconds) = value.parse::<u64>() {
-        return seconds.checked_mul(1_000);
+    // delay-seconds has no upper bound (RFC 9110, 10.2.3). A value too large
+    // for u64 milliseconds is the longest possible wait, not an absent
+    // header: it saturates, so it exceeds max_retry_after_ms and retry_wait
+    // stops the retry. Reading it as absent fell back to the exponential
+    // backoff and retried sooner than the service asked.
+    match value.parse::<u64>() {
+        Ok(seconds) => return Some(seconds.saturating_mul(1_000)),
+        Err(error) if *error.kind() == IntErrorKind::PosOverflow => return Some(u64::MAX),
+        Err(_) => {}
     }
     let date = httpdate::parse_http_date(value).ok()?;
     let delay = date.duration_since(now).unwrap_or(Duration::ZERO);
@@ -2793,6 +2911,47 @@ mod tests {
         assert_eq!(
             parse_retry_after(&httpdate::fmt_http_date(now - Duration::from_secs(1)), now),
             Some(0)
+        );
+    }
+
+    #[test]
+    fn the_cookie_header_does_not_depend_on_hash_order() {
+        // Found by the remote_headers fuzz target: two jars holding the same
+        // cookies sent them in different orders, because the inner jar
+        // iterates hash maps with a per-instance random seed.
+        use reqwest::cookie::CookieStore;
+        let url = Url::parse("https://example.com/").unwrap();
+        let headers = ["h=8", "c=3", "a=1", "g=7", "e=5", "b=2", "f=6", "d=4"]
+            .map(reqwest::header::HeaderValue::from_static);
+        for _ in 0..4 {
+            let jar = super::BoundedJar::default();
+            jar.set_cookies(&mut headers.iter(), &url);
+            assert_eq!(
+                jar.cookies(&url).unwrap(),
+                "a=1; b=2; c=3; d=4; e=5; f=6; g=7; h=8"
+            );
+        }
+    }
+
+    #[test]
+    fn retry_after_beyond_the_representable_wait_saturates() {
+        // Found by the property test against RFC 9110: both values used to
+        // read as "no Retry-After", so the retry came after the exponential
+        // backoff instead of after max_retry_after_ms.
+        let now = UNIX_EPOCH + Duration::from_secs(1_000_000);
+        assert_eq!(parse_retry_after("18446744073709552", now), Some(u64::MAX));
+        assert_eq!(
+            parse_retry_after("99999999999999999999999", now),
+            Some(u64::MAX)
+        );
+        let policy = crate::RetryPolicy::default();
+        assert_eq!(
+            super::retry_delay(
+                &policy,
+                1,
+                parse_retry_after("99999999999999999999999", now)
+            ),
+            Duration::from_millis(policy.max_retry_after_ms)
         );
     }
 

@@ -1,0 +1,31 @@
+{
+  "$schema": "../../schemas/runtime-vector-v1.schema.json",
+  "schema_version": 1,
+  "contract": "plenora-runtime-vector-v1",
+  "kind": "request",
+  "content_type": "application/json",
+  "metadata": {
+    "plenora.message.id": "018f3d84-7b2c-7f00-8000-000000000106",
+    "plenora.capability.name": "plenora.rest-tools",
+    "plenora.capability.version": "1",
+    "plenora.capability.operation": "rest.upload",
+    "plenora.operation.version": "1",
+    "plenora.input.contract": "plenora-rest-file-transfer-input-v1",
+    "plenora.execution.deadline": "2030-01-01T00:00:00Z",
+    "plenora.trace.correlation_id": "018f3d84-7b2c-7f00-8000-000000000006"
+  },
+  "payload": {
+    "connection_ref": "secret://rest/vector",
+    "endpoint_ref": "endpoint://rest/upload-vector",
+    "artifact_source": {
+      "ref": "artifact://input/rest-upload-vector",
+      "content_type": "application/octet-stream",
+      "byte_count": 17,
+      "checksum": {
+        "algorithm": "sha256",
+        "value": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+      }
+    },
+    "max_response_bytes": 65536
+  }
+}

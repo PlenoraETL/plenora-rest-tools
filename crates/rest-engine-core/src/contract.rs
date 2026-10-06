@@ -967,7 +967,9 @@ pub struct RetryPolicy {
     /// Waits for the `Retry-After` header (seconds or HTTP date), when
     /// present, instead of the computed backoff. Default true.
     pub respect_retry_after: bool,
-    /// Ceiling of a `Retry-After` wait, in milliseconds. Default 300 000.
+    /// Longest `Retry-After` wait honoured, in milliseconds. A longer one is
+    /// not shortened: the response is returned and not retried. Default
+    /// 300 000.
     pub max_retry_after_ms: u64,
     /// Also retries POST, PATCH, and custom methods. Sending
     /// `options.idempotency_key` turns it on for the request, except where
@@ -1383,7 +1385,9 @@ impl Default for PollingCancelConfig {
 /// Pagination for `generate`, an object tagged by `type` in JSON.
 ///
 /// Pages are requested in sequence and their records concatenated, up to
-/// `max_rows`. Every page is subject to the credential scope of the first
+/// `max_rows`. Stopping at `max_rows` or `max_pages` while the source still
+/// has data makes the result `partial`, with the rows read and a
+/// `PAGINATION_LIMIT_REACHED` error. Every page is subject to the credential scope of the first
 /// one: a page on another origin receives no credentials, and neither does
 /// any later page.
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1403,8 +1407,8 @@ pub enum PaginationConfig {
         /// Default 100.
         #[serde(default = "default_page_size")]
         page_size: usize,
-        /// Records collected at most; extra records are dropped.
-        /// Default 10 000.
+        /// Records collected at most. Rows beyond it are cut and reported as
+        /// `PAGINATION_LIMIT_REACHED`. Default 10 000.
         #[serde(default = "default_max_rows")]
         max_rows: usize,
         /// Offset of the first page. Default 0.
@@ -1417,15 +1421,17 @@ pub enum PaginationConfig {
         /// Parameter carrying the page number. Default `page`.
         #[serde(default = "default_page_param")]
         page_param: String,
-        /// Parameter carrying the page size. Default `page_size`.
+        /// Parameter carrying the page size: always `page_size`, since page N
+        /// of another size is a different slice of the data. Default
+        /// `page_size`.
         #[serde(default = "default_page_size_param")]
         page_size_param: String,
         /// Records requested per page; zero fails with `INVALID_INPUT`.
         /// Default 100.
         #[serde(default = "default_page_size")]
         page_size: usize,
-        /// Records collected at most; extra records are dropped.
-        /// Default 10 000.
+        /// Records collected at most. Rows beyond it are cut and reported as
+        /// `PAGINATION_LIMIT_REACHED`. Default 10 000.
         #[serde(default = "default_max_rows")]
         max_rows: usize,
         /// Number of the first page. Default 1.
@@ -1442,11 +1448,12 @@ pub enum PaginationConfig {
         /// JSON path of the next cursor in each page. Default `next_cursor`.
         #[serde(default = "default_cursor_path")]
         cursor_path: String,
-        /// Records collected at most; extra records are dropped.
-        /// Default 10 000.
+        /// Records collected at most. Rows beyond it are cut and reported as
+        /// `PAGINATION_LIMIT_REACHED`. Default 10 000.
         #[serde(default = "default_max_rows")]
         max_rows: usize,
-        /// Pages requested at most. Default 100.
+        /// Pages requested at most. A next page left unrequested is reported
+        /// as `PAGINATION_LIMIT_REACHED`. Default 100.
         #[serde(default = "default_max_pages")]
         max_pages: usize,
     },
@@ -1458,11 +1465,12 @@ pub enum PaginationConfig {
         /// Default `next`.
         #[serde(default = "default_link_path")]
         link_path: String,
-        /// Records collected at most; extra records are dropped.
-        /// Default 10 000.
+        /// Records collected at most. Rows beyond it are cut and reported as
+        /// `PAGINATION_LIMIT_REACHED`. Default 10 000.
         #[serde(default = "default_max_rows")]
         max_rows: usize,
-        /// Pages requested at most. Default 100.
+        /// Pages requested at most. A next page left unrequested is reported
+        /// as `PAGINATION_LIMIT_REACHED`. Default 100.
         #[serde(default = "default_max_pages")]
         max_pages: usize,
         /// Allows next-page URLs on another origin, which receive no
@@ -1479,11 +1487,12 @@ pub enum PaginationConfig {
         /// with `INVALID_INPUT`. Default `next`.
         #[serde(default = "default_next_relation")]
         relation: String,
-        /// Records collected at most; extra records are dropped.
-        /// Default 10 000.
+        /// Records collected at most. Rows beyond it are cut and reported as
+        /// `PAGINATION_LIMIT_REACHED`. Default 10 000.
         #[serde(default = "default_max_rows")]
         max_rows: usize,
-        /// Pages requested at most. Default 100.
+        /// Pages requested at most. A next page left unrequested is reported
+        /// as `PAGINATION_LIMIT_REACHED`. Default 100.
         #[serde(default = "default_max_pages")]
         max_pages: usize,
         /// Allows next-page URLs on another origin, which receive no

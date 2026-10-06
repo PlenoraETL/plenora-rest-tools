@@ -15,7 +15,16 @@ from typing import NoReturn
 
 
 ROOT = Path(__file__).resolve().parents[1]
-ARTIFACT_SUFFIXES = (".crate", ".whl")
+# The reproducible Linux build produces exactly these artifacts: the core
+# crate, the manylinux abi3 wheel and the CLI binary. Each kind is matched by
+# a predicate and must appear exactly once; any other file in the directory
+# is an error rather than something silently left out of the comparison.
+CLI_LINUX_ARTIFACT = "plenora-rest-linux-x86_64"
+ARTIFACT_KINDS = {
+    ".crate": lambda name: name.endswith(".crate"),
+    ".whl": lambda name: name.endswith(".whl"),
+    CLI_LINUX_ARTIFACT: lambda name: name == CLI_LINUX_ARTIFACT,
+}
 VERSION_PATTERN = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?")
 
 
@@ -261,27 +270,22 @@ def validate_version(expected: str) -> None:
     print(version)
 
 
+def artifact_kind(name: str) -> str | None:
+    kinds = [kind for kind, matches in ARTIFACT_KINDS.items() if matches(name)]
+    return kinds[0] if len(kinds) == 1 else None
+
+
 def artifact_files(directory: Path) -> list[Path]:
     if not directory.is_dir():
         fail(f"artifact directory does not exist: {directory}")
-    files = sorted(
-        (
-            path
-            for path in directory.iterdir()
-            if path.is_file() and path.name.endswith(ARTIFACT_SUFFIXES)
-        ),
-        key=lambda path: path.name,
-    )
-    suffixes = {
-        suffix
-        for path in files
-        for suffix in ARTIFACT_SUFFIXES
-        if path.name.endswith(suffix)
-    }
-    if suffixes != set(ARTIFACT_SUFFIXES) or len(files) != 2:
+    entries = sorted(directory.iterdir(), key=lambda path: path.name)
+    files = [path for path in entries if path.is_file()]
+    kinds = [artifact_kind(path.name) for path in files]
+    expected = sorted(ARTIFACT_KINDS)
+    if len(files) != len(entries) or sorted(str(kind) for kind in kinds) != expected:
         fail(
-            f"expected exactly one .crate and one .whl in {directory}, "
-            f"found {[path.name for path in files]}"
+            f"expected exactly one each of {expected} in {directory}, "
+            f"found {[path.name for path in entries]}"
         )
     return files
 
@@ -352,10 +356,12 @@ def normalize_sbom(path: Path, expected_version: str) -> None:
     )
 
 
-def single_artifact(directory: Path, suffix: str) -> Path:
-    matches = [path for path in artifact_files(directory) if path.name.endswith(suffix)]
+def single_artifact(directory: Path, kind: str) -> Path:
+    matches = [
+        path for path in artifact_files(directory) if artifact_kind(path.name) == kind
+    ]
     if len(matches) != 1:
-        fail(f"expected exactly one {suffix} artifact in {directory}")
+        fail(f"expected exactly one {kind} artifact in {directory}")
     return matches[0]
 
 
@@ -363,11 +369,24 @@ def check_manifest(directory: Path) -> None:
     manifest = json.loads((ROOT / "adoption-manifest.json").read_text(encoding="utf-8"))
     crate_digest = f"sha256:{sha256(single_artifact(directory, '.crate'))}"
     wheel_digest = f"sha256:{sha256(single_artifact(directory, '.whl'))}"
+    cli_digest = f"sha256:{sha256(single_artifact(directory, CLI_LINUX_ARTIFACT))}"
+    # The cli entry records the reproducible Linux binary; the Windows
+    # executable is checksummed and attested but, like the Windows wheel, has
+    # no committed digest.
     expected_by_surface = {
         "rust": crate_digest,
         "runtime": crate_digest,
         "python_sdk": wheel_digest,
+        "cli": cli_digest,
     }
+    surfaces = sorted(str(artifact["surface"]) for artifact in manifest["artifacts"])
+    if sorted(set(surfaces)) != sorted(expected_by_surface) or len(surfaces) != len(
+        expected_by_surface
+    ):
+        fail(
+            "adoption manifest must declare exactly one artifact per surface "
+            f"{sorted(expected_by_surface)}, found {surfaces}"
+        )
     for artifact in manifest["artifacts"]:
         surface = str(artifact["surface"])
         expected = expected_by_surface.get(surface)
