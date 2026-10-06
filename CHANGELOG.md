@@ -79,6 +79,39 @@ del contratto delle richieste, raccolte in un'unica rottura.
 - Un batch flat_array rifiuta i record che non si risolvono in esattamente un
   parametro non null.
 
+### Parser dell'input remoto (trovati da fuzz e test di proprietà)
+
+- XML: il testo conserva gli spazi attorno ai riferimenti (`Fish &amp; Chips`
+  era letto `Fish&Chips`); nel contenuto misto il testo resta quello scritto
+  tra i figli, rifilato solo ai bordi.
+- XML: contenuto fuori dalla radice (`<a/>junk`, `junk<a/>`, riferimenti o
+  CDATA dopo la radice), nomi non UTF-8, nomi fuori dalla grammatica XML (per
+  esempio `<@id>`, `<x:#text>`, `<a:>`) e attributi che collidono una volta
+  tolto il prefisso (`x:id`, `y:id`) sono INVALID_RESPONSE invece di essere
+  scartati, alterati o sovrascritti.
+- JSON e NDJSON: i numeri sono letti con arrotondamento corretto; alcuni
+  decimali erano letti con un errore di un'unità sull'ultima cifra.
+- Header Link: i quoted-pair di una relazione quotata sono risolti
+  (`rel="n\ext"` vale `next`) e conta solo il primo `rel` di un link, come
+  vuole RFC 8288.
+- Retry-After: un numero di secondi oltre il rappresentabile satura all'attesa
+  massima (poi limitata da max_retry_after_ms) invece di essere ignorato.
+- L'header Cookie inviato elenca le coppie in ordine lessicografico: prima
+  l'ordine dipendeva dalle hash map del jar e cambiava da un Engine all'altro.
+
+### Verifica
+
+- Test di proprietà dei parser dell'input remoto e dei riferimenti runtime,
+  ciascuno con un oracolo scritto nel test, deterministici (seme e casi
+  fissati). Vedi [Fuzz e test di proprietà](docs/development.md#fuzz-e-test-di-proprietà).
+- Crate di fuzz in `fuzz/` (workspace e lock propri) con sei target senza rete:
+  corpo della risposta, percorsi JSON, header Link, altri header remoti,
+  ExecutionRequest e RuntimeMessage. I target raggiungono i parser privati con
+  la feature `fuzzing` del crate core: modulo `doc(hidden)`, non pubblico e
+  fuori dal contratto v1. Workflow Fuzz: fmt e check dei target su ogni pull
+  request, campagna settimanale, manuale e sulle pull request che toccano
+  `fuzz/`.
+
 ### Runtime e contratti (incompatibile)
 
 - Adottata la revisione 1e902dfa di plenora-contracts. I tre vettori
@@ -175,3 +208,9 @@ proposed_rejection_probes_hold_on_the_rest_request_vector).
 
 - thiserror non è più una dipendenza diretta: Display di EngineError è scritto
   a mano.
+- serde_json attiva la feature float_roundtrip (stesso pin, Cargo.lock
+  invariato).
+- proptest =1.11.0 è una dev-dependency, senza feature di default.
+- `fuzz/Cargo.lock` è un grafo separato, controllato dall'Audit con la stessa
+  policy; libfuzzer-sys =0.4.13 vi entra come unica dipendenza propria, con
+  un'eccezione di licenza NCSA limitata a quel crate in deny.toml.

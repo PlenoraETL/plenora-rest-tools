@@ -181,10 +181,12 @@ pwsh ./scripts/verify.ps1
 ~~~
 
 Il comando valida contratti e compatibilità v1, MSRV, formato, Clippy, test
-Rust, wheel installata e matrice ABI3 CPython 3.10-3.14. Il workflow Verify
-esegue anche, su Windows, formato, Clippy, test Rust e la wheel win_amd64
-installata su CPython 3.10-3.14. Le release aggiungono doppia build
-riproducibile, checksum, SBOM e attestazioni.
+Rust (compresi i test di proprietà dei parser dell'input remoto), wheel
+installata e matrice ABI3 CPython 3.10-3.14. Il workflow Verify esegue anche,
+su Windows, formato, Clippy, test Rust e la wheel win_amd64 installata su
+CPython 3.10-3.14. Le release aggiungono doppia build riproducibile, checksum,
+SBOM e attestazioni. I target di fuzz degli stessi parser stanno in
+[fuzz/](fuzz/README.md), con un workflow proprio.
 
 La campagna operativa (smoke, carico con iniezione di guasti, soak) è separata
 dal gate e si lancia con `scripts/campaign.sh` o con il workflow Campaign; vedi

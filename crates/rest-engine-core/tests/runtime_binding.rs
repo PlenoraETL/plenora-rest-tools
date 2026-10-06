@@ -954,3 +954,49 @@ async fn a_malformed_media_type_is_protocol_and_an_unadvertised_one_unsupported(
         assert_refusal(&refused(request).await, category, content_type);
     }
 }
+
+#[tokio::test]
+async fn a_document_that_is_not_an_envelope_is_not_answered_even_with_non_string_metadata() {
+    // Found by the runtime_message fuzz target: no payload, and a metadata
+    // value that is a number. Without the payload it is not an envelope, so
+    // there is nothing to answer, whatever its metadata hold.
+    let engine = local_engine();
+    let resources = EmptyResources;
+    let binding = RuntimeBinding::new(&engine, &resources);
+    let text = r#"{"content_type":"application/json","contract":"plenora-runtime-binding-v1","kind":"request","metadata":{"plenora.message.id":"11111111-1111-4111-8111-111111111111","plenora.capability.version":1},"schema_version":1}"#;
+    let error = binding
+        .invoke_json(text, CancellationToken::new())
+        .await
+        .unwrap_err();
+    assert_eq!(error.payload().code, "INVALID_INPUT");
+}
+
+#[tokio::test]
+async fn an_envelope_with_a_duplicate_member_is_not_answered() {
+    // Found by the runtime_message fuzz target: two `payload` members. A
+    // generic JSON reader keeps the last one in silence; the envelope is
+    // refused as malformed, as the typed reader always did.
+    let engine = local_engine();
+    let resources = EmptyResources;
+    let binding = RuntimeBinding::new(&engine, &resources);
+    let mut envelope = serde_json::to_value(runtime_request("http://127.0.0.1:9/")).unwrap();
+    envelope["metadata"]["plenora.capability.version"] = json!(1);
+    let text = envelope.to_string();
+    let duplicated = text.replacen("\"payload\":", "\"payload\":{},\"payload\":", 1);
+    assert!(
+        binding
+            .invoke_json(&duplicated, CancellationToken::new())
+            .await
+            .is_err()
+    );
+    // The same envelope without the duplicate is answered with a protocol
+    // refusal for its numeric metadata value.
+    let answered: RuntimeMessage = serde_json::from_str(
+        &binding
+            .invoke_json(&text, CancellationToken::new())
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(answered.payload["category"], "protocol");
+}

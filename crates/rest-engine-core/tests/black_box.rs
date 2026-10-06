@@ -4572,6 +4572,59 @@ async fn a_stale_session_is_refused_before_the_idempotency_key_is_recorded() {
 }
 
 #[tokio::test]
+async fn a_link_header_with_a_non_ascii_parameter_still_paginates() {
+    // A Link title may carry UTF-8. The header used to be dropped as "not
+    // text", which ended pagination after the first page without a word.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        for (index, body) in [r#"{"items":[{"v":1}]}"#, r#"{"items":[{"v":2}]}"#]
+            .into_iter()
+            .enumerate()
+        {
+            // Bounded: without the fix the second page is never requested.
+            let Ok(Ok((mut stream, _))) = timeout(Duration::from_secs(5), listener.accept()).await
+            else {
+                return;
+            };
+            let _ = read_request(&mut stream).await;
+            let link = if index == 0 {
+                "Link: </p2>; rel=\"next\"; title=\"caf\u{e9}\"\r\n"
+            } else {
+                ""
+            };
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n{link}Content-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(head.as_bytes()).await.unwrap();
+            stream.write_all(body.as_bytes()).await.unwrap();
+            stream.shutdown().await.unwrap();
+        }
+    });
+    let result = execute(
+        &local_engine(),
+        json!({
+            "schema_version": 1,
+            "operation": "generate",
+            "connection": {
+                "url": format!("{base}/p1"),
+                "method": "GET",
+                "response": {"records_path": "items"},
+                "pagination": {"type": "header_link"}
+            }
+        }),
+    )
+    .await;
+    server.await.unwrap();
+    assert_eq!(
+        result["output"]["records"],
+        json!([{"v": 1}, {"v": 2}]),
+        "{result}"
+    );
+}
+
+#[tokio::test]
 async fn the_request_deadline_binds_every_entry_point() {
     // A server that accepts and never answers: only the deadline ends the call.
     async fn silent() -> (String, JoinHandle<()>) {

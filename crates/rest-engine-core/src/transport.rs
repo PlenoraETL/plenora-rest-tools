@@ -2,6 +2,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     hash::{Hash, Hasher},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    num::IntErrorKind,
     path::{Path, PathBuf},
     sync::Arc,
     sync::atomic::{AtomicU64, AtomicUsize, Ordering},
@@ -71,7 +72,7 @@ const MAX_CACHED_TOKENS: usize = 256;
 /// Longest `Set-Cookie` header the engine will accept. Well above any real
 /// cookie; anything larger is a remote service pushing bulk data into
 /// engine-held state.
-const MAX_SET_COOKIE_BYTES: usize = 8 * 1024;
+pub(crate) const MAX_SET_COOKIE_BYTES: usize = 8 * 1024;
 
 /// SHA-256 fingerprint used by the client, token, and cache isolation keys.
 type Fingerprint = [u8; 32];
@@ -347,7 +348,7 @@ impl SessionRegistry {
 /// be able to push arbitrarily large values into engine-held state one header at
 /// a time. A legitimate `Set-Cookie` is far below this limit.
 #[derive(Default)]
-struct BoundedJar {
+pub(crate) struct BoundedJar {
     inner: Jar,
 }
 
@@ -364,7 +365,19 @@ impl CookieStore for BoundedJar {
     }
 
     fn cookies(&self, url: &Url) -> Option<HeaderValue> {
-        self.inner.cookies(url)
+        // The inner jar keeps its cookies in hash maps, so the order of the
+        // pairs in the Cookie header changed from one jar to the next for the
+        // same cookies. Sorted, the header depends only on the cookies. A
+        // pair never contains `;`: the cookie-octet grammar excludes it.
+        let value = self.inner.cookies(url)?;
+        let mut pairs = value
+            .as_bytes()
+            .split(|byte| *byte == b';')
+            .map(<[u8]>::trim_ascii)
+            .filter(|pair| !pair.is_empty())
+            .collect::<Vec<_>>();
+        pairs.sort_unstable();
+        Some(HeaderValue::from_bytes(&pairs.join(&b"; "[..])).unwrap_or(value))
     }
 }
 
@@ -2136,12 +2149,29 @@ async fn stream_body(
     Ok(builder.header(CONTENT_LENGTH, stream.length).body(body))
 }
 
+/// The text of a header value, never dropped.
+///
+/// HTTP field values are bytes. Visible ASCII is the common case, but a
+/// parameter such as a Link `title` may carry UTF-8, and obs-text is legal:
+/// a value that is not valid UTF-8 is read byte for byte as ISO-8859-1, which
+/// maps every byte to one character. Skipping such a value, as before, made a
+/// Link header with `title="café"` disappear and pagination end in silence.
+fn header_text(value: &reqwest::header::HeaderValue) -> String {
+    match std::str::from_utf8(value.as_bytes()) {
+        Ok(text) => text.to_owned(),
+        Err(_) => value
+            .as_bytes()
+            .iter()
+            .map(|byte| char::from(*byte))
+            .collect(),
+    }
+}
+
 fn response_headers(response: &reqwest::Response) -> BTreeMap<String, String> {
     let mut headers = BTreeMap::<String, String>::new();
     for (name, value) in response.headers() {
-        let Ok(value) = value.to_str() else {
-            continue;
-        };
+        let value = header_text(value);
+        let value = value.as_str();
         headers
             .entry(name.as_str().to_owned())
             .and_modify(|existing| {
@@ -2170,7 +2200,12 @@ fn response_content_length(response: &reqwest::Response) -> Option<u64> {
 }
 
 fn strong_response_etag(response: &reqwest::Response) -> Option<String> {
-    let value = response.headers().get(ETAG)?.to_str().ok()?.trim();
+    strong_etag(response.headers().get(ETAG)?.to_str().ok()?)
+}
+
+/// The strong validator carried by an `ETag` value, if it is one.
+pub(crate) fn strong_etag(value: &str) -> Option<String> {
+    let value = value.trim();
     if value.starts_with("W/")
         || value.len() < 2
         || !value.starts_with('"')
@@ -2182,10 +2217,10 @@ fn strong_response_etag(response: &reqwest::Response) -> Option<String> {
     }
 }
 
-struct ContentRange {
-    start: u64,
-    end: u64,
-    total: u64,
+pub(crate) struct ContentRange {
+    pub(crate) start: u64,
+    pub(crate) end: u64,
+    pub(crate) total: u64,
 }
 
 fn satisfied_content_range(response: &reqwest::Response) -> Result<ContentRange, EngineError> {
@@ -2203,6 +2238,11 @@ fn satisfied_content_range(response: &reqwest::Response) -> Result<ContentRange,
                 "download Content-Range is not valid text",
             ))
         })?;
+    parse_content_range(value)
+}
+
+/// A satisfied `Content-Range` value: `bytes <start>-<end>/<total>`.
+pub(crate) fn parse_content_range(value: &str) -> Result<ContentRange, EngineError> {
     let (unit, range_and_total) = value.trim().split_once(' ').ok_or_else(|| {
         EngineError::InvalidResponse(ErrorDetail::from("download Content-Range is malformed"))
     })?;
@@ -2641,18 +2681,18 @@ fn merge_headers(cached: &mut BTreeMap<String, String>, revalidated: &BTreeMap<S
     }
 }
 
-fn response_forbids_store(headers: &BTreeMap<String, String>) -> bool {
+pub(crate) fn response_forbids_store(headers: &BTreeMap<String, String>) -> bool {
     header_has_directive(headers, CACHE_CONTROL.as_str(), "no-store")
         || headers
             .get(VARY.as_str())
             .is_some_and(|value| value.split(',').any(|value| value.trim() == "*"))
 }
 
-fn response_requires_revalidation(headers: &BTreeMap<String, String>) -> bool {
+pub(crate) fn response_requires_revalidation(headers: &BTreeMap<String, String>) -> bool {
     header_has_directive(headers, CACHE_CONTROL.as_str(), "no-cache")
 }
 
-fn cache_max_age_ms(headers: &BTreeMap<String, String>) -> Option<u64> {
+pub(crate) fn cache_max_age_ms(headers: &BTreeMap<String, String>) -> Option<u64> {
     headers
         .get(CACHE_CONTROL.as_str())?
         .split(',')
@@ -2734,10 +2774,17 @@ fn retry_delay(policy: &RetryPolicy, attempt: u32, retry_after_ms: Option<u64>) 
     Duration::from_millis(delay)
 }
 
-fn parse_retry_after(value: &str, now: SystemTime) -> Option<u64> {
+pub(crate) fn parse_retry_after(value: &str, now: SystemTime) -> Option<u64> {
     let value = value.trim();
-    if let Ok(seconds) = value.parse::<u64>() {
-        return seconds.checked_mul(1_000);
+    // delay-seconds has no upper bound (RFC 9110, 10.2.3). A value too large
+    // for u64 milliseconds is the longest possible wait, not an absent
+    // header: it saturates, and retry_delay then caps it at
+    // max_retry_after_ms. Reading it as absent fell back to the exponential
+    // backoff and retried sooner than the service asked.
+    match value.parse::<u64>() {
+        Ok(seconds) => return Some(seconds.saturating_mul(1_000)),
+        Err(error) if *error.kind() == IntErrorKind::PosOverflow => return Some(u64::MAX),
+        Err(_) => {}
     }
     let date = httpdate::parse_http_date(value).ok()?;
     let delay = date.duration_since(now).unwrap_or(Duration::ZERO);
@@ -2832,6 +2879,47 @@ mod tests {
         assert_eq!(
             parse_retry_after(&httpdate::fmt_http_date(now - Duration::from_secs(1)), now),
             Some(0)
+        );
+    }
+
+    #[test]
+    fn the_cookie_header_does_not_depend_on_hash_order() {
+        // Found by the remote_headers fuzz target: two jars holding the same
+        // cookies sent them in different orders, because the inner jar
+        // iterates hash maps with a per-instance random seed.
+        use reqwest::cookie::CookieStore;
+        let url = Url::parse("https://example.com/").unwrap();
+        let headers = ["h=8", "c=3", "a=1", "g=7", "e=5", "b=2", "f=6", "d=4"]
+            .map(reqwest::header::HeaderValue::from_static);
+        for _ in 0..4 {
+            let jar = super::BoundedJar::default();
+            jar.set_cookies(&mut headers.iter(), &url);
+            assert_eq!(
+                jar.cookies(&url).unwrap(),
+                "a=1; b=2; c=3; d=4; e=5; f=6; g=7; h=8"
+            );
+        }
+    }
+
+    #[test]
+    fn retry_after_beyond_the_representable_wait_saturates() {
+        // Found by the property test against RFC 9110: both values used to
+        // read as "no Retry-After", so the retry came after the exponential
+        // backoff instead of after max_retry_after_ms.
+        let now = UNIX_EPOCH + Duration::from_secs(1_000_000);
+        assert_eq!(parse_retry_after("18446744073709552", now), Some(u64::MAX));
+        assert_eq!(
+            parse_retry_after("99999999999999999999999", now),
+            Some(u64::MAX)
+        );
+        let policy = crate::RetryPolicy::default();
+        assert_eq!(
+            super::retry_delay(
+                &policy,
+                1,
+                parse_retry_after("99999999999999999999999", now)
+            ),
+            Duration::from_millis(policy.max_retry_after_ms)
         );
     }
 

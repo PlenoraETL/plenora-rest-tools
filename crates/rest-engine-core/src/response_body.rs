@@ -116,8 +116,11 @@ struct XmlNode {
 }
 
 fn parse_xml(body: &[u8]) -> Result<Value, EngineError> {
+    // The reader does not trim text events: it reports every `&...;` as an
+    // event of its own, so trimming each piece dropped the spaces around a
+    // reference (`Fish &amp; Chips` read as `Fish&Chips`). The text of an
+    // element is trimmed once, whole, when the element is attached.
     let mut reader = Reader::from_reader(body);
-    reader.config_mut().trim_text(true);
     let mut stack: Vec<XmlNode> = Vec::new();
     let mut root: Option<(String, Value)> = None;
 
@@ -136,22 +139,26 @@ fn parse_xml(body: &[u8]) -> Result<Value, EngineError> {
                 attach_xml_node(&mut stack, &mut root, node)?;
             }
             Ok(Event::Text(event)) => {
-                if let Some(node) = stack.last_mut() {
-                    let text = event.decode().map_err(|_| {
-                        EngineError::InvalidResponse(ErrorDetail::from("XML contains invalid text"))
-                    })?;
-                    node.text.push_str(&text);
+                let text = event.decode().map_err(|_| {
+                    EngineError::InvalidResponse(ErrorDetail::from("XML contains invalid text"))
+                })?;
+                match stack.last_mut() {
+                    Some(node) => node.text.push_str(&text),
+                    // Only the whitespace XML allows around the root element.
+                    None if text
+                        .chars()
+                        .all(|character| matches!(character, ' ' | '\t' | '\r' | '\n')) => {}
+                    None => return Err(xml_content_outside_root()),
                 }
             }
             Ok(Event::CData(event)) => {
-                if let Some(node) = stack.last_mut() {
-                    let text = event.decode().map_err(|_| {
-                        EngineError::InvalidResponse(ErrorDetail::from(
-                            "XML contains invalid CDATA",
-                        ))
-                    })?;
-                    node.text.push_str(&text);
-                }
+                let text = event.decode().map_err(|_| {
+                    EngineError::InvalidResponse(ErrorDetail::from("XML contains invalid CDATA"))
+                })?;
+                let Some(node) = stack.last_mut() else {
+                    return Err(xml_content_outside_root());
+                };
+                node.text.push_str(&text);
             }
             Ok(Event::End(event)) => {
                 let node = stack.pop().ok_or_else(|| {
@@ -159,7 +166,7 @@ fn parse_xml(body: &[u8]) -> Result<Value, EngineError> {
                         "XML has an unexpected closing tag",
                     ))
                 })?;
-                if xml_name(event.name().as_ref()) != node.name {
+                if xml_name(event.name().as_ref())? != node.name {
                     return Err(EngineError::InvalidResponse(ErrorDetail::from(
                         "XML closing tag does not match",
                     )));
@@ -194,9 +201,10 @@ fn parse_xml(body: &[u8]) -> Result<Value, EngineError> {
                         )));
                     }
                 };
-                if let Some(node) = stack.last_mut() {
-                    node.text.push_str(&resolved);
-                }
+                let Some(node) = stack.last_mut() else {
+                    return Err(xml_content_outside_root());
+                };
+                node.text.push_str(&resolved);
             }
             Ok(Event::DocType(_)) => {
                 return Err(EngineError::InvalidResponse(ErrorDetail::from(
@@ -222,6 +230,16 @@ fn parse_xml(body: &[u8]) -> Result<Value, EngineError> {
     Ok(Value::Object(Map::from_iter([(name, value)])))
 }
 
+/// Character data outside the root element (`<a/>junk`, `junk<a/>`, a
+/// reference or CDATA after the root) makes the document not well formed. It
+/// used to be dropped, so a truncated or concatenated payload was accepted as
+/// if it were only its root element.
+fn xml_content_outside_root() -> EngineError {
+    EngineError::InvalidResponse(ErrorDetail::from(
+        "XML has content outside the root element",
+    ))
+}
+
 fn xml_node(
     reader: &Reader<&[u8]>,
     event: &quick_xml::events::BytesStart<'_>,
@@ -231,7 +249,7 @@ fn xml_node(
         let attribute = attribute.map_err(|_| {
             EngineError::InvalidResponse(ErrorDetail::from("XML contains an invalid attribute"))
         })?;
-        let key = format!("@{}", xml_name(attribute.key.as_ref()));
+        let key = format!("@{}", xml_name(attribute.key.as_ref())?);
         // Attribute values are normalized as XML 1.0 requires. Absent an XML
         // declaration the specification assumes 1.0, and the 1.1 specific
         // newline forms are deliberately not honoured for remote payloads.
@@ -242,10 +260,20 @@ fn xml_node(
                     "XML contains an invalid attribute value",
                 ))
             })?;
-        content.insert(key, Value::String(value.into_owned()));
+        // Two attributes that differ only by their namespace prefix (`x:id`,
+        // `y:id`) map to the same key; keeping the last one dropped the other
+        // value without a trace.
+        if content
+            .insert(key, Value::String(value.into_owned()))
+            .is_some()
+        {
+            return Err(EngineError::InvalidResponse(ErrorDetail::from(
+                "XML attributes collide once namespace prefixes are removed",
+            )));
+        }
     }
     Ok(XmlNode {
-        name: xml_name(event.name().as_ref()),
+        name: xml_name(event.name().as_ref())?,
         content,
         text: String::new(),
     })
@@ -288,9 +316,51 @@ fn attach_xml_node(
     }
 }
 
-fn xml_name(raw: &[u8]) -> String {
-    let name = String::from_utf8_lossy(raw);
-    name.rsplit(':').next().unwrap_or(&name).to_owned()
+/// The local name of an element or attribute. A name that is not UTF-8 is
+/// refused: replacing its bytes would make different names equal.
+///
+/// The whole name must be a namespace QName: an NCName, or two NCNames
+/// joined by one `:`. The reader accepts any bytes as a name, and the JSON
+/// shape reserves `@` for attributes and `#text` for text: `<@id>`,
+/// `<x:#text>`, `<a:>` or `<1:a>` would read as something they are not.
+fn xml_name(raw: &[u8]) -> Result<String, EngineError> {
+    let name = std::str::from_utf8(raw).map_err(|_| {
+        EngineError::InvalidResponse(ErrorDetail::from("XML contains a name that is not UTF-8"))
+    })?;
+    let (prefix, local) = match name.split_once(':') {
+        Some((prefix, local)) => (Some(prefix), local),
+        None => (None, name),
+    };
+    if !is_ncname(local) || prefix.is_some_and(|prefix| !is_ncname(prefix)) {
+        return Err(EngineError::InvalidResponse(ErrorDetail::from(
+            "XML contains an invalid name",
+        )));
+    }
+    Ok(local.to_owned())
+}
+
+/// `NameStartChar` of XML 1.0 (fifth edition) section 2.3, without `:`.
+fn is_name_start(character: char) -> bool {
+    matches!(character,
+        'A'..='Z' | '_' | 'a'..='z'
+        | '\u{C0}'..='\u{D6}' | '\u{D8}'..='\u{F6}' | '\u{F8}'..='\u{2FF}'
+        | '\u{370}'..='\u{37D}' | '\u{37F}'..='\u{1FFF}' | '\u{200C}'..='\u{200D}'
+        | '\u{2070}'..='\u{218F}' | '\u{2C00}'..='\u{2FEF}' | '\u{3001}'..='\u{D7FF}'
+        | '\u{F900}'..='\u{FDCF}' | '\u{FDF0}'..='\u{FFFD}' | '\u{10000}'..='\u{EFFFF}')
+}
+
+/// `NameChar` of XML 1.0 (fifth edition) section 2.3, without `:`.
+fn is_name_char(character: char) -> bool {
+    is_name_start(character)
+        || matches!(character,
+            '-' | '.' | '0'..='9' | '\u{B7}' | '\u{300}'..='\u{36F}' | '\u{203F}'..='\u{2040}')
+}
+
+/// An XML namespace NCName: a name start character, then name characters,
+/// no colon.
+fn is_ncname(name: &str) -> bool {
+    let mut characters = name.chars();
+    characters.next().is_some_and(is_name_start) && characters.all(is_name_char)
 }
 
 #[cfg(test)]
@@ -328,6 +398,34 @@ mod tests {
     }
 
     #[test]
+    fn json_numbers_are_read_with_correct_rounding() {
+        // Found by the response_body fuzz target: without float_roundtrip,
+        // serde_json reads some decimal numbers one unit in the last place
+        // off, so the value differs from the number the service sent and
+        // does not survive being written and read again. The standard
+        // library parser is correctly rounded and is the oracle here.
+        let text = format!("-{}", "8".repeat(78));
+        let expected = text.parse::<f64>().unwrap();
+        for format in [ResponseFormat::Json, ResponseFormat::Ndjson] {
+            let config = ResponseConfig {
+                format,
+                ..ResponseConfig::default()
+            };
+            let value = parse(format!("[{text}]").as_bytes(), &config).unwrap();
+            let number = match format {
+                ResponseFormat::Json => &value[0],
+                _ => &value[0][0],
+            };
+            assert_eq!(number.as_f64().map(f64::to_bits), Some(expected.to_bits()));
+            let written = serde_json::to_string(&value).unwrap();
+            assert_eq!(
+                parse(written.as_bytes(), &ResponseConfig::default()).ok(),
+                Some(value)
+            );
+        }
+    }
+
+    #[test]
     fn parses_csv_with_a_custom_delimiter() {
         let value = parse_csv(b"city;pop\nRoma;2873000\n", ";").unwrap();
         assert_eq!(value, json!([{"city": "Roma", "pop": "2873000"}]));
@@ -337,6 +435,101 @@ mod tests {
     fn parses_xml_repeated_elements_and_attributes() {
         let value = parse_xml(b"<root id=\"1\"><item>A</item><item>B</item></root>").unwrap();
         assert_eq!(value, json!({"root": {"@id": "1", "item": ["A", "B"]}}));
+    }
+
+    #[test]
+    fn xml_names_are_never_altered_or_merged_silently() {
+        // Found while writing the properties of the response_body fuzz
+        // target: a name that was not UTF-8 was read with replacement
+        // characters, and attributes differing only by prefix overwrote each
+        // other.
+        let Err(crate::EngineError::InvalidResponse(detail)) = parse_xml(b"<a\xff>1</a\xff>")
+        else {
+            panic!("a name that is not UTF-8 must be refused");
+        };
+        assert_eq!(detail.text(), "XML contains a name that is not UTF-8");
+        let Err(crate::EngineError::InvalidResponse(detail)) =
+            parse_xml(b"<a x:id=\"1\" y:id=\"2\"/>")
+        else {
+            panic!("colliding attributes must be refused");
+        };
+        assert_eq!(
+            detail.text(),
+            "XML attributes collide once namespace prefixes are removed"
+        );
+        assert_eq!(
+            parse_xml(b"<p:a xmlns:p=\"u\" p:id=\"1\"/>").unwrap(),
+            json!({"a": {"@p": "u", "@id": "1"}})
+        );
+    }
+
+    #[test]
+    fn xml_names_that_collide_with_the_json_shape_are_refused() {
+        // Found by the response_body fuzz target: the reader accepts any
+        // bytes as a name, so `<@id>` produced a key that reads as an
+        // attribute, `<x:#text>` one that reads as text, and `<a:>` an
+        // empty key.
+        for body in [
+            &b"<a><@id><b/></@id></a>"[..],
+            b"<a><x:#text>1</x:#text></a>",
+            b"<a:>1</a:>",
+            b"<a 1x=\"1\"/>",
+        ] {
+            let Err(crate::EngineError::InvalidResponse(detail)) = parse_xml(body) else {
+                panic!("a name outside the XML grammar must be refused");
+            };
+            assert_eq!(detail.text(), "XML contains an invalid name");
+        }
+        assert_eq!(
+            parse_xml("<città x-y.z=\"1\"><_b/></città>".as_bytes()).unwrap(),
+            json!({"città": {"@x-y.z": "1", "_b": ""}})
+        );
+    }
+
+    #[test]
+    fn xml_content_outside_the_root_is_refused() {
+        // Found while writing the properties of the response_body fuzz
+        // target: text, references, and CDATA outside the root element were
+        // dropped and the document accepted.
+        for body in [
+            &b"<a/>junk"[..],
+            b"junk<a/>",
+            b"<a>1</a>&amp;",
+            b"<a/><![CDATA[ ]]>",
+        ] {
+            let Err(crate::EngineError::InvalidResponse(detail)) = parse_xml(body) else {
+                panic!("content outside the root must be refused");
+            };
+            assert_eq!(detail.text(), "XML has content outside the root element");
+        }
+        // The whitespace XML allows around the root is still accepted.
+        assert_eq!(
+            parse_xml(b"<?xml version=\"1.0\"?>\r\n<a>1</a>\n\t ").unwrap(),
+            json!({"a": "1"})
+        );
+    }
+
+    #[test]
+    fn xml_text_keeps_the_spaces_around_references() {
+        // Found by the property test of the XML writer: each piece of text
+        // between references was trimmed on its own.
+        assert_eq!(
+            parse_xml(b"<a>Fish &amp; Chips</a>").unwrap(),
+            json!({"a": "Fish & Chips"})
+        );
+        assert_eq!(
+            parse_xml(b"<a> 1 &#x3C; 2 </a>").unwrap(),
+            json!({"a": "1 < 2"})
+        );
+        // Mixed content keeps the text as written, trimmed only at the ends.
+        assert_eq!(
+            parse_xml(b"<a id=\"1\"> x <b/> y </a>").unwrap(),
+            json!({"a": {"@id": "1", "b": "", "#text": "x  y"}})
+        );
+        assert_eq!(
+            parse_xml(b"<a>\n  <b>1</b>\n  <b>2</b>\n</a>").unwrap(),
+            json!({"a": {"b": ["1", "2"]}})
+        );
     }
 
     #[test]
@@ -358,5 +551,29 @@ mod tests {
             parse(&[0, 255, 1], &binary).unwrap(),
             json!({"data_base64": "AP8B", "size": 3})
         );
+    }
+
+    #[test]
+    fn xml_names_follow_the_namespace_name_grammar() {
+        for refused in [
+            "<1:a/>",
+            "<a:1b/>",
+            "<a:b:c/>",
+            "<r \u{b7}x=\"1\"/>",
+            "<\u{b7}a/>",
+            "<\u{2030}/>",
+            "<-a/>",
+        ] {
+            assert!(parse_xml(refused.as_bytes()).is_err(), "{refused}");
+        }
+        for (accepted, key) in [
+            ("<x:a/>", "a"),
+            ("<caf\u{e9}/>", "caf\u{e9}"),
+            ("<a\u{b7}b/>", "a\u{b7}b"),
+            ("<_a.b-c/>", "_a.b-c"),
+        ] {
+            let value = parse_xml(accepted.as_bytes()).unwrap();
+            assert!(value.get(key).is_some(), "{accepted}: {value}");
+        }
     }
 }
