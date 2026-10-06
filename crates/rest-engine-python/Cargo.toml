@@ -3,13 +3,13 @@ name = "plenora-rest-python"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 description = "Python SDK for the self-contained REST execution engine"
 # Distributed only as the plenora-rest wheel built by maturin. It is never
 # published to crates.io, which is also why it may depend on the core crate by
 # workspace path.
-publish = false
+publish.workspace = true
 
 [lib]
 name = "_native"

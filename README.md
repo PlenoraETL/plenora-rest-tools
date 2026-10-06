@@ -244,4 +244,5 @@ dal gate e si lancia con `scripts/campaign.sh` o con il workflow Campaign; vedi
 
 ## Licenza
 
-MIT OR Apache-2.0.
+Proprietaria, vedi [LICENSE](LICENSE). Copyright (c) Plenora ETL. Tutti i
+diritti riservati.

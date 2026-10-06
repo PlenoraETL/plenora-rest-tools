@@ -3,7 +3,7 @@ name = "plenora-rest-cli"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 description = "Command-line surface (plenora-cli-v2) of the self-contained REST execution engine"
 # Distribuito solo come binario di release (plenora-rest-linux-x86_64 e

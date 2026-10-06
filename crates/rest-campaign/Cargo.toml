@@ -3,7 +3,7 @@ name = "plenora-rest-campaign"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 description = "Campagna operativa (smoke, carico con guasti, soak) del motore REST"
 # Strumento di qualità del repository: non è un artefatto di release e non

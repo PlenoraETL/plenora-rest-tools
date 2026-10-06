@@ -205,6 +205,13 @@ proposed_rejection_probes_hold_on_the_rest_request_vector).
   servissero, andrebbero consegnati come dato remoto in un campo dichiarato del
   risultato, non nell'errore.
 
+### Licenza
+
+- La licenza è proprietaria (LICENSE, come le altre librerie Plenora) e
+  non più MIT OR Apache-2.0: `license-file` nei crate, `publish = false`
+  per tutto il workspace, `License: Proprietary` nei metadati della wheel.
+  cargo-deny ignora le licenze dei soli crate privati del workspace.
+
 ### CLI
 
 - Nuova superficie: il binario plenora-rest (crate plenora-rest-cli, non
