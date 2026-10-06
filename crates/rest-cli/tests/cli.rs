@@ -503,7 +503,9 @@ fn an_expired_deadline_is_a_typed_timeout() {
         &["test", "--input", "-", "--format", "json"],
         Some(&serde_json::to_vec(&request).unwrap()),
     );
-    assert_error(&expired, 5, "timeout", "TIMEOUT");
+    assert_error(&expired, 5, "timeout", "DEADLINE_EXPIRED");
+    assert_eq!(expired.document["error"]["phase"], "validate");
+    assert_eq!(expired.document["error"]["remote_effect"], "none");
 }
 
 #[test]

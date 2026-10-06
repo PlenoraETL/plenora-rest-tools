@@ -1,0 +1,2 @@
+$.data.items[0].name
+{"cursor":null,"data":{"a.b":{"x y":true},"items":[{"id":1,"kind":"person","name":"Ada"},{"id":"2","kind":"admin","name":"Grace"}]}}

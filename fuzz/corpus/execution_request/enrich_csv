@@ -1,0 +1,1 @@
+{"connection":{"method":"POST","parameters":[{"location":"body","name":"city"}],"request":{"body_type":"json"},"response":{"delimiter":";","format":"csv"},"url":"https://api.example.com/geo"},"input":{"records":[{"city":"Roma"},{"city":"Milano"}]},"operation":"enrich","options":{"enrichment_concurrency":2},"schema_version":1}

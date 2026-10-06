@@ -1,0 +1,146 @@
+name: Fuzz
+
+# Target di fuzz dei parser dell'input remoto (fuzz/, workspace e lock
+# propri, vedi fuzz/README.md).
+#
+# - Su ogni pull request e push a main: formattazione e compilazione dei
+#   target con il nightly fissato, e corpus iniziale allineato al suo
+#   generatore. Il workspace principale non li compila: senza questo job
+#   potrebbero divergere lasciando verde il resto.
+# - Campagna, un job per target: ogni lunedì e a mano per 600 secondi a
+#   target (input `secondi`), sulle pull request che toccano fuzz/** o questo
+#   workflow per 60 secondi a target. Un crash, un timeout o un'uscita non
+#   nulla fanno fallire il job; i reperti restano come artefatto della run.
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  schedule:
+    # Lunedì 02:43 UTC. Minuto non tondo, come Audit.
+    - cron: "43 2 * * 1"
+  workflow_dispatch:
+    inputs:
+      secondi:
+        description: Secondi di campagna per target
+        required: false
+        default: "600"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  NIGHTLY: nightly-2026-07-21
+
+jobs:
+  check:
+    name: Fuzz targets (fmt, check, corpus)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install the pinned nightly
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # 1.98.1
+        with:
+          toolchain: ${{ env.NIGHTLY }}
+          components: rustfmt
+
+      - name: cargo fmt (fuzz targets)
+        run: cargo +"$NIGHTLY" fmt --manifest-path fuzz/Cargo.toml -- --check
+
+      - name: cargo check (fuzz targets)
+        run: cargo +"$NIGHTLY" check --manifest-path fuzz/Cargo.toml --locked --all-targets
+
+      - name: Seed corpus matches its generator
+        run: |
+          python3 fuzz/genera_corpus.py
+          git add --intent-to-add fuzz/corpus
+          git diff --exit-code -- fuzz/corpus
+
+  changes:
+    name: Pull request touches the fuzz targets
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      fuzz: ${{ steps.diff.outputs.fuzz }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Compare with the base branch
+        id: diff
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if git diff --name-only "$BASE" HEAD | grep -qE '^(fuzz/|\.github/workflows/fuzz\.yml$)'; then
+            echo "fuzz=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "fuzz=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  campaign:
+    name: Fuzz ${{ matrix.target }}
+    needs: [check, changes]
+    if: >-
+      always() && needs.check.result == 'success' &&
+      (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' && needs.changes.outputs.fuzz == 'true'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - response_body
+          - json_path
+          - link_header
+          - remote_headers
+          - execution_request
+          - runtime_message
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install the pinned nightly
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # 1.98.1
+        with:
+          toolchain: ${{ env.NIGHTLY }}
+
+      - name: Install cargo-fuzz 0.13.2
+        run: cargo +"$NIGHTLY" install cargo-fuzz --version 0.13.2 --locked
+
+      - name: Run the campaign
+        env:
+          TARGET: ${{ matrix.target }}
+          SECONDI: ${{ github.event_name == 'pull_request' && '60' || github.event.inputs.secondi || '600' }}
+        run: |
+          case "$SECONDI" in
+            ''|*[!0-9]*) echo "secondi deve essere un intero positivo" >&2; exit 1 ;;
+          esac
+          # I nuovi input vanno in una directory di lavoro: il corpus
+          # versionato resta quello scritto da fuzz/genera_corpus.py.
+          mkdir -p "fuzz/corpus-lavoro/$TARGET" "fuzz/artifacts/$TARGET"
+          cargo +"$NIGHTLY" fuzz run "$TARGET" --fuzz-dir fuzz \
+            "fuzz/corpus-lavoro/$TARGET" "fuzz/corpus/$TARGET" -- \
+            -max_total_time="$SECONDI" -timeout=30 -rss_limit_mb=2048 \
+            -artifact_prefix="fuzz/artifacts/$TARGET/" -print_final_stats=1
+
+      - name: Upload findings
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}
+          if-no-files-found: ignore
+          retention-days: 30

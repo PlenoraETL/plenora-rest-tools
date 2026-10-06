@@ -1,0 +1,23 @@
+[package]
+name = "plenora-rest-campaign"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Campagna operativa (smoke, carico con guasti, soak) del motore REST"
+# Strumento di qualità del repository: non è un artefatto di release e non
+# viene mai pubblicato. Usa soltanto l'API pubblica di plenora-rest-core e
+# nessuna dipendenza che il workspace non abbia già.
+publish = false
+
+[[bin]]
+name = "plenora-rest-campaign"
+path = "src/main.rs"
+
+[dependencies]
+plenora-rest-core = { path = "../rest-engine-core" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true

@@ -1,0 +1,5 @@
+# Strumenti Python del workflow coverage, con versione esatta come ogni altro
+# strumento dei gate. cargo-llvm-cov e llvm-tools-preview sono fissati nel
+# workflow stesso.
+coverage==7.16.1
+maturin==1.14.1

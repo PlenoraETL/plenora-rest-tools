@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
     sync::{
@@ -28,8 +29,8 @@ use crate::{
     QueryStyle, ResponseConfig, ResponseTransform, SCHEMA_VERSION, capabilities, json_path,
     response_body,
     transport::{
-        DownloadTarget, PreparedBody, PreparedFile, PreparedFileSource, PreparedRequest,
-        PreparedStream, ResponseData, Transport, same_origin,
+        DownloadTarget, EXECUTION_TALLY, ExecutionTally, PreparedBody, PreparedFile,
+        PreparedFileSource, PreparedRequest, PreparedStream, ResponseData, Transport, same_origin,
     },
 };
 
@@ -120,13 +121,8 @@ impl Engine {
     }
 
     pub async fn execute(&self, request: ExecutionRequest) -> ExecutionResult {
-        let control = match ExecutionControl::default()
-            .with_optional_deadline(request.options.deadline.as_deref())
-        {
-            Ok(control) => control,
-            Err(error) => return failed_result(error),
-        };
-        self.execute_with_control(request, control).await
+        self.execute_with_control(request, ExecutionControl::default())
+            .await
     }
 
     pub async fn execute_with_control(
@@ -137,6 +133,10 @@ impl Engine {
         if self.is_closed() {
             return failed_result(EngineError::EngineClosed);
         }
+        let control = match control.with_request_deadline(request.options.deadline.as_deref()) {
+            Ok(control) => control,
+            Err(error) => return failed_result(error),
+        };
         if let Err(error) = validate_execution_configuration(&request) {
             return failed_result(error);
         }
@@ -154,15 +154,19 @@ impl Engine {
         if let Err(error) = self.admit_idempotency(&request) {
             return failed_result(error);
         }
-        if control
-            .deadline
-            .is_some_and(|deadline| deadline <= Instant::now())
-        {
-            return failed_result(EngineError::Timeout);
+        // An expired deadline refuses the operation before anything runs:
+        // nothing was sent, so the failure is in validation with no remote
+        // effect, unlike a deadline that fires during the execution.
+        if control.deadline_expired() {
+            return failed_result(EngineError::DeadlineExpired);
         }
         let active_jobs = Arc::new(Mutex::new(BTreeMap::new()));
         let deadline = control.deadline.map(tokio::time::Instant::from_std);
-        let execution = ACTIVE_ASYNC_JOBS.scope(active_jobs.clone(), self.execute_inner(request));
+        let tally = Arc::new(ExecutionTally::default());
+        let execution = EXECUTION_TALLY.scope(
+            tally.clone(),
+            ACTIVE_ASYNC_JOBS.scope(active_jobs.clone(), self.execute_inner(request)),
+        );
         enum Controlled<T> {
             Finished(T),
             Cancelled,
@@ -185,19 +189,40 @@ impl Engine {
                 }
             }
         };
-        match outcome {
+        let mut result = match outcome {
             Controlled::Finished(result) => result,
             Controlled::Cancelled => {
-                self.cancel_active_jobs(&active_jobs, RemoteCancelTrigger::Cancellation)
+                // The remote cancellation is a request of this execution too.
+                EXECUTION_TALLY
+                    .scope(
+                        tally.clone(),
+                        self.cancel_active_jobs(&active_jobs, RemoteCancelTrigger::Cancellation),
+                    )
                     .await;
                 failed_result_with_recoveries(EngineError::Cancelled, recoveries_from(&active_jobs))
             }
             Controlled::Deadline => {
-                self.cancel_active_jobs(&active_jobs, RemoteCancelTrigger::Deadline)
+                // The remote cancellation is a request of this execution too.
+                EXECUTION_TALLY
+                    .scope(
+                        tally.clone(),
+                        self.cancel_active_jobs(&active_jobs, RemoteCancelTrigger::Deadline),
+                    )
                     .await;
                 failed_result_with_recoveries(EngineError::Timeout, recoveries_from(&active_jobs))
             }
-        }
+        };
+        // Never fewer requests or retries than were actually sent: the
+        // response-based counts miss the attempts of a failure.
+        result.metrics.requests = result
+            .metrics
+            .requests
+            .max(tally.requests.load(Ordering::Relaxed));
+        result.metrics.retries = result
+            .metrics
+            .retries
+            .max(tally.retries.load(Ordering::Relaxed));
+        result
     }
 
     pub fn capabilities(&self) -> CapabilityDocument {
@@ -444,9 +469,9 @@ impl Engine {
                 error.column(),
             ))
         })?;
-        let control = ExecutionControl::new(cancellation)
-            .with_optional_deadline(request.options.deadline.as_deref())?;
-        let result = self.execute_with_control(request, control).await;
+        let result = self
+            .execute_with_control(request, ExecutionControl::new(cancellation))
+            .await;
         serde_json::to_string(&result)
             .map_err(|_| EngineError::Runtime(ErrorDetail::from("result could not be serialized")))
     }
@@ -3678,7 +3703,7 @@ fn pagination_url(base: &Url, target: &str, allow_cross_origin: bool) -> Result<
     Ok(resolved)
 }
 
-fn link_header_target(
+pub(crate) fn link_header_target(
     headers: &BTreeMap<String, String>,
     expected_relation: &str,
 ) -> Result<Option<String>, EngineError> {
@@ -3708,6 +3733,9 @@ fn link_header_target(
             {
                 return Ok(Some(target.to_owned()));
             }
+            // RFC 8288, 3.3: occurrences of rel after the first in a link
+            // value are ignored, so `rel=prev; rel=next` is not a next link.
+            break;
         }
     }
     Ok(None)
@@ -3776,13 +3804,34 @@ fn split_quoted(value: &str, separator: char) -> Result<Vec<&str>, EngineError> 
     Ok(values)
 }
 
-fn unquote_header_value(value: &str) -> Result<&str, EngineError> {
-    match (value.strip_prefix('"'), value.strip_suffix('"')) {
-        (Some(value), Some(_)) if value.ends_with('"') => Ok(&value[..value.len() - 1]),
-        (None, None) => Ok(value),
-        _ => Err(EngineError::InvalidResponse(ErrorDetail::from(
+/// The value of a Link parameter: a token as written, or a quoted-string with
+/// its quoted-pairs resolved (RFC 9110, 5.6.4). Comparing the escaped text
+/// would make `rel="n\ext"` miss `next` and end the pagination silently.
+fn unquote_header_value(value: &str) -> Result<Cow<'_, str>, EngineError> {
+    let invalid = || {
+        EngineError::InvalidResponse(ErrorDetail::from(
             "Link header contains an invalid quoted value",
-        ))),
+        ))
+    };
+    match (value.strip_prefix('"'), value.strip_suffix('"')) {
+        (Some(inner), Some(_)) if inner.ends_with('"') => {
+            let inner = &inner[..inner.len() - 1];
+            if !inner.contains('\\') {
+                return Ok(Cow::Borrowed(inner));
+            }
+            let mut unescaped = String::with_capacity(inner.len());
+            let mut characters = inner.chars();
+            while let Some(character) = characters.next() {
+                if character == '\\' {
+                    unescaped.push(characters.next().ok_or_else(invalid)?);
+                } else {
+                    unescaped.push(character);
+                }
+            }
+            Ok(Cow::Owned(unescaped))
+        }
+        (None, None) => Ok(Cow::Borrowed(value)),
+        _ => Err(invalid()),
     }
 }
 
@@ -4569,6 +4618,45 @@ mod tests {
             link_header_target(&headers, "last").unwrap().as_deref(),
             Some("/last")
         );
+    }
+
+    #[test]
+    fn a_quoted_relation_is_compared_without_its_escapes() {
+        // Found by the property test against RFC 8288: the quoted-pair was
+        // compared as written, so the next page was never found and the
+        // pagination ended as if the service had no more pages.
+        let headers = BTreeMap::from([(
+            "link".to_owned(),
+            r#"</a>; rel="n\ext", </b>; rel="http://example.com/\Rel""#.to_owned(),
+        )]);
+        assert_eq!(
+            link_header_target(&headers, "next").unwrap().as_deref(),
+            Some("/a")
+        );
+        assert_eq!(
+            link_header_target(&headers, "http://example.com/Rel")
+                .unwrap()
+                .as_deref(),
+            Some("/b")
+        );
+    }
+
+    #[test]
+    fn only_the_first_rel_parameter_of_a_link_counts() {
+        // Found by the property test against RFC 8288: a second rel in the
+        // same link value was honoured, so a link declared as prev was
+        // followed as the next page.
+        let headers = BTreeMap::from([(
+            "link".to_owned(),
+            "</prev>; rel=prev; rel=next, </next>; rel=next".to_owned(),
+        )]);
+        assert_eq!(
+            link_header_target(&headers, "next").unwrap().as_deref(),
+            Some("/next")
+        );
+        let headers =
+            BTreeMap::from([("link".to_owned(), "</prev>; rel=prev; rel=next".to_owned())]);
+        assert_eq!(link_header_target(&headers, "next").unwrap(), None);
     }
 
     #[test]

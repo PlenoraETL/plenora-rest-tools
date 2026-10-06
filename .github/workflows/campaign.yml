@@ -1,0 +1,130 @@
+name: Campaign
+
+# Campagna operativa del motore (smoke, carico con iniezione di guasti, soak)
+# contro il server locale in-process di crates/rest-campaign.
+#
+# È separata da Verify: dura da minuti a ore e misura risorse del runner, quindi
+# il suo esito dipende dalla macchina. Gira su avvio manuale (fase e durata a
+# scelta), una volta alla settimana in forma breve (smoke 5 min e load 15 min)
+# e, in modalità --quick, sulle pull request che toccano la campagna.
+#
+# Tetto: un job su runner GitHub ospitato dura al più 6 ore. Un soak più lungo
+# di 330 minuti di carico (più passaggio funzionale, compilazione e attesa
+# finale) non ci sta e viene rifiutato prima di iniziare: va eseguito su una
+# macchina dedicata con scripts/campaign.sh.
+
+on:
+  workflow_dispatch:
+    inputs:
+      phase:
+        description: Fase della campagna
+        type: choice
+        options:
+          - smoke
+          - load
+          - soak
+        default: smoke
+      duration_minutes:
+        description: Minuti di carico misto (vuoto = durata del profilo)
+        type: string
+        default: ""
+      quick:
+        description: Profilo quick (prova dell'harness, poche decine di secondi)
+        type: boolean
+        default: false
+  schedule:
+    - cron: "41 3 * * 1"
+  pull_request:
+    paths:
+      - crates/rest-campaign/**
+      - campaign/*.json
+      - scripts/campaign.sh
+      - .github/workflows/campaign.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: campaign-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  campaign:
+    name: Campagna operativa
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      CAMPAIGN_RUST_TOOLCHAIN: "1.98.1"
+      CAMPAIGN_HOST: github-actions ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install the gate toolchain
+        run: rustup toolchain install "$CAMPAIGN_RUST_TOOLCHAIN" --profile minimal
+
+      - name: Refuse a soak beyond the hosted runner limit
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          PHASE: ${{ inputs.phase }}
+          DURATION: ${{ inputs.duration_minutes }}
+          QUICK: ${{ inputs.quick }}
+        run: |
+          if [ -n "$DURATION" ] && ! [[ "$DURATION" =~ ^[0-9]+$ ]]; then
+            echo "duration_minutes deve essere un intero di minuti" >&2
+            exit 1
+          fi
+          planned="$DURATION"
+          if [ -z "$planned" ] && [ "$QUICK" != "true" ]; then
+            planned="$(python3 -c 'import json,sys; print(json.load(open("campaign/profiles.json"))[sys.argv[1]]["duration_s"] // 60)' "$PHASE")"
+          fi
+          if [ -n "$planned" ] && [ "$planned" -gt 330 ]; then
+            echo "Un job GitHub dura al più 6 ore: $planned minuti di carico non ci stanno. Usare scripts/campaign.sh su una macchina dedicata." >&2
+            exit 1
+          fi
+
+      - name: Run the requested phase
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          PHASE: ${{ inputs.phase }}
+          DURATION: ${{ inputs.duration_minutes }}
+          QUICK: ${{ inputs.quick }}
+        run: |
+          arguments=("$PHASE")
+          if [ "$QUICK" = "true" ]; then arguments+=(--quick); fi
+          if [ -n "$DURATION" ]; then arguments+=(--duration-min "$DURATION"); fi
+          ./scripts/campaign.sh "${arguments[@]}"
+
+      - name: Run short smoke and load (weekly)
+        if: github.event_name == 'schedule'
+        run: |
+          status=0
+          ./scripts/campaign.sh smoke --duration-min 5 || status=1
+          ./scripts/campaign.sh load --duration-min 15 || status=1
+          exit "$status"
+
+      - name: Exercise the harness (quick)
+        if: github.event_name == 'pull_request'
+        run: |
+          status=0
+          ./scripts/campaign.sh smoke --quick || status=1
+          ./scripts/campaign.sh load --quick || status=1
+          exit "$status"
+
+      - name: Publish the summaries
+        if: always()
+        run: |
+          shopt -s nullglob
+          for summary in campaign-out/*.md; do
+            cat "$summary" >> "$GITHUB_STEP_SUMMARY"
+            echo >> "$GITHUB_STEP_SUMMARY"
+          done
+
+      - name: Upload the reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: campaign-reports-${{ github.run_id }}
+          path: campaign-out/
+          if-no-files-found: error
+          retention-days: 90

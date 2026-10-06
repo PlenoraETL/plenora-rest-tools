@@ -10,3 +10,7 @@ target
 *.pyd
 *.dll
 *.dylib
+fuzz/target
+fuzz/artifacts
+fuzz/coverage
+fuzz/corpus-lavoro
