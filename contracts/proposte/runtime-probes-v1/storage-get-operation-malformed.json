@@ -1,0 +1,28 @@
+{
+  "$schema": "../../schemas/runtime-probe-v1.schema.json",
+  "schema_version": 1,
+  "contract": "plenora-runtime-probe-v1",
+  "rule": "RT-017",
+  "base": "storage-get-request.json",
+  "mutation": {
+    "set": {
+      "plenora.capability.operation": "Storage.Get"
+    }
+  },
+  "expected": {
+    "content_type": "application/vnd.plenora.error+json",
+    "error": {
+      "category": "protocol",
+      "phase": "validate",
+      "remote_effect": "none",
+      "retry": {
+        "kind": "never"
+      }
+    },
+    "metadata": {
+      "plenora.operation.version": "1",
+      "plenora.output.contract": "plenora-error-v1",
+      "plenora.trace.correlation_id": "018f3d84-7b2c-7f00-8000-000000000013"
+    }
+  }
+}

@@ -212,14 +212,15 @@ per ogni criterio e controllano che il gate fallisca.
 | remote_effect e retry advice | per classe di guasto: none dove nessun byte è partito, mai none dopo l'invio, mai safe per un POST interrotto, requires_recovery per un polling timeout |
 | metriche | metrics.requests mai inferiore alle richieste ricevute dal server |
 
-### Soglie proposte
+### Soglie
 
 I limiti numerici sono una decisione dell'utente. campaign/limits.json
-contiene default proposti per il server locale, ognuno con la motivazione
-scritta accanto, e il campo approval che il report ricopia; oggi vale
-«proposta, da approvare». I principali:
+contiene le soglie per il server locale, ognuna con la motivazione scritta
+accanto, e il campo approval che il report ricopia. Il 2026-10-06 l'utente le
+ha approvate come gate di regressione su loopback; quelle per l'ambiente
+Plenora si fissano dopo la staging. Le principali:
 
-| soglia | proposta |
+| soglia | valore |
 | --- | --- |
 | esiti inattesi, retry oltre max_attempts, submit duplicati, file incompleti, perdita d'ordine, esposizioni | 0 |
 | p99 (ms) | ok 1000, page_offset 2000, job 2000, enrich 5000, download e upload 10000 |
@@ -235,8 +236,9 @@ scritta accanto, e il campo approval che il report ricopia; oggi vale
 
 ### Cosa resta per chiudere il gate
 
-- approvare o sostituire le soglie di campaign/limits.json per l'ambiente
-  Plenora e aggiornare il campo approval;
+- fissare le soglie per l'ambiente Plenora dopo la prima esecuzione in
+  staging (quelle attuali sono approvate come gate di regressione su
+  loopback) e aggiornare il campo approval;
 - eseguire le fasi in staging con configurazioni, dimensioni e servizi
   rappresentativi di Plenora: il server locale prova il motore, non i servizi
   reali, le credenziali reali né gli artifact source e sink del runtime;

@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.plenora.dev/runtime-probe-v1.schema.json",
+  "title": "Plenora runtime binding rejection probe v1",
+  "description": "One mutation of a runtime request vector and the rejection result it must produce before invocation (Runtime Binding 1.0, RT-016 to RT-021).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "contract", "rule", "base", "mutation", "expected"],
+  "properties": {
+    "$schema": {"type": "string"},
+    "schema_version": {"const": 1},
+    "contract": {"const": "plenora-runtime-probe-v1"},
+    "rule": {
+      "description": "The requirement the probe exercises.",
+      "type": "string",
+      "pattern": "^RT-[0-9]{3}$"
+    },
+    "base": {
+      "description": "File name of a request vector in vectors/runtime-v1.",
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]*\\.json$"
+    },
+    "mutation": {
+      "description": "Exactly one metadata key set to a value of any JSON type, or removed.",
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "maxProperties": 1,
+      "properties": {
+        "set": {
+          "type": "object",
+          "minProperties": 1,
+          "maxProperties": 1,
+          "propertyNames": {"pattern": "^plenora\\."}
+        },
+        "remove": {"type": "string", "pattern": "^plenora\\."}
+      }
+    },
+    "expected": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["content_type", "error", "metadata"],
+      "properties": {
+        "content_type": {"const": "application/vnd.plenora.error+json"},
+        "error": {
+          "description": "The four common axes of the plenora-error-v1 result.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["category", "phase", "remote_effect", "retry"],
+          "properties": {
+            "category": {"type": "string"},
+            "phase": {"type": "string"},
+            "remote_effect": {"type": "string"},
+            "retry": {"type": "object"}
+          }
+        },
+        "metadata": {
+          "description": "Every routing and correlation key of the result, with its exact value; a key not listed is absent. plenora.message.id (always new) and plenora.message.causation_id (RT-020) are not listed.",
+          "type": "object",
+          "propertyNames": {
+            "enum": [
+              "plenora.capability.operation",
+              "plenora.operation.version",
+              "plenora.output.contract",
+              "plenora.trace.correlation_id"
+            ]
+          },
+          "additionalProperties": {"type": "string"},
+          "required": ["plenora.output.contract"]
+        }
+      }
+    }
+  }
+}

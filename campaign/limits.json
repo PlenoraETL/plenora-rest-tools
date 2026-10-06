@@ -1,6 +1,6 @@
 {
   "schema": "plenora-rest-campaign-limits-v1",
-  "approval": "proposta, da approvare: default per il server locale della campagna, non ancora decisi per l'ambiente Plenora",
+  "approval": "approvate dall'utente il 2026-10-06 come gate di regressione sul server locale (loopback); le soglie per l'ambiente Plenora restano da fissare dopo la staging",
   "unexpected_outcomes_max": 0,
   "conservative_remote_effect_is_failure": false,
   "metrics_underreport_is_failure": true,
