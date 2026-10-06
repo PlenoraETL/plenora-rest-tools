@@ -213,7 +213,9 @@ l'integrazione canary in Plenora. Lo stato e i criteri sono mantenuti nella
 
 ## Documentazione
 
+- [Regole del repository](AGENTS.md)
 - [Architettura e confini](docs/architecture.md)
+- [Limiti e deviazioni](docs/limiti.md)
 - [Contratti pubblici](contracts/README.md)
 - [Sviluppo, verifica e release](docs/development.md)
 - [Stato e strada verso la produzione](docs/roadmap.md)

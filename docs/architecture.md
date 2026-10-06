@@ -235,7 +235,8 @@ RabbitMQ o SQS non è responsabilità di questa libreria.
 
 I payload ordinari rispettano max_request_bytes e max_response_bytes. Upload e
 download usano un limite separato, max_file_transfer_bytes, e non devono
-caricare l'intero artifact in memoria.
+caricare l'intero artifact in memoria. Tutti i limiti, con default e
+comportamento oltre la soglia, sono in [Limiti e deviazioni](limiti.md).
 
 I trasferimenti locali richiedono sia allow_file_transfers sia una file_root
 configurata. Senza file_root non esiste un confine da applicare, quindi la

@@ -120,6 +120,12 @@ pub enum EngineError {
     PollingTimeout {
         attempts: u32,
     },
+    /// Pagination stopped at `max_rows` or `max_pages` while the source
+    /// still had data: the rows returned are a prefix, not the whole.
+    PaginationLimit {
+        max_rows: usize,
+        max_pages: Option<usize>,
+    },
     /// The execution deadline had already passed when the operation was
     /// admitted: nothing was resolved or sent.
     DeadlineExpired,
@@ -275,6 +281,7 @@ impl EngineError {
             Self::Authentication(_) => "AUTHENTICATION_FAILED",
             Self::IdempotencyConflict => "IDEMPOTENCY_CONFLICT",
             Self::PollingTimeout { .. } => "POLLING_TIMEOUT",
+            Self::PaginationLimit { .. } => "PAGINATION_LIMIT_REACHED",
             Self::DeadlineExpired => "DEADLINE_EXPIRED",
             Self::DownloadWrite(_) => "DOWNLOAD_WRITE_FAILED",
             Self::CleanupAfterPublish(_) => "CLEANUP_AFTER_PUBLISH_FAILED",
@@ -308,6 +315,9 @@ impl EngineError {
             Self::Authentication(_) => "Authentication failed",
             Self::IdempotencyConflict => "Idempotency key conflicts with prior input",
             Self::PollingTimeout { .. } => "Asynchronous operation did not complete",
+            Self::PaginationLimit { .. } => {
+                "Pagination stopped at a configured limit with data remaining"
+            }
             Self::DeadlineExpired => "Execution deadline had already passed",
             Self::DownloadWrite(_) => "Download could not be written after the request was sent",
             Self::CleanupAfterPublish(_) => {
@@ -335,7 +345,8 @@ impl EngineError {
             Self::EngineClosed => ErrorCategory::Execution,
             Self::ResponseTooLarge { .. }
             | Self::RequestTooLarge { .. }
-            | Self::FileTooLarge { .. } => ErrorCategory::ResourceLimit,
+            | Self::FileTooLarge { .. }
+            | Self::PaginationLimit { .. } => ErrorCategory::ResourceLimit,
             Self::FileIo(_) | Self::DownloadWrite(_) | Self::CleanupAfterPublish(_) => {
                 ErrorCategory::Io
             }
@@ -374,7 +385,8 @@ impl EngineError {
             | Self::HttpStatus { .. }
             | Self::InvalidResponse(_)
             | Self::Application(_)
-            | Self::PollingTimeout { .. } => ErrorPhase::Read,
+            | Self::PollingTimeout { .. }
+            | Self::PaginationLimit { .. } => ErrorPhase::Read,
             Self::Runtime(_) => ErrorPhase::Cleanup,
         }
     }
@@ -427,6 +439,16 @@ impl EngineError {
             }
             Self::PollingTimeout { attempts } => {
                 BTreeMap::from([("poll_attempts".to_owned(), json!(attempts))])
+            }
+            Self::PaginationLimit {
+                max_rows,
+                max_pages,
+            } => {
+                let mut details = BTreeMap::from([("max_rows".to_owned(), json!(max_rows))]);
+                if let Some(max_pages) = max_pages {
+                    details.insert("max_pages".to_owned(), json!(max_pages));
+                }
+                details
             }
             _ => BTreeMap::new(),
         }

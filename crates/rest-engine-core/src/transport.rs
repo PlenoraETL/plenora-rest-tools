@@ -1201,13 +1201,12 @@ impl Transport {
                         rate_limit_wait_ms.saturating_add(response.rate_limit_wait_ms);
                     let retry_status = request.retry.retry_on_status.contains(&response.status);
                     if can_retry && retry_status && attempt < max_attempts {
-                        sleep(retry_delay(
-                            &request.retry,
-                            attempt,
-                            response.retry_after_ms,
-                        ))
-                        .await;
-                        continue;
+                        if let Some(delay) =
+                            retry_wait(&request.retry, attempt, response.retry_after_ms)
+                        {
+                            sleep(delay).await;
+                            continue;
+                        }
                     }
                     response.attempts = attempt;
                     response.network_requests = network_requests;
@@ -1326,8 +1325,10 @@ impl Transport {
                 && request.retry.retry_on_status.contains(&status)
                 && attempt < max_attempts
             {
-                sleep(retry_delay(&request.retry, attempt, retry_after_ms)).await;
-                continue;
+                if let Some(delay) = retry_wait(&request.retry, attempt, retry_after_ms) {
+                    sleep(delay).await;
+                    continue;
+                }
             }
 
             match self
@@ -2777,6 +2778,20 @@ fn is_retryable_transport_error(error: &EngineError) -> bool {
     )
 }
 
+/// Wait before retrying a response the server asked to retry later, or
+/// `None` when the retry must not happen.
+///
+/// A `Retry-After` longer than `max_retry_after_ms` is not shortened to fit:
+/// retrying before the time the server named would ignore its instruction and
+/// add load where it asked for less. The response is returned as it is, so
+/// the operation fails with its HTTP status instead of retrying early.
+fn retry_wait(policy: &RetryPolicy, attempt: u32, retry_after_ms: Option<u64>) -> Option<Duration> {
+    match retry_after_ms {
+        Some(delay) if policy.respect_retry_after && delay > policy.max_retry_after_ms => None,
+        _ => Some(retry_delay(policy, attempt, retry_after_ms)),
+    }
+}
+
 fn retry_delay(policy: &RetryPolicy, attempt: u32, retry_after_ms: Option<u64>) -> Duration {
     if policy.respect_retry_after {
         if let Some(delay) = retry_after_ms {
@@ -2795,8 +2810,8 @@ pub(crate) fn parse_retry_after(value: &str, now: SystemTime) -> Option<u64> {
     let value = value.trim();
     // delay-seconds has no upper bound (RFC 9110, 10.2.3). A value too large
     // for u64 milliseconds is the longest possible wait, not an absent
-    // header: it saturates, and retry_delay then caps it at
-    // max_retry_after_ms. Reading it as absent fell back to the exponential
+    // header: it saturates, so it exceeds max_retry_after_ms and retry_wait
+    // stops the retry. Reading it as absent fell back to the exponential
     // backoff and retried sooner than the service asked.
     match value.parse::<u64>() {
         Ok(seconds) => return Some(seconds.saturating_mul(1_000)),
