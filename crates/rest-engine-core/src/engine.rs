@@ -1782,6 +1782,19 @@ impl Engine {
         // request itself, so a slow poll cannot run past the configured limit.
         let remaining = |elapsed: Duration| budget.map(|budget| budget.saturating_sub(elapsed));
         let mut interval_ms = polling.interval_ms;
+        // The factor is validated (finite, at least one) before any request.
+        // The first wait is interval_ms itself; the backoff then gives
+        // min(max_interval_ms, interval_ms · interval_backoff^n), see
+        // crate::exact::Backoff.
+        let mut backoff = crate::exact::Backoff::new(
+            polling.interval_ms,
+            polling.interval_backoff,
+            polling.max_interval_ms,
+        )
+        .ok_or_else(|| {
+            EngineError::Runtime(ErrorDetail::from("polling interval backoff is invalid"))
+        })?;
+        backoff.next_ms();
         let mut attempts = 0_u32;
         for _ in 0..polling.max_attempts {
             if remaining(poll_started.elapsed()).is_some_and(|left| left.is_zero()) {
@@ -1842,17 +1855,7 @@ impl Engine {
                     )));
                 }
             }
-            // Exact: the factor is validated (finite, at least one) before any
-            // request; a product above max_interval_ms is max_interval_ms
-            // because the true value exceeds it.
-            interval_ms = crate::exact::scale_floor(
-                interval_ms,
-                polling.interval_backoff,
-                polling.max_interval_ms,
-            )
-            .ok_or_else(|| {
-                EngineError::Runtime(ErrorDetail::from("polling interval backoff is invalid"))
-            })?;
+            interval_ms = backoff.next_ms();
         }
 
         self.cancel_active_job(&active_key, RemoteCancelTrigger::PollTimeout)
@@ -4551,9 +4554,7 @@ fn validate_numeric_settings(connection: &ConnectionConfig) -> Result<(), Engine
         .requests_per_second
         .is_some_and(|rate| crate::exact::rate_interval(rate).is_none())
     {
-        return invalid(
-            "requests_per_second must give an interval between 1 ns and the longest duration",
-        );
+        return invalid("requests_per_second must give an interval between 1 ns and u64::MAX ns");
     }
     if connection.request.timeout_ms == Some(0) {
         return invalid("request timeout_ms must be greater than zero");

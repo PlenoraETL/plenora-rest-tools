@@ -281,9 +281,10 @@ pub struct ConnectionConfig {
     /// between requests is `10^9 / rate` nanoseconds, computed exactly and
     /// rounded up to a whole nanosecond (never faster than the rate). A value
     /// that is not finite and greater than zero, or whose interval is shorter
-    /// than one nanosecond (above 10^9) or longer than the longest `Duration`
-    /// of `u64` nanoseconds (below about 5.4 · 10^-11), fails with
-    /// `INVALID_INPUT` before any request; it is never clamped.
+    /// than one nanosecond (above 10^9) or, rounded up, longer than
+    /// `u64::MAX` nanoseconds (about 584 years: a rate below about
+    /// 5.4 · 10^-11, such as 2^-35), fails with `INVALID_INPUT` before any
+    /// request; it is never clamped.
     /// Default `None`.
     pub requests_per_second: Option<f64>,
     /// TLS verification, trusted roots, and client identity.
@@ -973,10 +974,17 @@ pub struct RetryPolicy {
     /// `max_backoff_ms`). Zero means no retry ever waits, whatever the
     /// factor. Default 500.
     pub backoff_base_ms: u64,
-    /// Multiplier of the backoff: each retry after the first waits the
-    /// previous delay times this factor, computed exactly and rounded down to
-    /// a whole millisecond, capped at `max_backoff_ms`. A value below 1 or not
-    /// finite fails with `INVALID_INPUT`. Default 2.0.
+    /// Multiplier of the backoff. The n-th retry (from 0) waits
+    /// `min(max_backoff_ms, floor(D_n))` milliseconds, where
+    /// `D_0 = backoff_base_ms` and `D_{n+1} = D_n · backoff_factor`, computed
+    /// in integer arithmetic on the exact value of the factor and truncated to
+    /// a multiple of `2^-128` ms at each step. The result is never longer
+    /// than `min(max_backoff_ms, floor(base · factor^n))` and at most 1 ms
+    /// shorter; it is equal to it with an integer factor, with a factor
+    /// `p / 2^k` for the first `128 / k` retries, and once the cap is
+    /// reached. The delay never stops growing before the cap (with base 1
+    /// and factor 1.5 it reaches 30 000 ms at the 27th retry). A value below 1
+    /// or not finite fails with `INVALID_INPUT`. Default 2.0.
     pub backoff_factor: f64,
     /// Ceiling of the backoff delay, in milliseconds: a delay whose exact
     /// value exceeds it waits this long. Default 30 000.
@@ -1276,10 +1284,11 @@ pub struct PollingConfig {
     pub failure_values: Vec<String>,
     /// Wait before each status request, in milliseconds. Default 1 000.
     pub interval_ms: u64,
-    /// Multiplier applied to the wait after each status request, computed
-    /// exactly and rounded down to a whole millisecond, capped at
-    /// `max_interval_ms`; must be finite and at least 1, otherwise
-    /// `INVALID_INPUT`. Default 1.0.
+    /// Multiplier applied to the wait after each status request, with the
+    /// same exact definition as `RetryPolicy::backoff_factor`: the n-th wait
+    /// is `interval_ms · interval_backoff^n` within 1 ms below, capped at
+    /// `max_interval_ms` from the second wait on. Must be finite and at least
+    /// 1, otherwise `INVALID_INPUT`. Default 1.0.
     pub interval_backoff: f64,
     /// Ceiling of the wait between status requests, in milliseconds.
     /// Default 30 000.

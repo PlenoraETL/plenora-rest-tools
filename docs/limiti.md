@@ -23,7 +23,7 @@ ciascuna con il motivo.
 | `max_response_bytes` | 32 MiB | body di risposta letto in memoria | `RESPONSE_TOO_LARGE`, la lettura si interrompe al limite |
 | `max_file_transfer_bytes` | 1 GiB | upload e download in streaming (abbassabile per richiesta con `input.file.max_bytes`) | `FILE_TOO_LARGE`; un download non pubblica mai il file di staging incompleto |
 | `max_concurrent_requests` | 64 | richieste HTTP in volo nello stesso Engine | le richieste in più **aspettano** un permesso (entro deadline e cancellazione); 0, o un valore sopra `Semaphore::MAX_PERMITS` di tokio (`usize::MAX >> 3`), fa fallire ogni esecuzione con `INVALID_INPUT`; `Engine::new` non va mai in panic |
-| `requests_per_second` | nessuno | ritmo delle richieste (sovrascrivibile per connessione) | le richieste aspettano; l'attesa è in `metrics.rate_limit_wait_ms`; l'intervallo è `10^9 / rate` ns calcolato esattamente e arrotondato per eccesso al nanosecondo; un rate il cui intervallo non sta fra 1 ns e la `Duration` più lunga (0 o sopra 10^9 nell'Engine; non finito, non positivo, sopra 10^9 o sotto circa 5,4 · 10^-11 nella connessione) è `INVALID_INPUT` prima della rete, mai limitato in silenzio |
+| `requests_per_second` | nessuno | ritmo delle richieste (sovrascrivibile per connessione) | le richieste aspettano; l'attesa è in `metrics.rate_limit_wait_ms`; l'intervallo è `10^9 / rate` ns calcolato esattamente e arrotondato per eccesso al nanosecondo; un rate il cui intervallo non sta fra 1 ns e `u64::MAX` ns, circa 584 anni (0 o sopra 10^9 nell'Engine; non finito, non positivo, sopra 10^9 o sotto circa 5,4 · 10^-11, per esempio 2^-35, nella connessione) è `INVALID_INPUT` prima della rete, mai limitato in silenzio |
 | `max_pooled_origins` | 128 | client HTTP tenuti nel pool, uno per origin e configurazione | il meno recente viene chiuso; la richiesta successiva verso quell'origin ne crea uno nuovo |
 | `pool_max_idle_per_host` | 50 | connessioni inattive per host | chiuse dal pool |
 | `pool_idle_timeout_ms` | 90 000 | vita di una connessione inattiva | chiusa dal pool |
@@ -39,7 +39,7 @@ ciascuna con il motivo.
 | `request.max_redirects` | 5 (redirect spenti per default) | `INVALID_RESPONSE`, nessun redirect seguito oltre il limite |
 | `retry.max_attempts` | 1 | si restituisce l'ultimo esito; i tentativi non superano mai il limite; 0 è `INVALID_INPUT` |
 | `retry.max_backoff_ms` | 30 000 | un'attesa il cui valore esatto lo supera aspetta questo valore |
-| `retry.backoff_factor` | 2 | non finito o minore di 1: `INVALID_INPUT`. Il primo retry aspetta `backoff_base_ms`, ogni successivo l'attesa precedente per il fattore, in aritmetica esatta e arrotondata per difetto al millisecondo; con base 0 nessun retry aspetta |
+| `retry.backoff_factor` | 2 | non finito o minore di 1: `INVALID_INPUT`. L'n-esimo retry aspetta `min(max_backoff_ms, floor(backoff_base_ms · backoff_factor^n))`, calcolato in aritmetica intera con 128 bit frazionari: mai più lungo, al più 1 ms più corto, uguale con fattore intero e dal tetto in poi; l'attesa cresce sempre fino al tetto; con base 0 nessun retry aspetta |
 | `request.timeout_ms` | timeout dell'Engine | 0 è `INVALID_INPUT`; lo stesso per `connect_timeout_ms` e `request_timeout_ms` a 0 nell'Engine, a ogni esecuzione |
 | `retry.max_retry_after_ms` | 300 000 | un `Retry-After` più lungo, anche oltre il rappresentabile, **non** viene accorciato: niente nuovo tentativo, l'operazione fallisce con lo status HTTP ricevuto |
 | `pagination.page_size` | 100 | 0 è `INVALID_INPUT` |
