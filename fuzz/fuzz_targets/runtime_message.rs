@@ -122,44 +122,32 @@ fuzz_target!(|dati: &[u8]| {
             &esiti::stringhe_distintive(&serde_json::to_value(&richiesta).expect("richiesta")),
         );
     }
-    for chiave in [
-        "plenora.trace.correlation_id",
-        "plenora.capability.operation",
-    ] {
-        if let Some(valore) = richiesta.metadata.get(chiave) {
-            assert_eq!(message.metadata.get(chiave), Some(valore));
-        }
-    }
-    if let Some(id) = richiesta.metadata.get("plenora.message.id") {
-        assert_eq!(
-            message.metadata.get("plenora.message.causation_id"),
-            Some(id)
-        );
-    }
-
-    // Una richiesta senza correlazione riceve una correlazione nuova, casuale
-    // come l'identificativo del messaggio di risposta.
-    let correlazione_generata = !richiesta
+    // Identità del risultato (Runtime Binding 1.0 RT-019 e RT-020, proposti
+    // in plenora-contracts #21): correlazione e operazione sono copiate byte
+    // per byte solo se canoniche, altrimenti omesse; mai inventate. La
+    // causazione è l'identificativo della richiesta, solo se canonico.
+    let correlazione = richiesta.metadata.get("plenora.trace.correlation_id");
+    assert_eq!(
+        message.metadata.get("plenora.trace.correlation_id"),
+        correlazione.filter(|valore| uuid_canonico(valore))
+    );
+    let operazione = richiesta.metadata.get("plenora.capability.operation");
+    assert_eq!(
+        message.metadata.get("plenora.capability.operation"),
+        operazione.filter(|valore| operazione_canonica(valore))
+    );
+    let id_richiesta = richiesta.metadata.get("plenora.message.id");
+    assert_eq!(
+        message.metadata.get("plenora.message.causation_id"),
+        id_richiesta.filter(|valore| uuid_canonico(valore))
+    );
+    // L'identificativo del risultato è sempre nuovo e canonico.
+    let id = message
         .metadata
-        .contains_key("plenora.trace.correlation_id");
-    let id_casuali: &[&str] = if correlazione_generata {
-        &["plenora.message.id", "plenora.trace.correlation_id"]
-    } else {
-        &["plenora.message.id"]
-    };
-    for chiave in id_casuali {
-        let id = message
-            .metadata
-            .get(*chiave)
-            .expect("identificativo generato");
-        assert!(
-            id.len() == 36
-                && id.bytes().all(
-                    |byte| (byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()) || byte == b'-'
-                ),
-            "identificativo generato non canonico"
-        );
-    }
+        .get("plenora.message.id")
+        .expect("identificativo generato");
+    assert!(uuid_canonico(id), "identificativo generato non canonico");
+    assert_ne!(Some(id), id_richiesta);
 
     // Determinismo, a parte gli identificativi casuali e una scadenza che
     // può cadere tra le due invocazioni.
@@ -187,3 +175,27 @@ fuzz_target!(|dati: &[u8]| {
         );
     }
 });
+
+/// UUID in forma canonica: 36 caratteri, trattini nelle posizioni 8, 13, 18
+/// e 23, cifre esadecimali minuscole altrove.
+fn uuid_canonico(valore: &str) -> bool {
+    valore.len() == 36
+        && valore.bytes().enumerate().all(|(indice, byte)| {
+            if matches!(indice, 8 | 13 | 18 | 23) {
+                byte == b'-'
+            } else {
+                byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
+            }
+        })
+}
+
+/// `^[a-z][a-z0-9_-]*(\.[a-z][a-z0-9_-]*)+$`.
+fn operazione_canonica(valore: &str) -> bool {
+    let segmenti = valore.split('.').collect::<Vec<_>>();
+    segmenti.len() >= 2
+        && segmenti.iter().all(|segmento| {
+            let mut byte = segmento.bytes();
+            byte.next().is_some_and(|primo| primo.is_ascii_lowercase())
+                && byte.all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+        })
+}
