@@ -1,0 +1,109 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.plenora.dev/capabilities-v2.schema.json",
+  "title": "Plenora public capability catalog v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "component", "component_version", "interfaces", "operations"],
+  "properties": {
+    "schema_version": {"const": 2},
+    "component": {
+      "type": "string",
+      "pattern": "^plenora-[a-z][a-z0-9-]{1,62}$"
+    },
+    "component_version": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)([-+][0-9A-Za-z.-]+)?$"
+    },
+    "interfaces": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/interface"}
+    },
+    "operations": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/operation"}
+    }
+  },
+  "$defs": {
+    "contractId": {
+      "type": "string",
+      "pattern": "^plenora-[a-z0-9-]+-v[1-9][0-9]*$"
+    },
+    "surface": {"enum": ["rust", "cli", "python_sdk", "runtime"]},
+    "interface": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "contract", "version"],
+      "properties": {
+        "kind": {"$ref": "#/$defs/surface"},
+        "contract": {"$ref": "#/$defs/contractId"},
+        "version": {"type": "integer", "minimum": 1},
+        "artifact": {"type": "string", "minLength": 1, "maxLength": 128}
+      }
+    },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract", "content_types"],
+      "properties": {
+        "contract": {"$ref": "#/$defs/contractId"},
+        "content_types": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+$"
+          }
+        }
+      }
+    },
+    "controls": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cancellation", "deadline", "idempotency_key"],
+      "properties": {
+        "cancellation": {"type": "boolean"},
+        "deadline": {"type": "boolean"},
+        "idempotency_key": {"type": "boolean"}
+      }
+    },
+    "operation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version", "status", "surfaces", "input", "output", "side_effect", "controls"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_-]*(\\.[a-z][a-z0-9_-]*)+$"
+        },
+        "version": {"type": "integer", "minimum": 1},
+        "status": {"enum": ["available", "unavailable", "experimental", "deprecated"]},
+        "reason": {"type": "string", "minLength": 1, "maxLength": 512},
+        "surfaces": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/surface"}
+        },
+        "input": {"$ref": "#/$defs/payload"},
+        "output": {"$ref": "#/$defs/payload"},
+        "side_effect": {"enum": ["none", "local", "remote"]},
+        "controls": {"$ref": "#/$defs/controls"},
+        "attributes": {"type": "object"}
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {"status": {"const": "unavailable"}},
+            "required": ["status"]
+          },
+          "then": {"required": ["reason"]}
+        }
+      ]
+    }
+  }
+}

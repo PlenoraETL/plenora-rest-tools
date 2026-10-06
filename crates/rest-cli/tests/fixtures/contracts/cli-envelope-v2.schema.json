@@ -1,0 +1,98 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.plenora.dev/cli-envelope-v2.schema.json",
+  "title": "Plenora CLI envelope v2",
+  "oneOf": [
+    {"$ref": "#/$defs/success"},
+    {"$ref": "#/$defs/failure"}
+  ],
+  "$defs": {
+    "identity": {
+      "type": "object",
+      "required": [
+        "status",
+        "protocol_version",
+        "component",
+        "component_version",
+        "contract",
+        "command"
+      ],
+      "properties": {
+        "status": {"enum": ["ok", "error"]},
+        "protocol_version": {"const": 2},
+        "component": {
+          "type": "string",
+          "pattern": "^plenora-[a-z][a-z0-9-]{1,62}$"
+        },
+        "component_version": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)([-+][0-9A-Za-z.-]+)?$"
+        },
+        "contract": {
+          "type": "string",
+          "pattern": "^plenora-[a-z0-9-]+-v[1-9][0-9]*$"
+        },
+        "command": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]{0,63}$"
+        }
+      }
+    },
+    "success": {
+      "allOf": [
+        {"$ref": "#/$defs/identity"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "protocol_version",
+            "component",
+            "component_version",
+            "contract",
+            "command",
+            "result"
+          ],
+          "properties": {
+            "status": {"const": "ok"},
+            "protocol_version": {"const": 2},
+            "component": {"type": "string"},
+            "component_version": {"type": "string"},
+            "contract": {"type": "string"},
+            "command": {"type": "string"},
+            "result": {"type": "object"}
+          }
+        }
+      ]
+    },
+    "failure": {
+      "allOf": [
+        {"$ref": "#/$defs/identity"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "protocol_version",
+            "component",
+            "component_version",
+            "contract",
+            "command",
+            "error"
+          ],
+          "properties": {
+            "status": {"const": "error"},
+            "protocol_version": {"const": 2},
+            "component": {"type": "string"},
+            "component_version": {"type": "string"},
+            "contract": {"type": "string"},
+            "command": {"type": "string"},
+            "error": {
+              "$ref": "https://schemas.plenora.dev/error-v1.schema.json"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

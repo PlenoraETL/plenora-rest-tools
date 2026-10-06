@@ -1,7 +1,9 @@
 [workspace]
 members = [
+    "crates/rest-cli",
     "crates/rest-engine-core",
     "crates/rest-engine-python",
+    "crates/rest-campaign",
 ]
 resolver = "3"
 
@@ -12,6 +14,11 @@ rust-version = "1.85.1"
 license = "MIT OR Apache-2.0"
 authors = ["PlenoraETL contributors"]
 repository = "https://github.com/PlenoraETL/plenora-rest-tools"
+
+# The ban on `unsafe` covers every target of every crate, tests and examples
+# included, not only the library roots that repeat it as a crate attribute.
+[workspace.lints.rust]
+unsafe_code = "forbid"
 
 [workspace.dependencies]
 # Every direct dependency is pinned to the exact version in Cargo.lock.
@@ -35,11 +42,21 @@ futures-util = "=0.3.34"
 getrandom = "=0.4.3"
 httpdate = "=1.0.3"
 percent-encoding = "=2.3.2"
+# Dev-dependency only: property tests of the parsers of remote input
+# (src/property_tests.rs), each checked against an oracle written in the test.
+# Default features off: `fork` and `timeout` would pull rusty-fork and tempfile
+# for process isolation the tests do not use. 1.11.0 declares rust-version
+# 1.85, within the published MSRV; licence MIT OR Apache-2.0.
+proptest = { version = "=1.11.0", default-features = false, features = ["std"] }
 quick-xml = "=0.41.0"
 pyo3 = "=0.29.2"
 reqwest = { version = "=0.12.28", default-features = false, features = ["brotli", "charset", "cookies", "deflate", "gzip", "http2", "json", "multipart", "rustls-tls", "stream", "zstd"] }
 serde = { version = "=1.0.229", features = ["derive"] }
-serde_json = "=1.0.151"
+# float_roundtrip: without it serde_json reads some decimal numbers one unit
+# in the last place off (its fast path is not correctly rounded), so a number
+# from a remote response could change value without an error. Exact numeric
+# conversion is a policy, not an option; the cost is slower float parsing.
+serde_json = { version = "=1.0.151", features = ["float_roundtrip"] }
 sha2 = "=0.10.9"
 time = { version = "=0.3.45", features = ["parsing"] }
 tokio = { version = "=1.53.1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }

@@ -1,0 +1,25 @@
+{
+  "$schema": "../../schemas/runtime-vector-v1.schema.json",
+  "schema_version": 1,
+  "contract": "plenora-runtime-vector-v1",
+  "kind": "error",
+  "content_type": "application/vnd.plenora.error+json",
+  "metadata": {
+    "plenora.message.id": "018f3d84-7b2c-7f00-8000-000000000112",
+    "plenora.capability.operation": "rest.upload",
+    "plenora.operation.version": "1",
+    "plenora.output.contract": "plenora-error-v1",
+    "plenora.trace.correlation_id": "018f3d84-7b2c-7f00-8000-000000000012"
+  },
+  "payload": {
+    "category": "timeout",
+    "phase": "write",
+    "remote_effect": "unknown",
+    "retry": {"kind": "requires_recovery"},
+    "code": "UPLOAD_OUTCOME_UNKNOWN",
+    "provider": "rest",
+    "execution_id": "vector-execution-3",
+    "message": "The upload outcome is unknown; reconcile before another attempt.",
+    "details": {"recovery_ref": "recovery://rest/upload-vector"}
+  }
+}

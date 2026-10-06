@@ -25,5 +25,15 @@ tokio-util.workspace = true
 url.workspace = true
 uuid.workspace = true
 
+[features]
+# Not public surface: exposes the private parsers of remote input to the
+# detached fuzz crate (fuzz/), through the doc(hidden) `fuzzing` module. It is
+# outside the v1 compatibility contract and adds no dependency.
+fuzzing = []
+
 [dev-dependencies]
+proptest.workspace = true
 tokio = { workspace = true, features = ["macros"] }
+
+[lints]
+workspace = true

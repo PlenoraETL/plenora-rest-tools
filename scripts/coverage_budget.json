@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "surfaces": {
+    "rust_product": {
+      "report_format": "llvm",
+      "minimum_percent": {
+        "functions": 73.0,
+        "lines": 78.0,
+        "regions": 78.0
+      },
+      "sources": [
+        "crates/rest-cli/src/",
+        "crates/rest-engine-core/src/"
+      ]
+    },
+    "python_binding": {
+      "report_format": "llvm",
+      "minimum_percent": {
+        "functions": 65.0,
+        "lines": 71.0,
+        "regions": 75.0
+      },
+      "sources": [
+        "crates/rest-engine-python/src/"
+      ]
+    },
+    "python_sdk": {
+      "report_format": "coverage.py",
+      "minimum_percent": {
+        "lines": 89.0,
+        "branches": 49.0
+      },
+      "sources": [
+        "plenora_rest/"
+      ]
+    }
+  }
+}

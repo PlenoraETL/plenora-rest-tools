@@ -1,12 +1,13 @@
 # Plenora REST Tools
 
 Plenora REST Tools è una libreria REST autoconsistente e indipendente dai
-provider. Il motore è scritto in Rust ed è disponibile attraverso tre superfici
-pubbliche:
+provider. Il motore è scritto in Rust ed è disponibile attraverso quattro
+superfici pubbliche:
 
 | Superficie | Artefatto | Uso |
 | --- | --- | --- |
 | Rust | plenora-rest-core | integrazione nativa e binding del runtime |
+| CLI | plenora-rest (binario) | un processo per operazione, JSON su stdout (plenora-cli-v2) |
 | Python | plenora-rest | SDK sincrono basato su una wheel ABI3 |
 | Runtime Plenora | plenora.rest-tools | invocazione black-box tramite contratti versionati |
 
@@ -69,8 +70,9 @@ Redis, RabbitMQ, SQS o altri broker.
 
 ## SDK Python
 
-Lo SDK supportato è sincrono e richiede CPython da 3.10 a 3.14. La stessa wheel
-ABI3 py310 viene verificata su tutte queste versioni.
+Lo SDK supportato è sincrono e richiede CPython da 3.10 a 3.14. Per ogni
+piattaforma esiste una sola wheel ABI3 py310 (manylinux2014 x86_64 e Windows
+x86_64), verificata installata su tutte queste versioni.
 
 Installazione dalla working copy:
 
@@ -127,6 +129,52 @@ Lo SDK espone Engine, CancellationToken, PlenoraError, capability discovery e
 tipi pubblici. Le operazioni normative sono test, generate, enrich, download e
 upload; l'accesso JSON universale resta interno al binding nativo.
 
+## CLI
+
+Il binario plenora-rest implementa il contratto comune CLI 2.0
+(plenora-cli-v2). Ogni comando operativo è una spellatura di un'operazione del
+catalogo, eseguita con l'API pubblica di plenora-rest-core:
+
+~~~text
+plenora-rest --help
+plenora-rest --version --format json
+plenora-rest capabilities --format json
+plenora-rest test|generate|enrich|download|upload --input REQUEST.json [--config ENGINE.json] --format json
+~~~
+
+- `--input` è la richiesta (ExecutionRequest v1, `-` per lo standard input):
+  il suo `operation` deve coincidere con il comando, altrimenti
+  OPERATION_MISMATCH prima di ogni rete.
+- `--config` è un EngineConfig in JSON (campi sconosciuti rifiutati): è
+  l'unico modo di abilitare reti private, proxy, file transfer con file_root
+  e così via. Senza, valgono i default fail-closed descritti sotto.
+- Con `--format json` il processo scrive esattamente un documento JSON e un
+  newline su stdout e niente su stderr, anche in caso di panic. L'envelope
+  porta `status`, `protocol_version: 2`, `component`, `component_version`,
+  `contract` (il contratto di output del comando; `plenora-error-v1` per un
+  comando non riconosciuto), `command` e `result` oppure `error`
+  (plenora-error-v1).
+- Un risultato `success` o `partial` è un envelope `ok` con l'intero
+  ExecutionResult; un risultato `failed` è un envelope `error` con il primo
+  errore e, se presenti, gli handle di recovery in `details.async_jobs`, come
+  nel binding runtime.
+- Exit code: 0 ok; 2 invalid_plan e invalid_configuration; 3 schema,
+  data_mapping e unsupported; 4 resource_limit; 5 io, protocol,
+  authentication, authorization, timeout e transient; 6 execution; 70
+  internal; 130 cancelled. Ctrl-C (e SIGTERM su Unix) cancella l'operazione in
+  modo cooperativo.
+- Comandi e flag sconosciuti, valori mancanti, flag ripetuti e posizionali in
+  più falliscono con exit 2; senza `--format json` il messaggio va su stderr.
+  Nessun messaggio cita argomenti, path o contenuto dei file. I segreti non
+  passano mai dalla riga di comando: stanno nel file della richiesta o nello
+  standard input.
+
+La CLI non è ancora nel binding comune `bindings/cli-v1.json` di
+plenora-contracts, che per rest-tools dichiara `artifact: null` (il profilo
+dice «CLI: not required»): le spellature dei comandi sono del componente e
+restano non normative finché il contratto comune non le adotta. Vedi
+[contracts/README.md](contracts/README.md#cli).
+
 ## Sicurezza predefinita
 
 La configurazione iniziale è fail-closed:
@@ -149,14 +197,14 @@ risolve artifact_source e artifact_sink tramite risorse autorizzate dall'host.
 
 | Area | Supporto dichiarato |
 | --- | --- |
-| Sistema | GNU/Linux manylinux2014, glibc 2.17 o successiva |
+| Sistema | GNU/Linux manylinux2014 (glibc 2.17 o successiva); Windows x86_64 |
 | Architettura | x86_64 |
-| Rust | MSRV 1.85.1, target x86_64-unknown-linux-gnu |
-| Python | CPython 3.10-3.14, ABI3 py310, API sincrona |
-| Distribuzione | crate e wheel allegati alla GitHub Release |
+| Rust | MSRV 1.85.1, target x86_64-unknown-linux-gnu e x86_64-pc-windows-msvc |
+| Python | CPython 3.10-3.14, ABI3 py310, API sincrona, wheel Linux e Windows |
+| Distribuzione | crate, wheel e binari CLI (Linux x86_64, Windows x86_64) allegati alla GitHub Release |
 
-Windows, macOS, ARM, musl, PyPy, CPython 3.15 e uno SDK Python asincrono non
-fanno parte della matrice supportata attuale.
+macOS, ARM, musl, PyPy, CPython 3.15 e uno SDK Python asincrono non fanno
+parte della matrice supportata attuale.
 
 La base funzionale e i gate di qualità sono consolidati. Il go-live richiede
 ancora la campagna operativa in staging, una release candidata e
@@ -182,8 +230,17 @@ pwsh ./scripts/verify.ps1
 ~~~
 
 Il comando valida contratti e compatibilità v1, MSRV, formato, Clippy, test
-Rust, wheel installata e matrice ABI3 CPython 3.10-3.14. Le release aggiungono
-doppia build riproducibile, checksum, SBOM e attestazioni.
+Rust (compresi i test black-box del binario CLI e i test di proprietà dei
+parser dell'input remoto), wheel
+installata e matrice ABI3 CPython 3.10-3.14. Il workflow Verify esegue anche,
+su Windows, formato, Clippy, test Rust e la wheel win_amd64 installata su
+CPython 3.10-3.14. Le release aggiungono doppia build riproducibile, checksum,
+SBOM e attestazioni. I target di fuzz degli stessi parser stanno in
+[fuzz/](fuzz/README.md), con un workflow proprio.
+
+La campagna operativa (smoke, carico con iniezione di guasti, soak) è separata
+dal gate e si lancia con `scripts/campaign.sh` o con il workflow Campaign; vedi
+[Campagna come codice](docs/roadmap.md#campagna-come-codice).
 
 ## Licenza
 
