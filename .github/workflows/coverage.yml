@@ -51,10 +51,11 @@ jobs:
         run: cargo +1.98.1 install cargo-llvm-cov --version 0.9.1 --locked
 
       # The binding crate is measured by the python job, through the wheel
-      # the SDK actually loads; counting it here would mix two surfaces.
+      # the SDK actually loads; counting it here would mix two surfaces. The
+      # campaign harness is a quality tool that ships in no artifact.
       - name: Measure and report
         env:
-          RUST_COVERAGE_IGNORE: '(^|/)crates/rest-engine-python/'
+          RUST_COVERAGE_IGNORE: '(^|/)crates/(rest-engine-python|rest-campaign)/'
         run: |
           mkdir -p coverage/rust
           cargo +1.98.1 llvm-cov --locked --workspace \

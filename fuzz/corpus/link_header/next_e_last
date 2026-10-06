@@ -1,0 +1,2 @@
+next
+<https://api.example.com/items?page=2>; rel="next", <https://api.example.com/items?page=9>; rel="last"

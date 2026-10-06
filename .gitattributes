@@ -1,1 +1,4 @@
 * text=auto eol=lf
+
+# Semi del fuzz: byte esatti, CRLF compresi.
+fuzz/corpus/** -text

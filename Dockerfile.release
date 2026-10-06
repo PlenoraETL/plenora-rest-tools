@@ -7,6 +7,10 @@ ENV CARGO_INCREMENTAL=0 \
     RUSTFLAGS="--remap-path-prefix=/io=/workspace -C strip=symbols" \
     SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
 
+# The release compiler is the one rust-toolchain.toml pins, installed
+# explicitly rather than taken from whatever stable the image ships.
+RUN rustup toolchain install 1.98.1 --profile minimal
+
 WORKDIR /io
 COPY . .
 

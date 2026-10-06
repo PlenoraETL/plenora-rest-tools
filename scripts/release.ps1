@@ -1,7 +1,11 @@
 [CmdletBinding()]
 param(
     [string]$SourceDateEpoch = "",
-    [switch]$SkipManifestCheck
+    [switch]$SkipManifestCheck,
+    # Directory holding the Windows abi3 wheel built and tested by the
+    # windows-wheel jobs of the Release workflow. It joins the release before
+    # the SBOM and SHA256SUMS are produced, so both describe it.
+    [string]$ExtraArtifacts = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -76,6 +80,15 @@ if ($LASTEXITCODE -ne 0) {
     throw "The two release builds are not byte-for-byte reproducible."
 }
 
+if (-not [string]::IsNullOrWhiteSpace($ExtraArtifacts)) {
+    $extra = @(Get-ChildItem -LiteralPath $ExtraArtifacts -File)
+    $windowsWheels = @($extra | Where-Object { $_.Name -like "plenora_rest-$version-cp310-abi3-win_amd64.whl" })
+    if ($extra.Count -ne 1 -or $windowsWheels.Count -ne 1) {
+        throw "ExtraArtifacts must contain exactly the plenora_rest $version cp310-abi3-win_amd64 wheel."
+    }
+    Copy-Item -LiteralPath $windowsWheels[0].FullName -Destination $distribution.FullName
+}
+
 $sbomName = "plenora-rest-tools-$version.spdx.json"
 $sbomPath = Join-Path $distribution.FullName $sbomName
 $syftArguments = @(
@@ -112,7 +125,10 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 if (-not $SkipManifestCheck) {
-    & $pythonCommand.Source $releaseTool check-manifest $distribution.FullName
+    # The manifest records the reproducible Linux artifacts; the Windows wheel,
+    # built on a runner whose toolchain image is not pinned, is attested and
+    # checksummed but has no committed digest to compare with.
+    & $pythonCommand.Source $releaseTool check-manifest $firstBuild.FullName
     if ($LASTEXITCODE -ne 0) {
         throw "Adoption manifest verification failed."
     }

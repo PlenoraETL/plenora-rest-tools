@@ -9,3 +9,10 @@ __pycache__/
 *.dylib
 .venv/
 /coverage/
+
+/fuzz/target/
+/fuzz/artifacts/
+/fuzz/coverage/
+/fuzz/corpus-lavoro/
+
+/campaign-out/
