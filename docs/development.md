@@ -27,6 +27,7 @@ ambiente di sviluppo, ma non è una piattaforma distribuita o supportata.
 
 ~~~text
 .github/workflows             verifica PR/main e pubblicazione dei tag
+crates/rest-cli               binario CLI plenora-rest (plenora-cli-v2)
 crates/rest-engine-core       motore Rust e runtime binding
 crates/rest-engine-python     estensione PyO3
 crates/rest-campaign          campagna operativa (smoke, load, soak), non pubblicata
@@ -49,7 +50,7 @@ Durante lo sviluppo è possibile eseguire controlli mirati:
 cargo check --workspace --all-targets --locked
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo clippy --workspace --exclude plenora-rest-campaign --lib --locked -- -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic -D clippy::indexing_slicing -D clippy::unreachable -D clippy::todo -D clippy::unimplemented
+cargo clippy --workspace --exclude plenora-rest-campaign --lib --bins --locked -- -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic -D clippy::indexing_slicing -D clippy::unreachable -D clippy::todo -D clippy::unimplemented
 cargo test --workspace --locked
 cargo +1.85.1 check --workspace --all-targets --locked
 ~~~
@@ -59,11 +60,37 @@ e Windows e nella build di release; cambiarlo è una modifica esplicita che
 riesegue il gate completo. La MSRV pubblicata (rust-version in Cargo.toml)
 è una promessa distinta, verificata dallo stage msrv del gate Docker.
 
-Il secondo Clippy è il gate anti-panic: nel codice delle librerie niente
-unwrap, expect, panic, unreachable, todo, unimplemented e niente
-indicizzazioni o slicing che possano uscire dai limiti. Un invariante
+Il secondo Clippy è il gate anti-panic: nel codice delle librerie e del
+binario CLI niente unwrap, expect, panic, unreachable, todo, unimplemented e
+niente indicizzazioni o slicing che possano uscire dai limiti. Un invariante
 interno violato diventa un errore tipizzato (RUNTIME_ERROR), mai un panic
 dentro l'host. I test ne sono esenti.
+
+## CLI
+
+Il binario si prova come un orchestratore lo usa:
+
+~~~powershell
+cargo run -p plenora-rest-cli -- --help
+cargo run -p plenora-rest-cli -- capabilities --format json
+cargo run -p plenora-rest-cli -- test --input request.json --config engine.json --format json
+cargo test -p plenora-rest-cli
+~~~
+
+I test di unità coprono il parser (ogni flag sconosciuto, valore mancante,
+flag ripetuto, posizionale in più, formato diverso da json, comando
+sconosciuto, argomento non Unicode), la proiezione degli exit code, la
+conversione dei risultati e il panic convertito in errore internal. I test
+black-box in crates/rest-cli/tests/cli.rs lanciano il binario compilato e
+controllano un solo documento JSON più newline su stdout, stderr vuoto, exit
+code per categoria (0, 2, 4, 5, 6 e, su Unix, 130 con un SIGINT vero) e la
+validità di ogni envelope contro gli schemi comuni cli-envelope-v2, error-v1 e
+capabilities-v2. Gli schemi sono copiati da plenora-contracts in
+crates/rest-cli/tests/fixtures/contracts, con il digest canonico verificato dal
+test; li interpreta un validatore minimo in tests/support/schema.rs, chiuso
+sulle parole chiave e sui pattern che conosce, invece di una dipendenza
+jsonschema che porterebbe decine di crate in Cargo.lock per tre schemi di
+test.
 
 ## Fuzz e test di proprietà
 
@@ -113,7 +140,7 @@ Il gate costruisce ambienti self-contained e verifica:
    schema, e compatibilità delle superfici v1;
 3. rustfmt;
 4. Clippy con tutti i warning negati;
-5. Clippy anti-panic sulle librerie;
+5. Clippy anti-panic sulle librerie e sul binario CLI;
 6. test unitari e black-box Rust;
 7. baseline breve di concorrenza, fault transitori e streaming;
 8. rustdoc dell'API con tutti i warning negati;
@@ -245,20 +272,24 @@ pwsh ./scripts/release.ps1
 
 Lo script:
 
-- costruisce crate e wheel due volte senza cache;
-- confronta nomi e byte degli artefatti;
+- costruisce crate, wheel e binario CLI Linux due volte senza cache;
+- confronta nomi e byte degli artefatti (esattamente un .crate, una .whl e
+  plenora-rest-linux-x86_64; qualunque altro file è un errore);
 - copia il risultato in dist;
 - genera un SBOM SPDX 2.3;
-- aggiunge la wheel Windows indicata con -ExtraArtifacts (nel workflow
-  Release);
+- aggiunge la wheel Windows e plenora-rest-windows-x86_64.exe indicate con
+  -ExtraArtifacts (nel workflow Release; la directory deve contenere
+  esattamente quei due file);
 - genera SHA256SUMS;
 - confronta i digest con adoption-manifest.json.
 
 adoption-manifest.json registra i digest degli artefatti riproducibili
-costruiti nell'immagine Linux fissata per digest (crate e wheel manylinux). La
-wheel Windows è linkata su un runner la cui immagine non è fissata: è in
-SHA256SUMS, nell'SBOM e nelle attestazioni di provenance, ma non ha un digest
-nel manifesto da confrontare.
+costruiti nell'immagine Linux fissata per digest (crate, wheel manylinux e
+binario CLI Linux). Il binario Linux è costruito nello stesso stage di crate e
+wheel, con lo stesso compilatore, SOURCE_DATE_EPOCH, rimappatura dei path e
+strip dei simboli. Wheel ed eseguibile Windows sono linkati su un runner la cui
+immagine non è fissata: sono in SHA256SUMS, nell'SBOM e nelle attestazioni di
+provenance, ma non hanno un digest nel manifesto da confrontare.
 
 Gli artefatti prodotti sono:
 
@@ -266,6 +297,11 @@ Gli artefatti prodotti sono:
 - wheel plenora-rest ABI3 manylinux2014 x86_64;
 - wheel plenora-rest ABI3 win_amd64, costruita dal workflow Release su
   Windows e provata su CPython 3.10-3.14 prima di entrare nel pacchetto;
+- binario CLI plenora-rest-linux-x86_64 (manylinux2014, glibc 2.17 o
+  successiva);
+- binario CLI plenora-rest-windows-x86_64.exe, costruito dallo stesso job
+  Windows della wheel, che ne controlla `--version --format json` prima di
+  conservarlo;
 - SBOM SPDX JSON;
 - SHA256SUMS.
 
@@ -285,8 +321,8 @@ l'aggiornamento della versione:
 1. eseguire il gate completo;
 2. generare una prima build con
    pwsh ./scripts/release.ps1 -SkipManifestCheck;
-3. aggiornare in adoption-manifest.json i digest del crate e della wheel
-   ottenuti dalla build;
+3. aggiornare in adoption-manifest.json i digest del crate, della wheel e
+   del binario CLI Linux ottenuti dalla build;
 4. rieseguire pwsh ./scripts/release.ps1 senza esclusioni;
 5. aprire e verificare la pull request;
 6. unire su main;

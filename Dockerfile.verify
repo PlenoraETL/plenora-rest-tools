@@ -39,11 +39,11 @@ RUN test -f /tmp/msrv-ok \
     && /opt/verify/bin/python scripts/validate_contracts.py
 RUN cargo fmt --all -- --check
 RUN cargo clippy --workspace --all-targets --locked -- -D warnings
-# Library code must not be able to panic: no unwrap, expect or panic, no
+# Library and binary code must not be able to panic: no unwrap, expect or panic, no
 # indexing or slicing that can go out of bounds. Tests are exempt, and so is
 # the campaign harness (crates/rest-campaign): it ships in no artifact, and a
 # panic there already fails the campaign.
-RUN cargo clippy --workspace --exclude plenora-rest-campaign --lib --locked -- \
+RUN cargo clippy --workspace --exclude plenora-rest-campaign --lib --bins --locked -- \
     -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic \
     -D clippy::indexing_slicing -D clippy::unreachable \
     -D clippy::todo -D clippy::unimplemented
