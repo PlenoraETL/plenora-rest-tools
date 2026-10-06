@@ -83,58 +83,156 @@ impl From<&'static str> for ErrorDetail {
 /// ```
 #[derive(Debug)]
 pub enum EngineError {
+    /// `INVALID_INPUT`: the request, its JSON text or a runtime envelope does
+    /// not satisfy the contract (unknown or missing field, value out of its
+    /// declared range, incompatible combination of options). Raised before
+    /// any network activity; category `invalid_configuration`, never retried.
     InvalidInput(ErrorDetail),
+    /// `UNSUPPORTED_SCHEMA`: the `schema_version` of a request or runtime
+    /// envelope is not the one this engine implements. Category
+    /// `unsupported`; `details` carries `received_version` and
+    /// `supported_version`.
     UnsupportedSchema {
+        /// Version found in the input.
         received: u32,
+        /// The only version this engine accepts.
         supported: u32,
     },
+    /// `INVALID_URL`: a request, token, polling or redirect URL is empty,
+    /// unparsable, not `http`/`https`, has no host or usable port, or embeds
+    /// credentials. Category `invalid_configuration`.
     InvalidUrl(ErrorDetail),
+    /// `UNSAFE_ADDRESS`: the destination resolved to a private, loopback or
+    /// otherwise non-public address that `allow_private_networks` does not
+    /// permit, or a redirect, pagination link or polling URL would leave the
+    /// origin of the request. Category `authorization`; nothing is sent.
     UnsafeAddress(ErrorDetail),
+    /// `POLICY_VIOLATION`: an engine security or resource policy refused the
+    /// request before the network: a feature the [`EngineConfig`] does not
+    /// enable (file transfers, proxies, cookie store, insecure TLS, a custom
+    /// method outside `allowed_custom_methods`), a path outside `file_root`, a
+    /// closed, evicted or foreign cookie session handle, or an idempotency key
+    /// used while `max_idempotency_keys` is zero. Category `authorization`.
+    ///
+    /// [`EngineConfig`]: crate::EngineConfig
     PolicyViolation(ErrorDetail),
+    /// `DNS_RESOLUTION_FAILED`: the host name did not resolve, or resolved to
+    /// no address. Category `transient`, retry advice `safe` because no request
+    /// left the engine.
     DnsResolution(ErrorDetail),
+    /// `INVALID_HEADER`: a configured header name or value is not valid HTTP,
+    /// or the request tries to set a header the engine must generate itself
+    /// (multipart `Content-Type`, streaming `Content-Length`). Raised while
+    /// preparing the request.
     InvalidHeader(ErrorDetail),
+    /// `TIMEOUT`: the execution deadline (`options.deadline` or the
+    /// [`ExecutionControl`](crate::ExecutionControl) deadline) or the HTTP
+    /// `connect_timeout_ms` / `request_timeout_ms` of the engine expired. The remote effect is `unknown` and the retry advice is
+    /// `quarantine`: the request may already have been processed.
     Timeout,
+    /// `CANCELLED`: the [`CancellationToken`](crate::CancellationToken) of the
+    /// execution was cancelled. The remote effect is `unknown` and the retry
+    /// advice `quarantine`; active asynchronous jobs are cancelled remotely on
+    /// a best-effort basis when the polling configuration asks for it.
     Cancelled,
+    /// `ENGINE_CLOSED`: [`Engine::close`](crate::Engine::close) was called; the
+    /// engine admits no new execution or cookie session operation.
     EngineClosed,
+    /// `CIRCUIT_OPEN`: the circuit breaker for the destination is open, or a
+    /// half-open probe is already in flight, so the request was not sent.
+    /// Category `transient`, retry advice `safe`.
     CircuitOpen,
+    /// `TRANSPORT_ERROR`: the HTTP exchange failed after it may have started
+    /// (connection reset, TLS failure, body stream error). Remote effect
+    /// `unknown`, retry advice `quarantine`.
     Transport(ErrorDetail),
+    /// `RESPONSE_TOO_LARGE`: a buffered response body exceeded
+    /// `EngineConfig::max_response_bytes`, either by its declared
+    /// `Content-Length` or while it was being read. Reading stops at the limit.
     ResponseTooLarge {
+        /// The byte limit that was exceeded; reported as `details.limit_bytes`.
         limit_bytes: usize,
     },
+    /// `REQUEST_TOO_LARGE`: an encoded request body exceeded
+    /// `EngineConfig::max_request_bytes`; the request was not sent.
     RequestTooLarge {
+        /// The byte limit that was exceeded; reported as `details.limit_bytes`.
         limit_bytes: usize,
     },
+    /// `FILE_TOO_LARGE`: a downloaded or uploaded file exceeded the transfer
+    /// limit (`input.file.max_bytes`, capped by
+    /// `EngineConfig::max_file_transfer_bytes`). A download stops writing at
+    /// the limit.
     FileTooLarge {
+        /// The byte limit that was exceeded; reported as `details.limit_bytes`.
         limit_bytes: u64,
     },
+    /// `FILE_IO`: a local file operation failed. Only the kind of the failure
+    /// is kept (not found, permission denied, already exists, ...), never the
+    /// operating system message or the path.
     FileIo(ErrorDetail),
+    /// `CHECKSUM_MISMATCH`: the SHA-256 of a transferred file differs from
+    /// `expected_sha256`, or an uploaded file changed while it was being sent.
+    /// Raised in the finalize phase with remote effect `unknown`.
     ChecksumMismatch,
+    /// `HTTP_STATUS`: the final response status is outside 2xx and not listed
+    /// in `connection.success_statuses`, once the retry policy allows no further
+    /// attempt. Remote effect `unknown`.
     HttpStatus {
+        /// The HTTP status code; reported as `details.http_status`.
         status: u16,
     },
+    /// `INVALID_RESPONSE`: the response body could not be decoded in the
+    /// configured format, or lacks a value the configuration requires. A parse
+    /// failure records only its line and column, never the body.
     InvalidResponse(ErrorDetail),
+    /// `APPLICATION_ERROR`: the HTTP exchange succeeded but the payload
+    /// reports a failure: a value at `connection.response.error_path` or an unmet
+    /// `connection.response.success_when` condition. Category `execution`.
     Application(ErrorDetail),
+    /// `MISSING_PARAMETER`: a required parameter has no value from the input
+    /// record, its mapping or its default. Category `data_mapping`.
     MissingParameter(ErrorDetail),
+    /// `AUTHENTICATION_FAILED`: obtaining a token failed (token endpoint
+    /// returned an error, an unsuccessful status, invalid JSON or no token
+    /// field, or a non-bearer OAuth token type).
     Authentication(ErrorDetail),
+    /// `IDEMPOTENCY_CONFLICT`: the idempotency key was already admitted by this
+    /// engine for a request with a different fingerprint. Raised before the
+    /// network.
     IdempotencyConflict,
+    /// `POLLING_TIMEOUT`: an asynchronous job did not reach a terminal state
+    /// within `connection.polling.max_attempts` or `max_wait_ms`. Retry advice
+    /// `requires_recovery`: the job may still be running remotely.
     PollingTimeout {
+        /// Poll requests actually issued; reported as `details.poll_attempts`.
         attempts: u32,
     },
-    /// Pagination stopped at `max_rows` or `max_pages` while the source
-    /// still had data: the rows returned are a prefix, not the whole.
+    /// `PAGINATION_LIMIT_REACHED`: pagination stopped at `max_rows` or
+    /// `max_pages` while the source still had data; the rows read are returned
+    /// with this error, so the result is `partial`. Category `resource_limit`.
     PaginationLimit {
+        /// The row limit in force; reported as `details.max_rows`.
         max_rows: usize,
+        /// The page limit in force for cursor and link pagination; reported as
+        /// `details.max_pages`.
         max_pages: Option<usize>,
     },
-    /// The execution deadline had already passed when the operation was
-    /// admitted: nothing was resolved or sent.
+    /// `DEADLINE_EXPIRED`: the execution deadline had already passed when the
+    /// operation was admitted; nothing was resolved or sent. Category
+    /// `timeout`, phase `validate`, remote effect `none`, retry `never`.
     DeadlineExpired,
-    /// Writing a download to local storage failed after the HTTP request was
-    /// sent: the remote side may have acted on it.
+    /// `DOWNLOAD_WRITE_FAILED`: writing a download to local storage failed
+    /// after the HTTP request was sent. The remote side may have acted on it:
+    /// remote effect `unknown`, retry `requires_recovery`.
     DownloadWrite(ErrorDetail),
-    /// The download was published to its sink, then removing the local
-    /// staging file failed.
+    /// `CLEANUP_AFTER_PUBLISH_FAILED`: the download was published to its sink,
+    /// then removing the local staging file failed. Phase `cleanup`, remote
+    /// effect `committed`, retry `never`.
     CleanupAfterPublish(ErrorDetail),
+    /// `RUNTIME_ERROR`: an internal invariant of the engine was violated (for
+    /// example a value that could not be serialized). Reported instead of a
+    /// panic; category `internal`.
     Runtime(ErrorDetail),
 }
 
@@ -146,59 +244,136 @@ impl fmt::Display for EngineError {
 
 impl std::error::Error for EngineError {}
 
+/// Coarse classification of a failure, serialized in snake case as the
+/// `category` of the `plenora-error-v1` error object.
+///
+/// The enum covers the categories the REST engine can report; the shared
+/// error contract defines further values (`crs`, `not_found`, `conflict`, ...)
+/// that this engine never produces. Each [`EngineError`] variant maps to
+/// exactly one category.
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCategory {
+    /// `invalid_plan`: the execution plan is inconsistent. Part of the shared
+    /// vocabulary; no [`EngineError`] variant maps to it today.
     InvalidPlan,
+    /// `invalid_configuration`: the request or its configuration is invalid
+    /// (`INVALID_INPUT`, `INVALID_URL`, `INVALID_HEADER`,
+    /// `IDEMPOTENCY_CONFLICT`).
     InvalidConfiguration,
+    /// `schema`: the data does not match an expected schema. Part of the
+    /// shared vocabulary; no [`EngineError`] variant maps to it today.
     Schema,
+    /// `data_mapping`: an input record cannot supply a required value
+    /// (`MISSING_PARAMETER`).
     DataMapping,
+    /// `unsupported`: the contract version is not implemented
+    /// (`UNSUPPORTED_SCHEMA`).
     Unsupported,
+    /// `authentication`: credentials could not be obtained or were refused by
+    /// the token endpoint (`AUTHENTICATION_FAILED`).
     Authentication,
+    /// `authorization`: an engine policy refused the destination or the
+    /// feature (`UNSAFE_ADDRESS`, `POLICY_VIOLATION`).
     Authorization,
+    /// `timeout`: a deadline, an HTTP timeout or the polling budget expired
+    /// (`TIMEOUT`, `POLLING_TIMEOUT`).
     Timeout,
+    /// `cancelled`: the caller cancelled the execution (`CANCELLED`).
     Cancelled,
+    /// `resource_limit`: a byte limit was exceeded (`RESPONSE_TOO_LARGE`,
+    /// `REQUEST_TOO_LARGE`, `FILE_TOO_LARGE`).
     ResourceLimit,
+    /// `io`: a local file operation failed (`FILE_IO`).
     Io,
+    /// `protocol`: the remote response or transferred data is not what the
+    /// protocol requires (`INVALID_RESPONSE`, `CHECKSUM_MISMATCH`).
     Protocol,
+    /// `transient`: a failure that may clear on its own (`DNS_RESOLUTION_FAILED`,
+    /// `TRANSPORT_ERROR`, `CIRCUIT_OPEN`).
     Transient,
+    /// `execution`: the remote service or the engine state refused the work
+    /// (`HTTP_STATUS`, `APPLICATION_ERROR`, `ENGINE_CLOSED`).
     Execution,
+    /// `internal`: an engine invariant was violated (`RUNTIME_ERROR`).
     Internal,
 }
 
+/// Stage of the execution in which a failure happened, serialized in snake
+/// case as the `phase` of the error object.
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorPhase {
+    /// `validate`: before any network activity, while checking the request,
+    /// the engine policies, the idempotency key and the deadline.
     Validate,
+    /// `connect`: resolving the host, consulting the circuit breaker or
+    /// obtaining an authentication token.
     Connect,
+    /// `probe`: part of the shared vocabulary; no [`EngineError`] variant
+    /// maps to it today.
     Probe,
+    /// `prepare`: building the HTTP request (headers, parameters, body size).
     Prepare,
+    /// `read`: sending the request and reading or interpreting the response,
+    /// polling included.
     Read,
+    /// `write`: a local file operation, such as writing a download.
     Write,
+    /// `finalize`: verifying a completed transfer (SHA-256 checksum).
     Finalize,
+    /// `cleanup`: cancellation handling, removing a download's staging file
+    /// after publication, and internal failures that are not tied to a
+    /// specific stage.
     Cleanup,
 }
 
+/// What the failure may have done on the remote side, serialized in snake case
+/// as the `remote_effect` of the error object.
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RemoteEffect {
+    /// `none`: reported for the failure kinds the engine classifies as not
+    /// changing remote state: validation, policy, request preparation,
+    /// connection and authentication, local I/O and internal failures.
     None,
+    /// `partial`: part of the work was applied remotely. Part of the shared
+    /// vocabulary; the engine does not report it today.
     Partial,
+    /// `committed`: the work was applied. The engine reports it for a
+    /// download that was published to its sink before a later step (removing
+    /// the staging file) failed.
     Committed,
+    /// `unknown`: a request may have reached the remote service (timeout,
+    /// cancellation, transport failure, error status or payload, size or
+    /// checksum failure after sending); the caller cannot assume either way.
     Unknown,
 }
 
+/// Retry strategy suggested for a failure, serialized in snake case as
+/// `retry.kind`.
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RetryKind {
+    /// `never`: repeating the same request fails the same way.
     Never,
+    /// `quarantine`: the remote effect is unknown; retry only after checking
+    /// the remote state or with an idempotency key the service honors
+    /// (`TIMEOUT`, `CANCELLED`, `TRANSPORT_ERROR`).
     Quarantine,
+    /// `safe`: nothing was sent, so the request can be repeated as is
+    /// (`DNS_RESOLUTION_FAILED`, `CIRCUIT_OPEN`).
     Safe,
+    /// `requires_recovery`: an asynchronous job may still be running; resume
+    /// it from the recovery data in `ExecutionResult::recoveries` instead of
+    /// submitting it again (`POLLING_TIMEOUT`).
     RequiresRecovery,
 }
 
+/// Retry advice of the error object, serialized as `{"kind": ...}`.
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
 pub struct RetryAdvice {
+    /// The suggested retry strategy.
     pub kind: RetryKind,
 }
 
@@ -217,18 +392,39 @@ impl RetryAdvice {
     };
 }
 
+/// Serializable form of an [`EngineError`]: the `plenora-error-v1` object
+/// carried by a runtime error envelope and, with an optional `input_index`,
+/// by each entry of `ExecutionResult::errors`.
+///
+/// It contains only engine-chosen values; the `ErrorDetail` text of the
+/// variant is not part of it.
 #[derive(Clone, Debug, Serialize)]
 pub struct ErrorPayload {
+    /// Coarse classification of the failure.
     pub category: ErrorCategory,
+    /// Stage of the execution in which the failure happened.
     pub phase: ErrorPhase,
+    /// What the failure may have done on the remote side.
     pub remote_effect: RemoteEffect,
+    /// Suggested retry strategy.
     pub retry: RetryAdvice,
+    /// Stable machine-readable code in upper snake case, such as
+    /// `HTTP_STATUS` or `INVALID_INPUT`.
     pub code: String,
+    /// Static English message of the variant, identical to its `Display`
+    /// text; never contains remote or local data.
     pub message: String,
+    /// Engine-chosen numbers of the variant: `received_version` and
+    /// `supported_version`, `limit_bytes`, `http_status` or `poll_attempts`.
+    /// Empty for the other variants. The runtime binding adds `async_jobs`
+    /// with the recovery data of jobs still active when an execution failed.
     pub details: BTreeMap<String, Value>,
 }
 
 impl EngineError {
+    /// Builds the serializable error object for this failure: code, static
+    /// message, category, phase, remote effect, retry advice and numeric
+    /// details are all derived from the variant.
     pub fn payload(&self) -> ErrorPayload {
         ErrorPayload {
             category: self.category(),
@@ -282,6 +478,7 @@ impl EngineError {
             Self::IdempotencyConflict => "IDEMPOTENCY_CONFLICT",
             Self::PollingTimeout { .. } => "POLLING_TIMEOUT",
             Self::PaginationLimit { .. } => "PAGINATION_LIMIT_REACHED",
+
             Self::DeadlineExpired => "DEADLINE_EXPIRED",
             Self::DownloadWrite(_) => "DOWNLOAD_WRITE_FAILED",
             Self::CleanupAfterPublish(_) => "CLEANUP_AFTER_PUBLISH_FAILED",

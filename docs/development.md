@@ -143,7 +143,9 @@ Il gate costruisce ambienti self-contained e verifica:
 5. Clippy anti-panic sulle librerie e sul binario CLI;
 6. test unitari e black-box Rust;
 7. baseline breve di concorrenza, fault transitori e streaming;
-8. rustdoc dell'API con tutti i warning negati;
+8. rustdoc dell'API con tutti i warning negati; plenora-rest-core dichiara
+   `#![deny(missing_docs)]`, quindi ogni elemento pubblico senza
+   documentazione ferma già la compilazione;
 9. build release della wheel;
 10. installazione e test dello SDK in un ambiente Python pulito;
 11. installazione della stessa wheel ABI3 su CPython 3.10-3.14.
