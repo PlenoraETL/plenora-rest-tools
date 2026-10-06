@@ -538,11 +538,12 @@ fn validate_grammar(message: &RuntimeMessage) -> Result<(), ErrorPayload> {
     {
         return protocol("runtime deadline must be an RFC 3339 timestamp in UTC");
     }
-    if let Some(key) = message.metadata.get(IDEMPOTENCY_KEY) {
-        if key.is_empty() || key.len() > 255 || !key.bytes().all(|byte| matches!(byte, 0x21..=0x7e))
-        {
-            return protocol("runtime idempotency key must contain 1 to 255 visible ASCII bytes");
-        }
+    if let Some(key) = message.metadata.get(IDEMPOTENCY_KEY)
+        && (key.is_empty()
+            || key.len() > 255
+            || !key.bytes().all(|byte| matches!(byte, 0x21..=0x7e)))
+    {
+        return protocol("runtime idempotency key must contain 1 to 255 visible ASCII bytes");
     }
     Ok(())
 }

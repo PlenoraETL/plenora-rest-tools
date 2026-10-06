@@ -28,11 +28,9 @@ ROOT = Path(__file__).resolve().parents[1]
 # bound, so the mapping is explicit per advisory rather than a single global
 # rule: an ID that is not listed here has never been reviewed and must not be
 # silenced by adding it to deny.toml.
-ACCEPTED: dict[str, tuple[int, int]] = {
-    # `time` fixes the RFC 2822 stack exhaustion from 0.3.47, which declares
-    # rust-version 1.88.0.
-    "RUSTSEC-2026-0009": (1, 88),
-}
+# None today: RUSTSEC-2026-0009 (`time` < 0.3.47) was removed with the
+# MSRV 1.98, which builds the fixed release.
+ACCEPTED: dict[str, tuple[int, int]] = {}
 
 
 def fail(message: str) -> NoReturn:

@@ -688,12 +688,12 @@ async fn download(
     while position < stop {
         let len = DOWNLOAD_CHUNK.min(stop - position);
         let mut chunk = content_chunk(seed, position, len);
-        if let Some(corrupt) = corrupt_at {
-            if (position..position + len).contains(&corrupt) {
-                let offset = usize::try_from(corrupt - position).unwrap_or(0);
-                if let Some(byte) = chunk.get_mut(offset) {
-                    *byte ^= 0xFF;
-                }
+        if let Some(corrupt) = corrupt_at
+            && (position..position + len).contains(&corrupt)
+        {
+            let offset = usize::try_from(corrupt - position).unwrap_or(0);
+            if let Some(byte) = chunk.get_mut(offset) {
+                *byte ^= 0xFF;
             }
         }
         if connection.stream.write_all(&chunk).await.is_err() {

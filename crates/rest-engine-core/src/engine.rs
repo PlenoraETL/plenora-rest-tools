@@ -707,10 +707,10 @@ impl Engine {
         // restored mtime, and a replacement through rename, none of which
         // metadata alone would reveal.
         let sha256 = hash_file(&source, limit).await?;
-        if let Some(expected) = validated_checksum(file.expected_sha256.as_deref())? {
-            if !sha256.eq_ignore_ascii_case(&expected) {
-                return Err(EngineError::ChecksumMismatch);
-            }
+        if let Some(expected) = validated_checksum(file.expected_sha256.as_deref())?
+            && !sha256.eq_ignore_ascii_case(&expected)
+        {
+            return Err(EngineError::ChecksumMismatch);
         }
 
         let parameters = resolve_parameters(&request.connection, &request.input.params)?;
@@ -1618,10 +1618,10 @@ impl Engine {
                 metrics,
             )
             .await;
-        if result.is_ok() {
-            if let Some(key) = active_key {
-                remove_active_job(&key);
-            }
+        if result.is_ok()
+            && let Some(key) = active_key
+        {
+            remove_active_job(&key);
         }
         result
     }
@@ -1648,10 +1648,10 @@ impl Engine {
                 metrics,
             )
             .await;
-        if result.is_ok() {
-            if let Some(key) = active_key {
-                remove_active_job(&key);
-            }
+        if result.is_ok()
+            && let Some(key) = active_key
+        {
+            remove_active_job(&key);
         }
         result
     }
@@ -2469,23 +2469,22 @@ fn evaluate_application_success(
     response: &Value,
     connection: &ConnectionConfig,
 ) -> Result<(), EngineError> {
-    if let Some(path) = &connection.response.error_path {
-        if json_path::get(response, path)
+    if let Some(path) = &connection.response.error_path
+        && json_path::get(response, path)
             .is_some_and(|value| !value.is_null() && value.as_str() != Some(""))
-        {
-            // The remote message at error_path is not captured: it is
-            // third-party text, and the error contract carries none.
-            return Err(EngineError::Application(ErrorDetail::from(
-                "the response reports an error at error_path",
-            )));
-        }
+    {
+        // The remote message at error_path is not captured: it is
+        // third-party text, and the error contract carries none.
+        return Err(EngineError::Application(ErrorDetail::from(
+            "the response reports an error at error_path",
+        )));
     }
-    if let Some(condition) = &connection.response.success_when {
-        if !matches_success_condition(response, condition) {
-            return Err(EngineError::Application(ErrorDetail::from(
-                "success_when condition was not satisfied",
-            )));
-        }
+    if let Some(condition) = &connection.response.success_when
+        && !matches_success_condition(response, condition)
+    {
+        return Err(EngineError::Application(ErrorDetail::from(
+            "success_when condition was not satisfied",
+        )));
     }
     Ok(())
 }
@@ -2910,10 +2909,10 @@ fn apply_transforms(
     transforms: &[ResponseTransform],
 ) -> Result<(), EngineError> {
     for transform in transforms {
-        if let Some(condition) = transform.condition.as_deref() {
-            if !transform_condition(row, condition) {
-                continue;
-            }
+        if let Some(condition) = transform.condition.as_deref()
+            && !transform_condition(row, condition)
+        {
+            continue;
         }
         let source = row.get(&transform.source).cloned().unwrap_or(Value::Null);
         let value = transform_value(&source, transform).map_err(|failure| {
@@ -3033,13 +3032,12 @@ fn validate_transforms(response: &ResponseConfig) -> Result<(), EngineError> {
                 }
             }
             "round" => {
-                if let Some(decimals) = value {
-                    if !decimals
+                if let Some(decimals) = value
+                    && !decimals
                         .as_u64()
                         .is_some_and(|decimals| decimals <= MAX_ROUND_DECIMALS)
-                    {
-                        return invalid("requires an integer number of decimals from 0 to 15");
-                    }
+                {
+                    return invalid("requires an integer number of decimals from 0 to 15");
                 }
             }
             "kelvin_to_celsius" | "celsius_to_kelvin" | "uppercase" | "lowercase" => {
@@ -4020,12 +4018,11 @@ fn apply_idempotency(
                 .iter()
                 .find(|(existing, _)| existing.eq_ignore_ascii_case(name))
                 .map(|(_, value)| value)
+                && existing != key
             {
-                if existing != key {
-                    return Err(EngineError::InvalidInput(ErrorDetail::from(
-                        "idempotency header conflicts with a configured header",
-                    )));
-                }
+                return Err(EngineError::InvalidInput(ErrorDetail::from(
+                    "idempotency header conflicts with a configured header",
+                )));
             }
             insert_header(headers, name, key.to_owned());
         }
@@ -4049,12 +4046,12 @@ fn insert_idempotency_field(
     name: &str,
     key: &str,
 ) -> Result<(), EngineError> {
-    if let Some(existing) = target.get(name) {
-        if existing.as_str() != Some(key) {
-            return Err(EngineError::InvalidInput(ErrorDetail::from(
-                "idempotency field conflicts with a configured parameter",
-            )));
-        }
+    if let Some(existing) = target.get(name)
+        && existing.as_str() != Some(key)
+    {
+        return Err(EngineError::InvalidInput(ErrorDetail::from(
+            "idempotency field conflicts with a configured parameter",
+        )));
     }
     target.insert(name.to_owned(), Value::String(key.to_owned()));
     Ok(())

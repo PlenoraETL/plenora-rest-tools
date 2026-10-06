@@ -9,7 +9,7 @@ publish = false
 cargo-fuzz = true
 
 # Workspace e lock separati: nightly e libFuzzer restano fuori dal workspace
-# stabile, dalla sua MSRV 1.85.1 e dal suo Cargo.lock. La CI li controlla a
+# stabile, dalla sua MSRV 1.98 e dal suo Cargo.lock. La CI li controlla a
 # parte (.github/workflows/fuzz.yml: fmt e check di questo manifest) e
 # l'Audit passa cargo-deny anche su questo lock.
 [workspace]

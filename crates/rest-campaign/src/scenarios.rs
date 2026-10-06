@@ -1725,25 +1725,26 @@ async fn cookie_session(observation: &mut Observation, context: &Context, key: &
     .await;
     let counters = context.server.take(key);
     observation.server_hits = counters.hits;
-    if let (Some(first), Some(second)) = (first, second) {
-        if expect_success(observation, &first) && expect_success(observation, &second) {
-            let has_cookie = matches!(&second.output, ExecutionOutput::Json { value } if *value == json!({"has_cookie": true}));
-            observation.check(
-                has_cookie && counters.cookie_seen,
-                Criterion::UnexpectedOutcome,
-                "la sessione non ha conservato il cookie",
-            );
-        }
+    if let (Some(first), Some(second)) = (first, second)
+        && expect_success(observation, &first)
+        && expect_success(observation, &second)
+    {
+        let has_cookie = matches!(&second.output, ExecutionOutput::Json { value } if *value == json!({"has_cookie": true}));
+        observation.check(
+            has_cookie && counters.cookie_seen,
+            Criterion::UnexpectedOutcome,
+            "la sessione non ha conservato il cookie",
+        );
     }
-    if let Some(stale) = stale {
-        if let Some(error) = expect_failure(observation, &stale, &["POLICY_VIOLATION"]) {
-            fault_error(
-                observation,
-                "sessione_cookie_chiusa",
-                FaultClass::LocalRefusal,
-                error,
-            );
-        }
+    if let Some(stale) = stale
+        && let Some(error) = expect_failure(observation, &stale, &["POLICY_VIOLATION"])
+    {
+        fault_error(
+            observation,
+            "sessione_cookie_chiusa",
+            FaultClass::LocalRefusal,
+            error,
+        );
     }
     observation.check(
         counters.hits <= 2,

@@ -16,7 +16,7 @@ Per lavorare senza Docker sono utili:
 
 - rustup: rust-toolchain.toml fissa il compilatore dei gate (1.98.1, con
   rustfmt e Clippy) e rustup lo installa al primo comando cargo;
-- la toolchain 1.85.1 per controllare in locale la MSRV pubblicata;
+- la toolchain 1.98.0 per controllare in locale la MSRV pubblicata;
 - CPython da 3.10 a 3.14;
 - Maturin compatibile con pyproject.toml.
 
@@ -52,7 +52,7 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo clippy --workspace --exclude plenora-rest-campaign --lib --bins --locked -- -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic -D clippy::indexing_slicing -D clippy::unreachable -D clippy::todo -D clippy::unimplemented
 cargo test --workspace --locked
-cargo +1.85.1 check --workspace --all-targets --locked
+cargo +1.98.0 check --workspace --all-targets --locked
 ~~~
 
 rust-toolchain.toml fissa lo stesso compilatore in locale, nella CI Linux
@@ -135,7 +135,7 @@ pwsh ./scripts/verify.ps1
 
 Il gate costruisce ambienti self-contained e verifica:
 
-1. cargo check dell'intero workspace con Rust 1.85.1 e Cargo.lock;
+1. cargo check dell'intero workspace con Rust 1.98.0 e Cargo.lock;
 2. JSON Schema Draft 2020-12, un corpus di istanze valide e non valide per ogni
    schema, e compatibilità delle superfici v1;
 3. rustfmt;

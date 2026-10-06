@@ -93,10 +93,10 @@ fn commit(explicit: Option<String>) -> String {
         return commit;
     }
     for variable in ["CAMPAIGN_COMMIT", "GITHUB_SHA"] {
-        if let Ok(value) = std::env::var(variable) {
-            if !value.is_empty() {
-                return value;
-            }
+        if let Ok(value) = std::env::var(variable)
+            && !value.is_empty()
+        {
+            return value;
         }
     }
     std::process::Command::new("git")
@@ -143,11 +143,11 @@ fn environment() -> Environment {
 }
 
 fn write_outputs(report: &Report, prefix: &Path) -> Result<(PathBuf, PathBuf), CampaignError> {
-    if let Some(parent) = prefix.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)
-                .map_err(|_| CampaignError::new("directory del report non creabile"))?;
-        }
+    if let Some(parent) = prefix.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)
+            .map_err(|_| CampaignError::new("directory del report non creabile"))?;
     }
     let json_path = prefix.with_extension("json");
     let markdown_path = prefix.with_extension("md");

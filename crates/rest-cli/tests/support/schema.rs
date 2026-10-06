@@ -177,10 +177,10 @@ impl Registry {
                     }
                 }
                 "minItems" => {
-                    if let Some(items) = instance.as_array() {
-                        if (items.len() as u64) < value.as_u64().unwrap() {
-                            return Err(format!("{at}: too few items"));
-                        }
+                    if let Some(items) = instance.as_array()
+                        && (items.len() as u64) < value.as_u64().unwrap()
+                    {
+                        return Err(format!("{at}: too few items"));
                     }
                 }
                 "uniqueItems" => {
@@ -221,10 +221,10 @@ impl Registry {
                     }
                 }
                 "pattern" => {
-                    if let Some(text) = instance.as_str() {
-                        if !matches_pattern(value.as_str().unwrap(), text) {
-                            return Err(format!("{at}: {text:?} does not match {value}"));
-                        }
+                    if let Some(text) = instance.as_str()
+                        && !matches_pattern(value.as_str().unwrap(), text)
+                    {
+                        return Err(format!("{at}: {text:?} does not match {value}"));
                     }
                 }
                 "allOf" => {
@@ -244,10 +244,10 @@ impl Registry {
                     }
                 }
                 "if" => {
-                    if self.check(root, value, instance, at).is_ok() {
-                        if let Some(then) = schema.get("then") {
-                            self.check(root, then, instance, at)?;
-                        }
+                    if self.check(root, value, instance, at).is_ok()
+                        && let Some(then) = schema.get("then")
+                    {
+                        self.check(root, then, instance, at)?;
                     }
                 }
                 "then" => {}

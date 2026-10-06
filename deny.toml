@@ -10,22 +10,10 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
-ignore = [
-    # RUSTSEC-2026-0009: stack exhaustion in `time`'s RFC 2822 date parser.
-    #
-    # Not reachable from this dependency graph. The workspace parses dates only
-    # as RFC 3339 (execution deadlines), and `cookie 0.18.2` — the one crate that
-    # parses remote date input, from `Set-Cookie` `Expires` — uses its own
-    # `format_description!` items rather than the RFC 2822 parser the advisory
-    # concerns.
-    #
-    # It stays listed rather than dismissed because the reachability argument is
-    # about today's lockfile: `time` >= 0.3.47 fixes it but declares
-    # rust-version 1.88.0, above the published MSRV 1.85.1, so the lockfile
-    # cannot simply be updated. The Audit workflow fails if this exemption
-    # outlives an MSRV bump to 1.88.
-{ id = "RUSTSEC-2026-0009", reason = "vulnerable RFC 2822 parser is not reachable here; no fixed release builds on the published MSRV 1.85.1" },
-]
+# No advisory is exempted. An exemption is accepted only while no fixed
+# release builds on the published MSRV, with its reason written here and
+# its bound in scripts/check_advisory_exemptions.py.
+ignore = []
 
 [licenses]
 version = 2
