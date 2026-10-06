@@ -151,6 +151,22 @@ campaign/reports. Il workflow Campaign esegue le stesse fasi su runner GitHub.
 Profili, soglie, criteri e lavoro residuo sono descritti nella
 [roadmap](roadmap.md#campagna-come-codice).
 
+## Copertura
+
+Il workflow Coverage misura, su ogni pull request e push a main, tre superfici
+separate con cargo-llvm-cov 0.9.1 e coverage.py 7.16.1:
+
+- il core Rust (crates/rest-engine-core/src), con i test del workspace;
+- il binding PyO3 (crates/rest-engine-python/src), dalla wheel instrumentata
+  installata in un ambiente pulito ed esercitata da python/tests;
+- lo SDK Python (plenora_rest), dalla stessa esecuzione, con i rami.
+
+scripts/check_coverage.py confronta ogni report con il minimo dichiarato in
+scripts/coverage_budget.json e fallisce chiuso se il report è incoerente o
+misura file fuori dai sorgenti dichiarati; scripts/test_check_coverage.py ne
+prova i rifiuti. I minimi partono appena sotto i valori misurati: alzarli è
+una modifica ordinaria del budget, abbassarli va motivato nella pull request.
+
 ## Versioni delle dipendenze
 
 Le dipendenze dirette in Cargo.toml sono fissate alla versione esatta
