@@ -28,6 +28,8 @@ BASELINE_PATH = ROOT / "contracts" / "compatibility-v1.json"
 RUST_SURFACE = ROOT / "crates" / "rest-engine-core" / "src" / "lib.rs"
 PYTHON_SURFACE = ROOT / "python" / "plenora_rest" / "__init__.py"
 RUST_BINDING = ROOT / "contracts" / "bindings" / "rust-v1.json"
+UPSTREAM_ROOT = ROOT / "contracts" / "upstream"
+ADOPTION_MANIFEST = ROOT / "adoption-manifest.json"
 POLICY = (
     "Published v1 schemas and public bindings are immutable. "
     "Breaking changes require a new contract version."
@@ -559,6 +561,131 @@ def validate_fixtures(documents: dict[Path, Any]) -> int:
     return checked
 
 
+def validate_upstream() -> int:
+    """Pins of the files copied from plenora-contracts, and what they check.
+
+    `contracts/upstream/source.json` names the adopted revision and the SHA-256
+    of every copied file. The copy must match its pin byte for byte, must come
+    from the revision the adoption manifest declares, and nothing may sit in
+    the directory without a pin. The runtime vectors are then validated
+    against the copied runtime-vector schema (error payloads also against the
+    common error schema), and the adoption manifest against the copied
+    manifest v4 schema plus the cross-reference rules of ADOPTION.md.
+    Returns the number of documents validated.
+    """
+    source = load_json(UPSTREAM_ROOT / "source.json")
+    manifest = load_json(ADOPTION_MANIFEST)
+    adopted = manifest.get("contracts_source", {})
+    if source.get("revision") != adopted.get("revision"):
+        fail(
+            "contracts/upstream/source.json and adoption-manifest.json adopt "
+            "different plenora-contracts revisions"
+        )
+    if source.get("repository") != adopted.get("repository"):
+        fail("contracts/upstream/source.json names a different contracts repository")
+    pins = source.get("files")
+    if not isinstance(pins, dict) or not pins:
+        fail("contracts/upstream/source.json must pin at least one file")
+    present = sorted(
+        path.relative_to(UPSTREAM_ROOT).as_posix()
+        for path in UPSTREAM_ROOT.rglob("*")
+        if path.is_file() and path.name != "source.json"
+    )
+    if present != sorted(pins):
+        fail(
+            "contracts/upstream differs from its pin list: "
+            f"unpinned={sorted(set(present) - set(pins))}, "
+            f"missing={sorted(set(pins) - set(present))}"
+        )
+    for name, pin in sorted(pins.items()):
+        digest = hashlib.sha256((UPSTREAM_ROOT / name).read_bytes()).hexdigest()
+        if not isinstance(pin, dict) or digest != pin.get("sha256"):
+            fail(f"contracts/upstream/{name} differs from its pinned upstream copy")
+
+    names = (
+        "runtime-vector-v1.schema.json",
+        "error-v1.schema.json",
+        "adoption-manifest-v4.schema.json",
+    )
+    schemas = {name: load_json(UPSTREAM_ROOT / "schemas" / name) for name in names}
+    for name, schema in schemas.items():
+        try:
+            Draft202012Validator.check_schema(schema)
+        except SchemaError as error:
+            fail(
+                f"contracts/upstream/schemas/{name} is not valid Draft 2020-12: "
+                f"{error.message}"
+            )
+    registry = schema_registry(
+        {
+            (UPSTREAM_ROOT / "schemas" / name).resolve(): schema
+            for name, schema in schemas.items()
+        }
+    )
+
+    def check(schema_name: str, instance: Any, label: str) -> None:
+        validator = Draft202012Validator(schemas[schema_name], registry=registry)
+        errors = sorted(validator.iter_errors(instance), key=str)
+        if errors:
+            fail(
+                f"{label} does not satisfy {schema_name} at "
+                f"{errors[0].json_path}: {errors[0].message}"
+            )
+
+    checked = 0
+    for name in sorted(name for name in pins if name.startswith("runtime-v1/")):
+        vector = load_json(UPSTREAM_ROOT / name)
+        check("runtime-vector-v1.schema.json", vector, f"contracts/upstream/{name}")
+        if vector.get("kind") == "error":
+            check(
+                "error-v1.schema.json",
+                vector.get("payload"),
+                f"contracts/upstream/{name} payload",
+            )
+        checked += 1
+
+    check("adoption-manifest-v4.schema.json", manifest, "adoption-manifest.json")
+    for error in adoption_cross_reference_errors(manifest):
+        fail(f"adoption-manifest.json: {error}")
+    return checked + 1
+
+
+def adoption_cross_reference_errors(document: dict[str, Any]) -> list[str]:
+    """ADOPTION.md rules beyond the manifest v4 schema.
+
+    The same rules as `adoption_errors` in tools/conformance_checks.py of the
+    adopted revision: one description per artifact name, one status per
+    contract, and a deviation that names an artifact names a declared one on
+    the same surface.
+    """
+    errors = []
+    artifacts: dict[str, Any] = {}
+    for artifact in document["artifacts"]:
+        identity = {key: value for key, value in artifact.items() if key != "verification"}
+        previous = artifacts.get(artifact["name"])
+        if previous is not None and identity != {
+            key: value for key, value in previous.items() if key != "verification"
+        }:
+            errors.append("ambiguous artifact name in adoption manifest")
+        artifacts[artifact["name"]] = artifact
+    statuses: dict[str, str] = {}
+    for contract in document["contracts"]:
+        previous_status = statuses.get(contract["id"])
+        if previous_status is not None and previous_status != contract["status"]:
+            errors.append("duplicate contract identity with conflicting adoption status")
+        statuses[contract["id"]] = contract["status"]
+    for deviation in document["deviations"]:
+        name = deviation.get("artifact")
+        if name is None:
+            continue
+        named = artifacts.get(name)
+        if named is None:
+            errors.append("deviation refers to an undeclared artifact")
+        elif "surface" in deviation and deviation["surface"] != named["surface"]:
+            errors.append("deviation surface differs from the named artifact")
+    return errors
+
+
 def validate() -> None:
     paths = schema_files()
     documents = {path.resolve(): load_json(path) for path in paths}
@@ -587,6 +714,7 @@ def validate() -> None:
         )
 
     checked = validate_fixtures(documents)
+    upstream = validate_upstream()
 
     expected = load_json(BASELINE_PATH)
     actual = build_baseline()
@@ -616,7 +744,8 @@ def validate() -> None:
 
     print(
         f"validated {len(paths)} Draft 2020-12 schemas, local references, "
-        f"{checked} schema fixtures, and immutable v1 public surfaces"
+        f"{checked} schema fixtures, {upstream} pinned upstream documents, "
+        "and immutable v1 public surfaces"
     )
 
 

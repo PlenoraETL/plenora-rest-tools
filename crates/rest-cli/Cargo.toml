@@ -1,0 +1,39 @@
+[package]
+name = "plenora-rest-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+repository.workspace = true
+description = "Command-line surface (plenora-cli-v2) of the self-contained REST execution engine"
+# Distribuito solo come binario di release (plenora-rest-linux-x86_64 e
+# plenora-rest-windows-x86_64.exe), mai su crates.io: per questo può dipendere
+# dal crate core per path del workspace, come l'estensione Python.
+publish = false
+
+[[bin]]
+name = "plenora-rest"
+path = "src/main.rs"
+
+[dependencies]
+# Solo l'API pubblica del core: la CLI è una spellatura delle stesse
+# operazioni, non un secondo motore.
+plenora-rest-core = { path = "../rest-engine-core" }
+serde_json.workspace = true
+# Stesso pin del workspace, con due feature in più:
+# - `signal`: Ctrl-C (e SIGTERM su Unix) devono diventare una cancellazione
+#   cooperativa con errore `cancelled` ed exit 130 (CLI 2.0 §9), e la
+#   libreria standard non offre un modo portabile di intercettarli. Aggiunge a
+#   Cargo.lock signal-hook-registry 1.4.8 ed errno 0.3.14 (usati solo su
+#   Unix; MIT OR Apache-2.0); su Windows usa windows-sys, già nel grafo.
+# - `io-std`: lo standard input asincrono, così una lettura di `--input -`
+#   resta cancellabile con Ctrl-C. Nessun crate in più.
+tokio = { workspace = true, features = ["io-std", "signal"] }
+
+[dev-dependencies]
+# Digest dei fixture degli schemi comuni; già dipendenza del core, nessun
+# crate nuovo nel grafo.
+sha2.workspace = true
+
+[lints]
+workspace = true

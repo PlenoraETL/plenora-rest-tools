@@ -1,7 +1,12 @@
 [CmdletBinding()]
 param(
     [string]$SourceDateEpoch = "",
-    [switch]$SkipManifestCheck
+    [switch]$SkipManifestCheck,
+    # Directory holding the Windows abi3 wheel and the Windows CLI executable
+    # built and tested by the windows-wheel jobs of the Release workflow. They
+    # join the release before the SBOM and SHA256SUMS are produced, so both
+    # describe them.
+    [string]$ExtraArtifacts = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -76,6 +81,17 @@ if ($LASTEXITCODE -ne 0) {
     throw "The two release builds are not byte-for-byte reproducible."
 }
 
+if (-not [string]::IsNullOrWhiteSpace($ExtraArtifacts)) {
+    $extra = @(Get-ChildItem -LiteralPath $ExtraArtifacts -Force)
+    $windowsWheels = @($extra | Where-Object { -not $_.PSIsContainer -and $_.Name -ceq "plenora_rest-$version-cp310-abi3-win_amd64.whl" })
+    $windowsCli = @($extra | Where-Object { -not $_.PSIsContainer -and $_.Name -ceq "plenora-rest-windows-x86_64.exe" })
+    if ($extra.Count -ne 2 -or $windowsWheels.Count -ne 1 -or $windowsCli.Count -ne 1) {
+        throw "ExtraArtifacts must contain exactly the plenora_rest $version cp310-abi3-win_amd64 wheel and plenora-rest-windows-x86_64.exe."
+    }
+    Copy-Item -LiteralPath $windowsWheels[0].FullName -Destination $distribution.FullName
+    Copy-Item -LiteralPath $windowsCli[0].FullName -Destination $distribution.FullName
+}
+
 $sbomName = "plenora-rest-tools-$version.spdx.json"
 $sbomPath = Join-Path $distribution.FullName $sbomName
 $syftArguments = @(
@@ -112,7 +128,11 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 if (-not $SkipManifestCheck) {
-    & $pythonCommand.Source $releaseTool check-manifest $distribution.FullName
+    # The manifest records the reproducible Linux artifacts (crate, wheel and
+    # CLI binary); the Windows wheel and executable, built on a runner whose
+    # toolchain image is not pinned, are attested and checksummed but have no
+    # committed digest to compare with.
+    & $pythonCommand.Source $releaseTool check-manifest $firstBuild.FullName
     if ($LASTEXITCODE -ne 0) {
         throw "Adoption manifest verification failed."
     }

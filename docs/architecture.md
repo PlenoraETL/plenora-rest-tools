@@ -11,7 +11,8 @@ attraversano il confine pubblico.
 2. Il comportamento esterno è descritto da contratti versionati.
 3. L'Engine possiede trasporto, resilienza e stato di connessione.
 4. Le configurazioni pericolose richiedono autorizzazione esplicita.
-5. Rust, Python e runtime espongono le stesse cinque operazioni normative.
+5. Rust, CLI, Python e runtime espongono le stesse cinque operazioni
+   normative.
 6. Un cambiamento breaking crea una nuova versione del contratto.
 
 ## Componenti
@@ -19,6 +20,7 @@ attraversano il confine pubblico.
 ~~~text
                                   +-----------------------+
 Host Rust ----------------------> |                       |
+Processo -> CLI plenora-rest ---> |                       |
 SDK Python -> binding PyO3 -----> | plenora-rest-core     | -> HTTP/TLS/DNS
 Runtime -> envelope + risorse --> | Engine persistente    | -> servizio REST
                                   |                       |
@@ -30,6 +32,7 @@ Runtime -> envelope + risorse --> | Engine persistente    | -> servizio REST
 | Componente | Responsabilità |
 | --- | --- |
 | crates/rest-engine-core | contratti Rust, Engine, trasporto, runtime binding ed errori |
+| crates/rest-cli | binario plenora-rest: parser chiuso, envelope CLI 2.0, exit code, Ctrl-C |
 | crates/rest-engine-python | estensione nativa PyO3 ABI3 |
 | python/plenora_rest | facciata Python sincrona e tipi pubblici |
 | contracts | schemi component-owned, binding e baseline compatibile |
@@ -232,7 +235,8 @@ RabbitMQ o SQS non è responsabilità di questa libreria.
 
 I payload ordinari rispettano max_request_bytes e max_response_bytes. Upload e
 download usano un limite separato, max_file_transfer_bytes, e non devono
-caricare l'intero artifact in memoria.
+caricare l'intero artifact in memoria. Tutti i limiti, con default e
+comportamento oltre la soglia, sono in [Limiti e deviazioni](limiti.md).
 
 I trasferimenti locali richiedono sia allow_file_transfers sia una file_root
 configurata. Senza file_root non esiste un confine da applicare, quindi la
@@ -270,6 +274,14 @@ essere scrivibile da altri processi durante il trasferimento.
 Nel runtime il payload contiene un riferimento opaco. RuntimeResources risolve
 il riferimento verso un path autorizzato soltanto all'interno del processo. Il
 path non viene incluso nel risultato pubblico.
+
+Un riferimento (artifact_source, artifact_sink, credential_ref) è accettato
+solo nella forma positiva dei contratti adottati: schema minuscolo di 2-32
+caratteri, `:`, `//` facoltativo e un resto non vuoto senza spazi né backslash;
+mai `file:`, mai un segmento `.` o `..`, mai un punto codificato `%2E`, al più
+512 byte. Tutto il resto è INVALID_INPUT prima di chiamare RuntimeResources:
+anche un path relativo come `dir/report.csv` o `report.csv`, che una lista di
+forme vietate lascerebbe passare.
 
 ## Sicurezza
 

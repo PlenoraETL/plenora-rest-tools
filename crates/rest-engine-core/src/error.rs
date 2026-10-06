@@ -67,7 +67,7 @@ impl From<&'static str> for ErrorDetail {
 
 /// Every failure the engine reports.
 ///
-/// Variants that describe a failure in words carry an opaque [`ErrorDetail`];
+/// Variants that describe a failure in words carry an opaque `ErrorDetail`
 /// variants that carry numbers chosen by the engine or the protocol (a byte
 /// limit, an HTTP status, a poll count, a contract version) keep them public.
 /// `Display` is the static public message of the variant, the same text as
@@ -84,7 +84,10 @@ impl From<&'static str> for ErrorDetail {
 #[derive(Debug)]
 pub enum EngineError {
     InvalidInput(ErrorDetail),
-    UnsupportedSchema { received: u32, supported: u32 },
+    UnsupportedSchema {
+        received: u32,
+        supported: u32,
+    },
     InvalidUrl(ErrorDetail),
     UnsafeAddress(ErrorDetail),
     PolicyViolation(ErrorDetail),
@@ -95,18 +98,43 @@ pub enum EngineError {
     EngineClosed,
     CircuitOpen,
     Transport(ErrorDetail),
-    ResponseTooLarge { limit_bytes: usize },
-    RequestTooLarge { limit_bytes: usize },
-    FileTooLarge { limit_bytes: u64 },
+    ResponseTooLarge {
+        limit_bytes: usize,
+    },
+    RequestTooLarge {
+        limit_bytes: usize,
+    },
+    FileTooLarge {
+        limit_bytes: u64,
+    },
     FileIo(ErrorDetail),
     ChecksumMismatch,
-    HttpStatus { status: u16 },
+    HttpStatus {
+        status: u16,
+    },
     InvalidResponse(ErrorDetail),
     Application(ErrorDetail),
     MissingParameter(ErrorDetail),
     Authentication(ErrorDetail),
     IdempotencyConflict,
-    PollingTimeout { attempts: u32 },
+    PollingTimeout {
+        attempts: u32,
+    },
+    /// Pagination stopped at `max_rows` or `max_pages` while the source
+    /// still had data: the rows returned are a prefix, not the whole.
+    PaginationLimit {
+        max_rows: usize,
+        max_pages: Option<usize>,
+    },
+    /// The execution deadline had already passed when the operation was
+    /// admitted: nothing was resolved or sent.
+    DeadlineExpired,
+    /// Writing a download to local storage failed after the HTTP request was
+    /// sent: the remote side may have acted on it.
+    DownloadWrite(ErrorDetail),
+    /// The download was published to its sink, then removing the local
+    /// staging file failed.
+    CleanupAfterPublish(ErrorDetail),
     Runtime(ErrorDetail),
 }
 
@@ -175,7 +203,7 @@ pub struct RetryAdvice {
 }
 
 impl RetryAdvice {
-    const NEVER: Self = Self {
+    pub(crate) const NEVER: Self = Self {
         kind: RetryKind::Never,
     };
     const QUARANTINE: Self = Self {
@@ -253,6 +281,10 @@ impl EngineError {
             Self::Authentication(_) => "AUTHENTICATION_FAILED",
             Self::IdempotencyConflict => "IDEMPOTENCY_CONFLICT",
             Self::PollingTimeout { .. } => "POLLING_TIMEOUT",
+            Self::PaginationLimit { .. } => "PAGINATION_LIMIT_REACHED",
+            Self::DeadlineExpired => "DEADLINE_EXPIRED",
+            Self::DownloadWrite(_) => "DOWNLOAD_WRITE_FAILED",
+            Self::CleanupAfterPublish(_) => "CLEANUP_AFTER_PUBLISH_FAILED",
             Self::Runtime(_) => "RUNTIME_ERROR",
         }
     }
@@ -283,6 +315,14 @@ impl EngineError {
             Self::Authentication(_) => "Authentication failed",
             Self::IdempotencyConflict => "Idempotency key conflicts with prior input",
             Self::PollingTimeout { .. } => "Asynchronous operation did not complete",
+            Self::PaginationLimit { .. } => {
+                "Pagination stopped at a configured limit with data remaining"
+            }
+            Self::DeadlineExpired => "Execution deadline had already passed",
+            Self::DownloadWrite(_) => "Download could not be written after the request was sent",
+            Self::CleanupAfterPublish(_) => {
+                "Download was published but its staging file could not be removed"
+            }
             Self::Runtime(_) => "REST engine failed internally",
         }
     }
@@ -298,13 +338,18 @@ impl EngineError {
             Self::DnsResolution(_) | Self::Transport(_) | Self::CircuitOpen { .. } => {
                 ErrorCategory::Transient
             }
-            Self::Timeout | Self::PollingTimeout { .. } => ErrorCategory::Timeout,
+            Self::Timeout | Self::PollingTimeout { .. } | Self::DeadlineExpired => {
+                ErrorCategory::Timeout
+            }
             Self::Cancelled => ErrorCategory::Cancelled,
             Self::EngineClosed => ErrorCategory::Execution,
             Self::ResponseTooLarge { .. }
             | Self::RequestTooLarge { .. }
-            | Self::FileTooLarge { .. } => ErrorCategory::ResourceLimit,
-            Self::FileIo(_) => ErrorCategory::Io,
+            | Self::FileTooLarge { .. }
+            | Self::PaginationLimit { .. } => ErrorCategory::ResourceLimit,
+            Self::FileIo(_) | Self::DownloadWrite(_) | Self::CleanupAfterPublish(_) => {
+                ErrorCategory::Io
+            }
             Self::ChecksumMismatch { .. } | Self::InvalidResponse(_) => ErrorCategory::Protocol,
             Self::HttpStatus { .. } | Self::Application(_) => ErrorCategory::Execution,
             Self::MissingParameter(_) => ErrorCategory::DataMapping,
@@ -321,14 +366,16 @@ impl EngineError {
             | Self::UnsafeAddress(_)
             | Self::PolicyViolation(_)
             | Self::EngineClosed
-            | Self::IdempotencyConflict => ErrorPhase::Validate,
+            | Self::IdempotencyConflict
+            | Self::DeadlineExpired => ErrorPhase::Validate,
             Self::DnsResolution(_) | Self::CircuitOpen { .. } | Self::Authentication(_) => {
                 ErrorPhase::Connect
             }
             Self::InvalidHeader(_) | Self::RequestTooLarge { .. } | Self::MissingParameter(_) => {
                 ErrorPhase::Prepare
             }
-            Self::FileIo(_) => ErrorPhase::Write,
+            Self::FileIo(_) | Self::DownloadWrite(_) => ErrorPhase::Write,
+            Self::CleanupAfterPublish(_) => ErrorPhase::Cleanup,
             Self::ChecksumMismatch { .. } => ErrorPhase::Finalize,
             Self::Cancelled => ErrorPhase::Cleanup,
             Self::Timeout
@@ -338,7 +385,8 @@ impl EngineError {
             | Self::HttpStatus { .. }
             | Self::InvalidResponse(_)
             | Self::Application(_)
-            | Self::PollingTimeout { .. } => ErrorPhase::Read,
+            | Self::PollingTimeout { .. }
+            | Self::PaginationLimit { .. } => ErrorPhase::Read,
             Self::Runtime(_) => ErrorPhase::Cleanup,
         }
     }
@@ -354,7 +402,10 @@ impl EngineError {
             | Self::HttpStatus { .. }
             | Self::InvalidResponse(_)
             | Self::Application(_)
-            | Self::PollingTimeout { .. } => RemoteEffect::Unknown,
+            | Self::PollingTimeout { .. }
+            | Self::DownloadWrite(_) => RemoteEffect::Unknown,
+            // The publication happened; only local staging is left over.
+            Self::CleanupAfterPublish(_) => RemoteEffect::Committed,
             _ => RemoteEffect::None,
         }
     }
@@ -362,7 +413,7 @@ impl EngineError {
     fn retry(&self) -> RetryAdvice {
         match self {
             Self::Timeout | Self::Cancelled | Self::Transport(_) => RetryAdvice::QUARANTINE,
-            Self::PollingTimeout { .. } => RetryAdvice::REQUIRES_RECOVERY,
+            Self::PollingTimeout { .. } | Self::DownloadWrite(_) => RetryAdvice::REQUIRES_RECOVERY,
             Self::DnsResolution(_) | Self::CircuitOpen { .. } => RetryAdvice::SAFE,
             _ => RetryAdvice::NEVER,
         }
@@ -389,6 +440,16 @@ impl EngineError {
             Self::PollingTimeout { attempts } => {
                 BTreeMap::from([("poll_attempts".to_owned(), json!(attempts))])
             }
+            Self::PaginationLimit {
+                max_rows,
+                max_pages,
+            } => {
+                let mut details = BTreeMap::from([("max_rows".to_owned(), json!(max_rows))]);
+                if let Some(max_pages) = max_pages {
+                    details.insert("max_pages".to_owned(), json!(max_pages));
+                }
+                details
+            }
             _ => BTreeMap::new(),
         }
     }
@@ -397,6 +458,31 @@ impl EngineError {
 #[cfg(test)]
 mod tests {
     use super::{EngineError, ErrorDetail};
+
+    #[test]
+    fn local_failures_after_a_request_keep_the_remote_effect_honest() {
+        use super::{ErrorCategory, ErrorPhase, RemoteEffect, RetryKind};
+        // Shared runtime matrix, case 9a/9d: the request went out, the local
+        // write failed; nothing proves the remote side did not act.
+        let write = EngineError::DownloadWrite(ErrorDetail::from("disk full")).payload();
+        assert_eq!(write.category, ErrorCategory::Io);
+        assert_eq!(write.phase, ErrorPhase::Write);
+        assert_eq!(write.remote_effect, RemoteEffect::Unknown);
+        assert_eq!(write.retry.kind, RetryKind::RequiresRecovery);
+        // Case 9e: published, then local cleanup failed.
+        let cleanup =
+            EngineError::CleanupAfterPublish(ErrorDetail::from("staging file kept")).payload();
+        assert_eq!(cleanup.category, ErrorCategory::Io);
+        assert_eq!(cleanup.phase, ErrorPhase::Cleanup);
+        assert_eq!(cleanup.remote_effect, RemoteEffect::Committed);
+        assert_eq!(cleanup.retry.kind, RetryKind::Never);
+        // Case 7b: an expired deadline before invocation.
+        let expired = EngineError::DeadlineExpired.payload();
+        assert_eq!(expired.category, ErrorCategory::Timeout);
+        assert_eq!(expired.phase, ErrorPhase::Validate);
+        assert_eq!(expired.remote_effect, RemoteEffect::None);
+        assert_eq!(expired.retry.kind, RetryKind::Never);
+    }
 
     #[test]
     fn display_is_the_static_public_message() {
