@@ -28,6 +28,8 @@ ambiente di sviluppo, ma non è una piattaforma distribuita o supportata.
 .github/workflows             verifica PR/main e pubblicazione dei tag
 crates/rest-engine-core       motore Rust e runtime binding
 crates/rest-engine-python     estensione PyO3
+crates/rest-campaign          campagna operativa (smoke, load, soak), non pubblicata
+campaign                      profili, soglie e report della campagna
 python/plenora_rest           SDK Python pubblico
 python/tests                  test black-box della wheel installata
 contracts/schemas             schemi JSON component-owned
@@ -81,6 +83,26 @@ avvio manuale. Nello stesso workflow il job Windows esegue rustfmt, Clippy con
 del gate Docker, costruisce la wheel abi3 win_amd64 con maturin 1.14.1 e la
 prova installata su CPython 3.10-3.14 con scripts/test_wheel.ps1, che esegue
 python/tests da fuori del checkout.
+
+## Campagna operativa
+
+La campagna operativa è separata dal gate: dura da minuti a ore e il suo esito
+dipende dalla macchina. cargo test esegue soltanto i test dell'harness (una
+campagna in-process di pochi secondi e il verificatore su report con
+violazioni). Le fasi si lanciano con:
+
+~~~bash
+scripts/campaign.sh smoke|load|soak [--quick] [--duration-min N] [--seed N]
+~~~
+
+Lo script compila il binario in release con la toolchain dei gate
+(CAMPAIGN_RUST_TOOLCHAIN, default 1.98.1) e scrive
+campaign-out/<data>-<fase>.json e .md. RSS, descriptor e thread si misurano
+solo su Linux; load e soak su altre piattaforme falliscono per misure mancanti
+invece di passare. I report delle esecuzioni reali da conservare vanno in
+campaign/reports. Il workflow Campaign esegue le stesse fasi su runner GitHub.
+Profili, soglie, criteri e lavoro residuo sono descritti nella
+[roadmap](roadmap.md#campagna-come-codice).
 
 ## Versioni delle dipendenze
 

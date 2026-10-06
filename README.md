@@ -186,6 +186,10 @@ esegue anche, su Windows, formato, Clippy, test Rust e la wheel win_amd64
 installata su CPython 3.10-3.14. Le release aggiungono doppia build
 riproducibile, checksum, SBOM e attestazioni.
 
+La campagna operativa (smoke, carico con iniezione di guasti, soak) è separata
+dal gate e si lancia con `scripts/campaign.sh` o con il workflow Campaign; vedi
+[Campagna come codice](docs/roadmap.md#campagna-come-codice).
+
 ## Licenza
 
 MIT OR Apache-2.0.
