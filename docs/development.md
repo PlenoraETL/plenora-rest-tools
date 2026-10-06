@@ -317,6 +317,10 @@ La stessa versione deve essere presente in:
 4. tutti gli artifact di adoption-manifest.json;
 5. release-metadata.json.
 
+Cargo.lock e fuzz/Cargo.lock riportano la versione dei crate del workspace:
+si aggiornano con `cargo metadata` (senza --locked) nella radice e con
+`--manifest-path fuzz/Cargo.toml`, altrimenti i gate con --locked falliscono.
+
 release-metadata.json deve anche contenere un SOURCE_DATE_EPOCH positivo. Dopo
 l'aggiornamento della versione:
 
