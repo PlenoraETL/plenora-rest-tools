@@ -2,6 +2,7 @@
 members = [
     "crates/rest-engine-core",
     "crates/rest-engine-python",
+    "crates/rest-campaign",
 ]
 resolver = "3"
 

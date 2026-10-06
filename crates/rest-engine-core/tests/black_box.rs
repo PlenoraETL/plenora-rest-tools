@@ -4572,6 +4572,129 @@ async fn a_stale_session_is_refused_before_the_idempotency_key_is_recorded() {
 }
 
 #[tokio::test]
+async fn the_request_deadline_binds_every_entry_point() {
+    // A server that accepts and never answers: only the deadline ends the call.
+    async fn silent() -> (String, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let _ = read_request(&mut stream).await;
+            let mut sink = [0_u8; 64];
+            while stream.read(&mut sink).await.unwrap_or(0) > 0 {}
+        });
+        (url, task)
+    }
+    let deadline = |millis: i64| {
+        let at = time::OffsetDateTime::now_utc() + time::Duration::milliseconds(millis);
+        format!(
+            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+            at.year(),
+            u8::from(at.month()),
+            at.day(),
+            at.hour(),
+            at.minute(),
+            at.second(),
+            at.millisecond()
+        )
+    };
+    let (url, server) = silent().await;
+    let request: ExecutionRequest = serde_json::from_value(json!({
+        "schema_version": 1,
+        "operation": "test",
+        "connection": {"url": url, "method": "GET"},
+        "options": {"deadline": deadline(300)}
+    }))
+    .unwrap();
+    let started = std::time::Instant::now();
+    let result = timeout(
+        Duration::from_secs(10),
+        local_engine().execute_with_control(request, ExecutionControl::default()),
+    )
+    .await
+    .expect("the request deadline ends the call");
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert_eq!(result.errors[0].code, "TIMEOUT");
+    server.abort();
+}
+
+#[tokio::test]
+async fn a_failed_result_counts_the_attempts_that_reached_the_server() {
+    // Every attempt reaches the server, which closes the connection without
+    // answering. The result fails, and its metrics must still say three
+    // requests and two retries: a monitor of amplification reads them.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let mut seen = 0_usize;
+        while seen < 3 {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let _ = read_request(&mut stream).await;
+            drop(stream);
+            seen += 1;
+        }
+        seen
+    });
+    let result = execute(
+        &local_engine(),
+        json!({
+            "schema_version": 1,
+            "operation": "test",
+            "connection": {
+                "url": url,
+                "method": "GET",
+                "retry": {"max_attempts": 3, "backoff_base_ms": 1, "max_backoff_ms": 1}
+            }
+        }),
+    )
+    .await;
+    assert_eq!(server.await.unwrap(), 3);
+    assert_eq!(result["status"], "failed", "{result}");
+    assert_eq!(result["metrics"]["requests"], 3, "{result}");
+    assert_eq!(result["metrics"]["retries"], 2, "{result}");
+}
+
+#[tokio::test]
+async fn a_retry_cut_short_by_the_deadline_is_not_counted() {
+    // The server asks to retry after 60 s; the deadline ends the execution
+    // during that wait. One request went out and no retry did.
+    let (url, server, observed) = recorded_server(vec![(
+        429,
+        r#"{"error":"slow down"}"#,
+        vec![("Retry-After", "60")],
+    )])
+    .await;
+    let deadline = {
+        let at = time::OffsetDateTime::now_utc() + time::Duration::seconds(1);
+        format!(
+            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+            at.year(),
+            u8::from(at.month()),
+            at.day(),
+            at.hour(),
+            at.minute(),
+            at.second(),
+            at.millisecond()
+        )
+    };
+    let result = execute(
+        &local_engine(),
+        json!({
+            "schema_version": 1,
+            "operation": "test",
+            "connection": {"url": url, "method": "GET", "retry": {"max_attempts": 2}},
+            "options": {"deadline": deadline}
+        }),
+    )
+    .await;
+    server.await.unwrap();
+    assert_eq!(observed.lock().unwrap().len(), 1);
+    assert_eq!(result["errors"][0]["code"], "TIMEOUT", "{result}");
+    assert_eq!(result["metrics"]["requests"], 1, "{result}");
+    assert_eq!(result["metrics"]["retries"], 0, "{result}");
+}
+
+#[tokio::test]
 async fn a_download_that_cannot_be_written_after_a_post_reports_an_unknown_remote_effect() {
     // The POST reaches the server, which also creates the destination before
     // answering: publishing the download then fails locally. The POST may
