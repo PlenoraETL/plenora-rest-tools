@@ -295,20 +295,16 @@ where
             ))
             .payload());
         }
-        // One deadline, from one channel: with both present, neither wins
-        // silently, even when the two values are equal.
-        let deadline = match (metadata_deadline, execution.options.deadline.as_deref()) {
-            (Some(_), Some(_)) => {
-                return Err(refusal(
-                    ErrorCategory::InvalidConfiguration,
-                    "runtime deadline is given both in metadata and in the payload",
-                ));
-            }
-            (Some(metadata), None) => Some(metadata.clone()),
-            (None, payload) => payload.map(str::to_owned),
-        };
+        // RT-023: on the runtime the deadline travels only as metadata. A
+        // deadline in the payload (`options.deadline` of the input contracts,
+        // the channel of the Rust, CLI and Python surfaces) is refused,
+        // alone or next to the metadata one, even with an equal value:
+        // neither channel wins silently.
+        if execution.options.deadline.is_some() {
+            return Err(deadline_in_payload());
+        }
         let control = ExecutionControl::new(cancellation)
-            .with_optional_deadline(deadline.as_deref())
+            .with_optional_deadline(metadata_deadline.map(String::as_str))
             .map_err(|error| error.payload())?;
         if let Some(key) = message.metadata.get(IDEMPOTENCY_KEY) {
             execution.options.idempotency_key = Some(key.clone());
@@ -350,6 +346,19 @@ fn refusal(category: ErrorCategory, message: &'static str) -> ErrorPayload {
         code: code.to_owned(),
         message: message.to_owned(),
         details: BTreeMap::new(),
+    }
+}
+
+/// RT-023 and RT-016: a runtime request whose payload carries
+/// `options.deadline`. The input contract admits the field, so the payload is
+/// valid; the runtime binding is what refuses it, with its own code.
+fn deadline_in_payload() -> ErrorPayload {
+    ErrorPayload {
+        code: "RUNTIME_DEADLINE_IN_PAYLOAD".to_owned(),
+        ..refusal(
+            ErrorCategory::InvalidConfiguration,
+            "runtime deadline must be sent only as plenora.execution.deadline metadata",
+        )
     }
 }
 

@@ -911,9 +911,10 @@ async fn stalled(observation: &mut Observation, context: &Context, key: &str) {
 }
 
 /// Deadline nel payload di un messaggio del runtime binding, senza la
-/// metadata `plenora.execution.deadline`: il binding deve applicarla oppure
-/// rifiutare il messaggio (come fa per la chiave di idempotenza nel payload),
-/// mai ignorarla.
+/// metadata `plenora.execution.deadline`. Sul runtime la deadline viaggia solo
+/// come metadata (Runtime Binding 1.0, RT-023): il binding deve rifiutare il
+/// messaggio prima di ogni invio con RUNTIME_DEADLINE_IN_PAYLOAD, mai
+/// ignorare la deadline.
 async fn runtime_deadline(
     observation: &mut Observation,
     context: &Context,
@@ -953,25 +954,26 @@ async fn runtime_deadline(
     let counters = context.server.take(key);
     observation.server_hits = counters.hits;
     let code = response.payload["code"].as_str().unwrap_or_default();
-    let refused = response.kind == RuntimeMessageKind::Error && code == "INVALID_INPUT";
-    let timed_out = response.kind == RuntimeMessageKind::Error && code == "TIMEOUT";
+    let refused = response.kind == RuntimeMessageKind::Error
+        && code == "RUNTIME_DEADLINE_IN_PAYLOAD"
+        && response.payload["phase"] == "validate"
+        && response.payload["remote_effect"] == "none"
+        && response.payload["retry"]["kind"] == "never";
     observation.check(
-        refused || timed_out,
+        refused,
         Criterion::UnexpectedOutcome,
-        "deadline del payload né applicata né rifiutata",
+        "deadline del payload del runtime non rifiutata",
     );
     observation.check(
-        refused || elapsed <= offset + context.slack,
+        elapsed <= offset + context.slack,
         Criterion::CancellationNotHonored,
-        "deadline del payload del runtime ignorata",
+        "rifiuto della deadline del payload oltre la tolleranza",
     );
-    if refused {
-        observation.check(
-            counters.hits == 0,
-            Criterion::UnexpectedOutcome,
-            "richiesta inviata nonostante il rifiuto",
-        );
-    }
+    observation.check(
+        counters.hits == 0,
+        Criterion::UnexpectedOutcome,
+        "richiesta inviata nonostante il rifiuto",
+    );
 }
 
 async fn cancel(observation: &mut Observation, context: &Context, key: &str) {
