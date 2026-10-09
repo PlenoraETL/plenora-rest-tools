@@ -36,7 +36,8 @@ use url::Host;
 
 use crate::{
     ApiKeyLocation, AuthConfig, CachePolicy, CircuitBreakerPolicy, CookiePolicy, CookieSession,
-    EngineConfig, EngineError, HttpMethod, OAuthClientAuth, ProxyConfig, RetryPolicy, TlsConfig,
+    EngineConfig, EngineError, ErrorPhase, HttpMethod, OAuthClientAuth, ProxyConfig, RetryPolicy,
+    TlsConfig,
 };
 
 static DOWNLOAD_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -49,14 +50,89 @@ static DOWNLOAD_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 /// would report zero requests while the remote side had received every
 /// attempt. The tally survives the failure: `Engine::execute_with_control`
 /// scopes it around the execution and reads it for the result.
+///
+/// The same count says whether a failure may have had a remote effect
+/// (Typed Errors 1.0, ERR-014): once a request of the operation went out,
+/// whatever its method or its answer, an error cannot claim that nothing
+/// happened remotely. `records` keeps that count per input record, for the
+/// operations whose errors belong to one record (enrich): a request counts
+/// for every record of the [`RECORD_SCOPE`] it was sent in.
+///
+/// `phases` is the public phase the transport last entered (prepare,
+/// connect, read, write; ERR-003), for the execution and for each record of
+/// the scope. It gives the phase of an error whose variant says `validate`,
+/// "before any network activity", but that is raised after a request was
+/// sent: the circuit breaker or the cache refusing the request after an
+/// OAuth token was obtained (connect), a multipart body that cannot be built
+/// (prepare), a redirect refused while reading a response (read).
+///
+/// Inside a [`RECORD_SCOPE`] only the phases of the scope's records change;
+/// the phase of the execution changes only on paths outside any record. So
+/// concurrent records never overwrite each other's phase or the execution's,
+/// and no phase depends on the order in which records reach the transport.
 #[derive(Default)]
 pub(crate) struct ExecutionTally {
     pub(crate) requests: AtomicU64,
     pub(crate) retries: AtomicU64,
+    pub(crate) records: std::sync::Mutex<BTreeMap<usize, u64>>,
+    phases: std::sync::Mutex<PhaseTrack>,
+}
+
+#[derive(Default)]
+struct PhaseTrack {
+    operation: Option<ErrorPhase>,
+    records: BTreeMap<usize, ErrorPhase>,
+}
+
+impl ExecutionTally {
+    /// Requests sent on behalf of input record `index`.
+    pub(crate) fn record_requests(&self, index: usize) -> u64 {
+        self.records
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&index)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// The public phase last entered by the execution, or by input record
+    /// `index`.
+    pub(crate) fn phase(&self, index: Option<usize>) -> Option<ErrorPhase> {
+        let track = self
+            .phases
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match index {
+            None => track.operation,
+            Some(index) => track.records.get(&index).copied(),
+        }
+    }
+}
+
+/// Records that the transport enters the public `phase`: for every record of
+/// the current [`RECORD_SCOPE`], or for the execution outside any record.
+pub(crate) fn enter_phase(phase: ErrorPhase) {
+    tally(|tally| {
+        let mut track = tally
+            .phases
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let in_records = RECORD_SCOPE.try_with(|indices| {
+            for index in indices.iter() {
+                track.records.insert(*index, phase);
+            }
+        });
+        if in_records.is_err() {
+            track.operation = Some(phase);
+        }
+    });
 }
 
 tokio::task_local! {
     pub(crate) static EXECUTION_TALLY: Arc<ExecutionTally>;
+    /// Input records a request is sent for: one record in enrich, the
+    /// records of the chunk in a batch enrich.
+    pub(crate) static RECORD_SCOPE: Arc<[usize]>;
 }
 
 fn tally(update: impl FnOnce(&ExecutionTally)) {
@@ -787,8 +863,14 @@ impl Transport {
 
     pub async fn execute(&self, mut request: PreparedRequest) -> Result<ResponseData, EngineError> {
         self.validate_request(&request)?;
+        // Admitting the cookie session, obtaining the token and consulting the
+        // cache and the circuit breaker are the connect phase of this request.
+        enter_phase(ErrorPhase::Connect);
         let _jar_lease = self.admit_cookie_jar(&mut request).await?;
         let auth_stats = self.resolve_auth(&mut request).await?;
+        // The token request, if any, ran its own phases; this request is back
+        // to being admitted (cache, circuit breaker), part of connect.
+        enter_phase(ErrorPhase::Connect);
 
         let mut response = self.execute_cached(&request).await?;
         response.auth_requests = auth_stats.network_requests;
@@ -809,6 +891,7 @@ impl Transport {
         success_statuses: &[u16],
     ) -> Result<DownloadData, EngineError> {
         self.validate_request(&request)?;
+        enter_phase(ErrorPhase::Connect);
         let _jar_lease = self.admit_cookie_jar(&mut request).await?;
         if target.resume {
             if request.method != HttpMethod::Get {
@@ -836,6 +919,7 @@ impl Transport {
             );
         }
         let auth_stats = self.resolve_auth(&mut request).await?;
+        enter_phase(ErrorPhase::Connect);
         let mut response = self
             .download_with_circuit(&request, target, success_statuses)
             .await?;
@@ -895,6 +979,7 @@ impl Transport {
                 | AuthConfig::OAuth2Password { .. }
                 | AuthConfig::ArcgisToken { .. }
         ) {
+            enter_phase(ErrorPhase::Connect);
             let (token, stats) = self.oauth_token(request).await?;
             request.auth = AuthConfig::Bearer { token };
             Ok(stats)
@@ -960,6 +1045,9 @@ impl Transport {
                 && fresh_for_ms > 0
                 && cached.validated_at.elapsed() <= Duration::from_millis(fresh_for_ms);
             if fresh {
+                // Interpreted from here on like a response that was read; it
+                // is not a request sent, so the tally does not count it.
+                enter_phase(ErrorPhase::Read);
                 return Ok(cached_response(cached, 1, 0));
             }
         }
@@ -1543,9 +1631,11 @@ impl Transport {
         let mut rate_limit_wait_ms = 0_u64;
 
         for redirects in 0..=request.max_redirects {
+            enter_phase(ErrorPhase::Connect);
             let client = self
                 .client_for(&url, &request.tls, request.proxy.as_ref(), request)
                 .await?;
+            enter_phase(ErrorPhase::Prepare);
             let headers = request_headers(request)?;
             let mut request_url = url.clone();
             apply_query_auth(&mut request_url, &request.auth);
@@ -1581,11 +1671,22 @@ impl Transport {
 
             let (permit, waited_ms) = self.admit_request(request.requests_per_second).await?;
             network_requests = network_requests.saturating_add(1);
+            enter_phase(ErrorPhase::Read);
             tally(|tally| {
                 tally.requests.fetch_add(1, Ordering::Relaxed);
                 if retry && redirects == 0 {
                     tally.retries.fetch_add(1, Ordering::Relaxed);
                 }
+                let _ = RECORD_SCOPE.try_with(|indices| {
+                    let mut records = tally
+                        .records
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    for index in indices.iter() {
+                        let count = records.entry(*index).or_insert(0);
+                        *count = count.saturating_add(1);
+                    }
+                });
             });
             rate_limit_wait_ms = rate_limit_wait_ms.saturating_add(waited_ms);
             let response = builder.send().await.map_err(map_reqwest_error)?;
@@ -2398,6 +2499,7 @@ async fn persist_download(
     target: &Path,
     overwrite: bool,
 ) -> Result<(), EngineError> {
+    enter_phase(ErrorPhase::Write);
     if !overwrite {
         fs::hard_link(temporary, target)
             .await
@@ -2904,8 +3006,41 @@ mod tests {
         time::{Duration, UNIX_EPOCH},
     };
 
-    use super::{is_public_address, parse_retry_after, same_origin};
+    use super::{
+        EXECUTION_TALLY, ExecutionTally, RECORD_SCOPE, enter_phase, is_public_address,
+        parse_retry_after, same_origin,
+    };
+    use crate::ErrorPhase;
     use reqwest::Url;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn records_never_move_the_phase_of_the_execution() {
+        // Determinism: inside a record scope only the record's phase moves,
+        // whatever order concurrent records run in; the execution's phase
+        // moves only outside any record.
+        let tally = Arc::new(ExecutionTally::default());
+        EXECUTION_TALLY
+            .scope(tally.clone(), async {
+                enter_phase(ErrorPhase::Prepare);
+                RECORD_SCOPE
+                    .scope(Arc::from([0_usize]), async {
+                        enter_phase(ErrorPhase::Read);
+                    })
+                    .await;
+                RECORD_SCOPE
+                    .scope(Arc::from([1_usize, 2]), async {
+                        enter_phase(ErrorPhase::Connect);
+                    })
+                    .await;
+            })
+            .await;
+        assert_eq!(tally.phase(None), Some(ErrorPhase::Prepare));
+        assert_eq!(tally.phase(Some(0)), Some(ErrorPhase::Read));
+        assert_eq!(tally.phase(Some(1)), Some(ErrorPhase::Connect));
+        assert_eq!(tally.phase(Some(2)), Some(ErrorPhase::Connect));
+        assert_eq!(tally.phase(Some(3)), None);
+    }
 
     #[test]
     fn blocks_non_public_addresses() {

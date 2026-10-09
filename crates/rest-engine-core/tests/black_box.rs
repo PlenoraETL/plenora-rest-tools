@@ -4820,8 +4820,11 @@ fn assert_limit(result: &Value, rows: Value, details: Value) {
     let error = &result["errors"][0];
     assert_eq!(error["code"], "PAGINATION_LIMIT_REACHED", "{result}");
     assert_eq!(error["category"], "resource_limit");
-    assert_eq!(error["remote_effect"], "none");
-    assert_eq!(error["retry"]["kind"], "never");
+    // ERR-014: the pages were requested, so the limit cannot claim that
+    // nothing happened remotely.
+    assert_eq!(error["phase"], "read");
+    assert_eq!(error["remote_effect"], "unknown");
+    assert_eq!(error["retry"]["kind"], "requires_recovery");
     assert_eq!(error["details"], details);
     assert_eq!(result["errors"].as_array().unwrap().len(), 1);
 }
@@ -5528,4 +5531,643 @@ async fn a_zero_backoff_base_never_waits_whatever_the_factor() {
     assert_eq!(result["status"], "success", "{result}");
     assert_eq!(result["metrics"]["requests"], 4);
     assert_eq!(result["metrics"]["retries"], 3);
+}
+
+/// ERR-014: the axes of an error raised once a request of the operation went
+/// out. The remote effect and the retry change; the phase is the one that had
+/// started (ERR-003), and the category and the code still say what failed.
+fn assert_after_sent_request(error: &Value, code: &str, phase: &str, result: &Value) {
+    assert_eq!(error["code"], code, "{result}");
+    assert_eq!(error["phase"], phase, "{result}");
+    assert_eq!(error["remote_effect"], "unknown", "{result}");
+    assert_eq!(error["retry"]["kind"], "requires_recovery", "{result}");
+}
+
+/// The axes of a failure before any request: nothing went out.
+fn assert_nothing_sent(error: &Value, code: &str, phase: &str, result: &Value) {
+    assert_eq!(error["code"], code, "{result}");
+    assert_eq!(error["phase"], phase, "{result}");
+    assert_eq!(error["remote_effect"], "none", "{result}");
+    assert_eq!(error["retry"]["kind"], "never", "{result}");
+}
+
+#[tokio::test]
+async fn a_cross_origin_redirect_after_a_post_does_not_claim_no_remote_effect() {
+    // The POST and its body reach the server, which answers with a redirect
+    // to another origin; the engine refuses to follow it. The server may have
+    // acted on the POST: a 3xx is not proof that it did not.
+    let (url, server, observed) = recorded_server(vec![(
+        307,
+        "",
+        vec![("Location", "http://localhost:9/elsewhere")],
+    )])
+    .await;
+    let result = execute(
+        &local_engine(),
+        json!({
+            "schema_version": 1,
+            "operation": "test",
+            "connection": {
+                "url": url,
+                "method": "POST",
+                "parameters": [{"name": "a", "mode": "fixed", "value": 1, "location": "body"}],
+                "request": {"allow_redirects": true, "max_redirects": 3, "body_type": "json"}
+            }
+        }),
+    )
+    .await;
+    server.await.unwrap();
+    assert_eq!(observed.lock().unwrap().len(), 1);
+    assert_eq!(result["status"], "failed", "{result}");
+    assert_eq!(result["metrics"]["requests"], 1, "{result}");
+    let error = &result["errors"][0];
+    assert_eq!(error["category"], "authorization", "{result}");
+    assert_after_sent_request(error, "UNSAFE_ADDRESS", "read", &result);
+}
+
+#[tokio::test]
+async fn a_cross_origin_poll_after_an_accepted_submit_does_not_claim_no_remote_effect() {
+    // The job was accepted; only then is its polling URL refused.
+    let (url, server, observed) = recorded_server(vec![(
+        202,
+        r#"{"status":"pending","poll":"http://localhost:9/jobs/1"}"#,
+        vec![],
+    )])
+    .await;
+    let result = execute(
+        &local_engine(),
+        json!({
+            "schema_version": 1,
+            "operation": "test",
+            "connection": {
+                "url": url,
+                "method": "POST",
+                "polling": {
+                    "url_path": "poll",
+                    "status_path": "status",
+                    "interval_ms": 0,
+                    "max_attempts": 3
+                }
+            }
+        }),
+    )
+    .await;
+    server.await.unwrap();
+    assert_eq!(observed.lock().unwrap().len(), 1);
+    assert_eq!(result["status"], "failed", "{result}");
+    assert_after_sent_request(&result["errors"][0], "UNSAFE_ADDRESS", "read", &result);
+}
+
+#[tokio::test]
+async fn a_source_file_lost_before_a_retry_does_not_claim_no_remote_effect() {
+    // The first attempt of the upload is sent; the server removes the source
+    // file before answering 503, so the second attempt cannot reopen it. The
+    // local failure follows a request that went out.
+    let directory = transfer_directory("retry-source");
+    let source = directory.join("payload.bin");
+    fs::write(&source, b"payload").await.unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let removed = source.clone();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = timeout(Duration::from_secs(30), listener.accept())
+            .await
+            .expect("the first attempt")
+            .unwrap();
+        let request = read_request(&mut stream).await;
+        std::fs::remove_file(&removed).unwrap();
+        stream
+            .write_all(
+                b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        stream.shutdown().await.unwrap();
+        request
+    });
+    let result = execute(
+        &transfer_engine(&directory, 1024, 1024),
+        json!({
+            "schema_version": 1,
+            "operation": "upload",
+            "connection": {
+                "url": format!("http://{address}/"),
+                "method": "PUT",
+                "request": {"body_type": "raw"},
+                "retry": {"max_attempts": 2, "backoff_base_ms": 0}
+            },
+            "input": {"file": {"path": "payload.bin"}}
+        }),
+    )
+    .await;
+    let first = server.await.unwrap();
+    assert!(
+        first.ends_with("payload"),
+        "the first attempt carried the body"
+    );
+    assert_eq!(result["status"], "failed", "{result}");
+    assert_eq!(result["metrics"]["requests"], 1, "{result}");
+    let error = &result["errors"][0];
+    assert_eq!(error["category"], "io", "{result}");
+    // The failure is the local reopening of the source: phase write.
+    assert_after_sent_request(error, "FILE_IO", "write", &result);
+    fs::remove_dir_all(directory).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_failed_token_request_does_not_claim_no_remote_effect() {
+    // The OAuth token request is a request of the operation too.
+    let (base_url, server, _) =
+        recorded_server(vec![(400, r#"{"error":"invalid_client"}"#, vec![])]).await;
+    let result = execute(
+        &local_engine(),
+        json!({
+            "schema_version": 1,
+            "operation": "test",
+            "connection": {
+                "url": format!("{base_url}resource"),
+                "method": "GET",
+                "auth": {
+                    "type": "oauth2_client_credentials",
+                    "token_url": format!("{base_url}token"),
+                    "client_id": "client",
+                    "client_secret": "secret"
+                }
+            }
+        }),
+    )
+    .await;
+    server.await.unwrap();
+    let error = &result["errors"][0];
+    assert_eq!(error["category"], "authentication", "{result}");
+    // Obtaining the token is the connect phase.
+    assert_after_sent_request(error, "AUTHENTICATION_FAILED", "connect", &result);
+}
+
+#[tokio::test]
+async fn enrich_judges_the_remote_effect_on_the_requests_of_each_record() {
+    // Record 0 is sent and redirected to another origin; record 1 lacks its
+    // parameter and is never sent, although record 0 was. Sequential and
+    // concurrent enrichment judge each record the same way.
+    for concurrency in [1, 2] {
+        let (url, server, observed) = recorded_server(vec![(
+            307,
+            "",
+            vec![("Location", "http://localhost:9/elsewhere")],
+        )])
+        .await;
+        let result = execute(
+            &local_engine(),
+            json!({
+                "schema_version": 1,
+                "operation": "enrich",
+                "connection": {
+                    "url": url,
+                    "method": "GET",
+                    "parameters": [{
+                        "name": "id",
+                        "mode": "mapped",
+                        "source": "id",
+                        "required": true,
+                        "location": "query"
+                    }],
+                    "request": {"allow_redirects": true, "max_redirects": 3}
+                },
+                "input": {"records": [{"id": "a"}, {"other": "b"}]},
+                "options": {"continue_on_error": true, "enrichment_concurrency": concurrency}
+            }),
+        )
+        .await;
+        server.await.unwrap();
+        assert_eq!(observed.lock().unwrap().len(), 1, "{result}");
+        let errors = result["errors"].as_array().unwrap();
+        assert_eq!(errors.len(), 2, "{result}");
+        assert_eq!(errors[0]["input_index"], 0, "{result}");
+        assert_after_sent_request(&errors[0], "UNSAFE_ADDRESS", "read", &result);
+        assert_eq!(errors[1]["input_index"], 1, "{result}");
+        assert_eq!(errors[1]["remote_effect"], "none", "{result}");
+        assert_eq!(errors[1]["retry"]["kind"], "never", "{result}");
+    }
+}
+
+#[tokio::test]
+async fn failures_before_any_request_keep_no_remote_effect() {
+    // Loopback is refused by default before the request is sent.
+    let blocked = execute(
+        &Engine::new(EngineConfig::default()),
+        json!({
+            "schema_version": 1,
+            "operation": "test",
+            "connection": {"url": "http://127.0.0.1:9/", "method": "POST"}
+        }),
+    )
+    .await;
+    assert_eq!(blocked["metrics"]["requests"], 0, "{blocked}");
+    // Refused while the endpoint is resolved: the connect phase had started
+    // (ERR-003), but nothing was sent, so no effect and no retry.
+    assert_nothing_sent(&blocked["errors"][0], "UNSAFE_ADDRESS", "connect", &blocked);
+
+    // A missing parameter fails while the request is prepared.
+    let missing = execute(
+        &local_engine(),
+        json!({
+            "schema_version": 1,
+            "operation": "test",
+            "connection": {
+                "url": "http://127.0.0.1:9/",
+                "method": "GET",
+                "parameters": [{
+                    "name": "id",
+                    "mode": "mapped",
+                    "source": "id",
+                    "required": true,
+                    "location": "query"
+                }]
+            }
+        }),
+    )
+    .await;
+    assert_eq!(missing["metrics"]["requests"], 0, "{missing}");
+    assert_eq!(missing["errors"][0]["remote_effect"], "none", "{missing}");
+    assert_eq!(missing["errors"][0]["retry"]["kind"], "never", "{missing}");
+    assert_ne!(missing["errors"][0]["phase"], "read", "{missing}");
+}
+
+#[tokio::test]
+async fn batch_enrich_judges_the_remote_effect_on_the_records_it_sent() {
+    // Record 0 goes out in the batch request, which is redirected to another
+    // origin; record 1 fails its parameter and is left out of that request.
+    let (url, server, observed) = recorded_server(vec![(
+        307,
+        "",
+        vec![("Location", "http://localhost:9/elsewhere")],
+    )])
+    .await;
+    let result = execute(
+        &local_engine(),
+        json!({
+            "schema_version": 1,
+            "operation": "enrich",
+            "connection": {
+                "url": url,
+                "method": "POST",
+                "parameters": [{
+                    "name": "id",
+                    "mode": "mapped",
+                    "source": "id",
+                    "required": true,
+                    "location": "body"
+                }],
+                "request": {"body_type": "json", "allow_redirects": true, "max_redirects": 3},
+                "batch": {
+                    "enabled": true,
+                    "max_size": 2,
+                    "input_key": "items",
+                    "input_format": "array",
+                    "output_path": "results"
+                }
+            },
+            "input": {"records": [{"id": 1}, {"other": 2}]},
+            "options": {"continue_on_error": true}
+        }),
+    )
+    .await;
+    server.await.unwrap();
+    assert_eq!(observed.lock().unwrap().len(), 1, "{result}");
+    let errors = result["errors"].as_array().unwrap();
+    let error_of = |index: u64| {
+        errors
+            .iter()
+            .find(|error| error["input_index"] == index)
+            .unwrap_or_else(|| panic!("no error for record {index}: {result}"))
+    };
+    assert_after_sent_request(error_of(0), "UNSAFE_ADDRESS", "read", &result);
+    assert_eq!(error_of(1)["remote_effect"], "none", "{result}");
+    assert_eq!(error_of(1)["retry"]["kind"], "never", "{result}");
+}
+
+/// A request whose OAuth token is obtained first: the token request is sent,
+/// then `connection` decides what happens to the request itself.
+async fn after_an_oauth_token(connection_extra: Value, method: &str, input: Value) -> Value {
+    let (base_url, server, observed) = recorded_server(vec![(
+        200,
+        r#"{"access_token":"engine-token","token_type":"Bearer","expires_in":3600}"#,
+        vec![],
+    )])
+    .await;
+    let mut connection = json!({
+        "url": format!("{base_url}resource"),
+        "method": method,
+        "auth": {
+            "type": "oauth2_client_credentials",
+            "token_url": format!("{base_url}token"),
+            "client_id": "client",
+            "client_secret": "secret"
+        }
+    });
+    for (key, value) in connection_extra.as_object().unwrap() {
+        connection[key] = value.clone();
+    }
+    let result = execute(
+        &local_engine(),
+        json!({
+            "schema_version": 1,
+            "operation": "test",
+            "connection": connection,
+            "input": input
+        }),
+    )
+    .await;
+    server.await.unwrap();
+    let observed = observed.lock().unwrap();
+    assert_eq!(observed.len(), 1, "only the token request: {result}");
+    assert!(observed[0].starts_with("POST /token "), "{result}");
+    result
+}
+
+#[tokio::test]
+async fn a_circuit_breaker_refusal_after_the_token_keeps_the_connect_phase() {
+    // The circuit breaker is consulted after the token was obtained: the
+    // refusal is in connect, not in validate.
+    let result = after_an_oauth_token(
+        json!({"circuit_breaker": {"enabled": true, "failure_threshold": 0}}),
+        "GET",
+        json!({}),
+    )
+    .await;
+    assert_after_sent_request(&result["errors"][0], "INVALID_INPUT", "connect", &result);
+}
+
+#[tokio::test]
+async fn a_cache_refusal_after_the_token_keeps_the_connect_phase() {
+    // An authenticated request may be cached only with allow_authenticated;
+    // the bearer token exists only once the token request has gone out.
+    let result = after_an_oauth_token(
+        json!({"cache": {"enabled": true, "fresh_for_ms": 60_000}}),
+        "GET",
+        json!({}),
+    )
+    .await;
+    assert_after_sent_request(&result["errors"][0], "POLICY_VIOLATION", "connect", &result);
+}
+
+#[tokio::test]
+async fn an_invalid_multipart_type_after_the_token_keeps_the_prepare_phase() {
+    // The multipart body is built after the token: an invalid MIME type of a
+    // part fails while the request is prepared.
+    let result = after_an_oauth_token(
+        json!({"request": {"body_type": "multipart"}}),
+        "POST",
+        json!({
+            "params": {
+                "attachment": {
+                    "filename": "hello.txt",
+                    "content_type": "not a mime type",
+                    "data_base64": "aGVsbG8="
+                }
+            }
+        }),
+    )
+    .await;
+    assert_after_sent_request(&result["errors"][0], "INVALID_INPUT", "prepare", &result);
+}
+
+#[tokio::test]
+async fn a_cookie_session_closed_before_the_poll_keeps_the_connect_phase() {
+    // The submit is accepted; the server closes the caller's cookie session
+    // before answering, so the poll is refused while its cookie session is
+    // admitted: connect, after a request that went out.
+    let engine = Arc::new(Engine::new(EngineConfig {
+        allow_private_networks: true,
+        allow_cookie_store: true,
+        ..EngineConfig::default()
+    }));
+    let session = engine.open_cookie_session().await.unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base_url = format!("http://{}/", listener.local_addr().unwrap());
+    let server_engine = engine.clone();
+    let server_session = session.clone();
+    let poll_url = format!("{base_url}jobs/1");
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = timeout(Duration::from_secs(30), listener.accept())
+            .await
+            .expect("the submit")
+            .unwrap();
+        let request = read_request(&mut stream).await;
+        server_engine
+            .close_cookie_session(&server_session)
+            .await
+            .unwrap();
+        let body = format!(r#"{{"status":"pending","poll":"{poll_url}"}}"#);
+        let head = format!(
+            "HTTP/1.1 202 Accepted\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(head.as_bytes()).await.unwrap();
+        stream.write_all(body.as_bytes()).await.unwrap();
+        stream.shutdown().await.unwrap();
+        request
+    });
+    let result = execute(
+        &engine,
+        json!({
+            "schema_version": 1,
+            "operation": "test",
+            "connection": {
+                "url": base_url,
+                "method": "POST",
+                "cookies": {"session": session},
+                "polling": {
+                    "url_path": "poll",
+                    "status_path": "status",
+                    "interval_ms": 0,
+                    "max_attempts": 3
+                }
+            }
+        }),
+    )
+    .await;
+    let submit = server.await.unwrap();
+    assert!(submit.starts_with("POST / "), "{submit}");
+    assert_eq!(result["metrics"]["requests"], 1, "{result}");
+    assert_after_sent_request(&result["errors"][0], "POLICY_VIOLATION", "connect", &result);
+}
+
+#[tokio::test]
+async fn a_page_from_the_cache_is_interpreted_in_the_read_phase() {
+    // Page 2 is cached by an earlier execution. The pagination reads page 1
+    // from the server and page 2 from the cache, whose cross-origin next link
+    // is refused while the page is interpreted: read, not the connect of the
+    // cache lookup.
+    let (base_url, server, observed) = owned_recorded_server(vec![
+        (
+            200,
+            br#"{"items":[{"id":2}],"next":"http://localhost:9/page3"}"#.to_vec(),
+            vec![],
+        ),
+        (
+            200,
+            br#"{"items":[{"id":1}],"next":"page2"}"#.to_vec(),
+            vec![("Cache-Control", "no-store")],
+        ),
+    ])
+    .await;
+    let engine = local_engine();
+    let cache = never_stale_cache();
+    let warmed = execute(
+        &engine,
+        json!({
+            "schema_version": 1,
+            "operation": "test",
+            "connection": {"url": format!("{base_url}page2"), "method": "GET", "cache": cache}
+        }),
+    )
+    .await;
+    assert_eq!(warmed["status"], "success", "{warmed}");
+    let result = execute(
+        &engine,
+        json!({
+            "schema_version": 1,
+            "operation": "generate",
+            "connection": {
+                "url": format!("{base_url}page1"),
+                "method": "GET",
+                "cache": cache,
+                "response": {"records_path": "items"},
+                "pagination": {"type": "link", "link_path": "next"}
+            }
+        }),
+    )
+    .await;
+    server.await.unwrap();
+    assert_eq!(
+        observed.lock().unwrap().len(),
+        2,
+        "page 2 came from the cache"
+    );
+    assert_eq!(result["metrics"]["cache_hits"], 1, "{result}");
+    let error = &result["errors"][0];
+    assert_eq!(error["category"], "authorization", "{result}");
+    assert_after_sent_request(error, "UNSAFE_ADDRESS", "read", &result);
+}
+
+#[tokio::test]
+async fn concurrent_records_keep_their_own_phase() {
+    // Record 0 is redirected to another origin (refused while its response
+    // is read); record 1 to its own origin with credentials in the URL
+    // (refused while the next hop connects). Each record error carries the
+    // phase of its own record, whatever order the records run in.
+    for concurrency in [1, 2] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (mut stream, _) = timeout(Duration::from_secs(30), listener.accept())
+                    .await
+                    .expect("one request per record")
+                    .unwrap();
+                let request = read_request(&mut stream).await;
+                let location = if request.starts_with("GET /items/a ") {
+                    "http://localhost:9/elsewhere".to_owned()
+                } else {
+                    assert!(request.starts_with("GET /items/b "), "{request}");
+                    format!("http://user@{address}/next")
+                };
+                let head = format!(
+                    "HTTP/1.1 307 Temporary Redirect\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                );
+                stream.write_all(head.as_bytes()).await.unwrap();
+                stream.shutdown().await.unwrap();
+            }
+        });
+        let result = execute(
+            &local_engine(),
+            json!({
+                "schema_version": 1,
+                "operation": "enrich",
+                "connection": {
+                    "url": format!("http://{address}/items/{{id}}"),
+                    "method": "GET",
+                    "parameters": [{
+                        "name": "id",
+                        "mode": "mapped",
+                        "source": "id",
+                        "required": true,
+                        "location": "path"
+                    }],
+                    "request": {"allow_redirects": true, "max_redirects": 3}
+                },
+                "input": {"records": [{"id": "a"}, {"id": "b"}]},
+                "options": {"continue_on_error": true, "enrichment_concurrency": concurrency}
+            }),
+        )
+        .await;
+        server.await.unwrap();
+        let errors = result["errors"].as_array().unwrap();
+        assert_eq!(errors.len(), 2, "{result}");
+        assert_eq!(errors[0]["input_index"], 0, "{result}");
+        assert_after_sent_request(&errors[0], "UNSAFE_ADDRESS", "read", &result);
+        assert_eq!(errors[1]["input_index"], 1, "{result}");
+        assert_after_sent_request(&errors[1], "INVALID_URL", "connect", &result);
+    }
+}
+
+/// A cache whose entries cannot become stale while a test runs: the freshness
+/// is the largest the contract admits (about 584 million years), and the
+/// cached responses carry no `max-age` of their own. The test does not depend
+/// on how long it takes.
+fn never_stale_cache() -> Value {
+    json!({"enabled": true, "fresh_for_ms": u64::MAX})
+}
+
+#[tokio::test]
+async fn a_first_page_served_from_the_cache_keeps_no_remote_effect() {
+    // The whole execution is served from the cache: the first page, cached
+    // by an earlier execution, has a cross-origin next link that is refused
+    // while the page is interpreted. The phase is read; nothing was sent, so
+    // the effect stays none and the retry never.
+    let (base_url, server, observed) = owned_recorded_server(vec![(
+        200,
+        br#"{"items":[{"id":1}],"next":"http://localhost:9/page2"}"#.to_vec(),
+        vec![],
+    )])
+    .await;
+    let engine = local_engine();
+    let cache = never_stale_cache();
+    let warmed = execute(
+        &engine,
+        json!({
+            "schema_version": 1,
+            "operation": "test",
+            "connection": {"url": format!("{base_url}page1"), "method": "GET", "cache": cache}
+        }),
+    )
+    .await;
+    assert_eq!(warmed["status"], "success", "{warmed}");
+    server.await.unwrap();
+    let result = execute(
+        &engine,
+        json!({
+            "schema_version": 1,
+            "operation": "generate",
+            "connection": {
+                "url": format!("{base_url}page1"),
+                "method": "GET",
+                "cache": cache,
+                "response": {"records_path": "items"},
+                "pagination": {"type": "link", "link_path": "next"}
+            }
+        }),
+    )
+    .await;
+    assert_eq!(
+        observed.lock().unwrap().len(),
+        1,
+        "page 1 came from the cache"
+    );
+    assert_eq!(result["metrics"]["requests"], 0, "{result}");
+    assert_eq!(result["metrics"]["cache_hits"], 1, "{result}");
+    let error = &result["errors"][0];
+    assert_eq!(error["category"], "authorization", "{result}");
+    assert_nothing_sent(error, "UNSAFE_ADDRESS", "read", &result);
 }

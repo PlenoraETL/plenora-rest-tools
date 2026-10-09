@@ -69,8 +69,8 @@ storage-get-idempotency-key-unsupported: REST annuncia la chiave di
 idempotenza su ogni operazione, quindi la premessa di quella sonda qui non
 esiste.
 
-Una regola dei contratti comuni non rispettata è dichiarata tra le deviazioni
-del manifest; oggi ERR-014, vedi
+Una regola dei contratti comuni non rispettata si dichiara tra le deviazioni
+del manifest, vedi
 [limiti e deviazioni](../docs/limiti.md#deviazioni-dai-contratti-adottati).
 
 plenora-arrow-interchange-v1 è dichiarato non applicabile. La libreria scambia

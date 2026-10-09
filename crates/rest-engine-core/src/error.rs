@@ -334,8 +334,10 @@ pub enum ErrorPhase {
 #[serde(rename_all = "snake_case")]
 pub enum RemoteEffect {
     /// `none`: reported for the failure kinds the engine classifies as not
-    /// changing remote state: validation, policy, request preparation,
-    /// connection and authentication, local I/O and internal failures.
+    /// changing remote state (validation, policy, request preparation,
+    /// connection and authentication, local I/O and internal failures), and
+    /// only while no request of the operation, or of the input record, was
+    /// sent; afterwards the same failures report `unknown` (ERR-014).
     None,
     /// `partial`: part of the work was applied remotely. Part of the shared
     /// vocabulary; the engine does not report it today.
@@ -390,6 +392,53 @@ impl RetryAdvice {
     const REQUIRES_RECOVERY: Self = Self {
         kind: RetryKind::RequiresRecovery,
     };
+}
+
+/// The phase of an error whose variant says `validate`, "before any network
+/// activity", but that was raised after the transport entered a public phase
+/// (ERR-003, the last phase known to have started): `entered`, the phase
+/// recorded by the execution context. The cookie session, the circuit breaker
+/// or the cache refusing a request give `connect`; a body that cannot be built
+/// gives `prepare`; a redirect, a polling URL or a pagination link refused
+/// while a response is interpreted give `read`, also when that response came
+/// from the cache and nothing was sent. Other phases are the variant's own and
+/// are kept. This says when the error happened, not what it did remotely:
+/// [`after_sent_request`] decides that, from the requests actually sent.
+pub(crate) fn normalize_phase(error: &mut ExecutionError, entered: Option<ErrorPhase>) {
+    if error.phase == ErrorPhase::Validate
+        && let Some(entered) = entered
+    {
+        error.phase = entered;
+    }
+}
+
+/// Corrects the effect of an error raised after a request of the operation
+/// (or of its input record) was sent (Typed Errors 1.0, ERR-014).
+///
+/// The axes of a variant describe where it is normally raised: before the
+/// network, for most of those that report `remote_effect: none`. Raised once a
+/// request has gone out, whatever its method and its answer (a redirect, an
+/// OAuth token request included), the same failure cannot prove that the
+/// remote side did nothing: a cross-origin redirect after a POST, a polling
+/// URL refused after the job was accepted, a source file that cannot be
+/// reopened for a second attempt. Such an error reports `unknown` and
+/// `requires_recovery`. Category, code, message and details are kept: they
+/// still say what failed. Called only when a request was sent: without one
+/// the error keeps `none` and `never`, whatever its phase.
+///
+/// The phase was set by [`normalize_phase`]. An error still in `validate`
+/// here had no recorded phase; once a request was sent that cannot hold, and
+/// it becomes `read`, the phase every sent request starts. An error that
+/// already reports an effect (`unknown`, `committed`, `partial`) keeps all its
+/// axes.
+pub(crate) fn after_sent_request(error: &mut ExecutionError) {
+    if error.remote_effect == RemoteEffect::None {
+        error.remote_effect = RemoteEffect::Unknown;
+        error.retry = RetryAdvice::REQUIRES_RECOVERY;
+        if error.phase == ErrorPhase::Validate {
+            error.phase = ErrorPhase::Read;
+        }
+    }
 }
 
 /// Serializable form of an [`EngineError`]: the `plenora-error-v1` object

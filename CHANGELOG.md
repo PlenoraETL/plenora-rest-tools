@@ -25,15 +25,46 @@ release finché una release non viene preparata.
 - CLI (decisione 0012): le spellature di plenora-rest sono quelle del binding
   comune bindings/cli-v1.json e diventano normative; il catalogo rest-tools
   seleziona la CLI come superficie facoltativa. Nessun cambio del binario.
-- Deviazione dichiarata, ERR-014 (Typed Errors 1.0, ratificata nella v1.1.0):
-  un errore di un tipo che il motore solleva prima della rete esce con fase
-  `validate`, remote_effect `none` e retry `never` anche quando una richiesta
-  della stessa operazione è già partita (per esempio un POST a cui il server
-  risponde con un redirect cross-origin, o un job asincrono accettato e poi
-  un URL di polling cross-origin). La correzione richiede scelte semantiche
-  ancora da decidere, vedi
-  [limiti e deviazioni](docs/limiti.md#deviazioni-dai-contratti-adottati) e
-  l'issue #32.
+
+### Effetto remoto dopo un invio (ERR-014)
+
+- Un errore non riporta più remote_effect `none` se una richiesta
+  dell'operazione è già partita, con qualunque metodo e qualunque risposta,
+  compresi i redirect e le richieste di token OAuth. Prima un redirect
+  cross-origin rifiutato dopo un POST, un URL di polling cross-origin dopo un
+  submit accettato o un file sorgente che non si riapriva per un nuovo
+  tentativo uscivano con remote_effect `none` e retry `never`. Ora escono con
+  remote_effect `unknown` e retry `requires_recovery`; categoria, codice,
+  messaggio e dettagli non cambiano (#32).
+- La fase si stabilisce a parte dall'effetto, anche senza invii, e resta
+  quella dell'errore (ERR-003): `write` per un file che non si riapre,
+  `connect` per un token rifiutato. Solo `validate`, che vuol dire «prima di
+  ogni attività di rete», diventa la fase pubblica in cui il trasporto si
+  trovava (prepare, connect, read, write). La registra il contesto
+  dell'esecuzione e, in enrich, il record: i record aggiornano solo la
+  propria fase, mai quella dell'esecuzione, quindi l'ordine dei record
+  concorrenti non conta. Una risposta presa dalla cache entra in `read` senza
+  contare come invio:
+  - `connect` per un indirizzo locale rifiutato mentre si risolve l'endpoint
+    (prima `validate`; senza invii resta `none`/`never`), per la sessione
+    cookie chiusa prima del polling, e per il circuit breaker o la cache che
+    rifiutano la richiesta dopo il token OAuth;
+  - `prepare` per un body multipart che non si costruisce;
+  - `read` per un redirect, un URL di polling o un link di paginazione
+    rifiutati mentre il motore interpreta una risposta. Se l'esecuzione è
+    servita interamente dalla cache la fase è `read`, ma l'effetto resta
+    `none` e il retry `never`: nulla è partito.
+- Cambia anche `PAGINATION_LIMIT_REACHED` di un risultato partial: le pagine
+  sono state richieste, quindi l'errore esce con `unknown` e
+  `requires_recovery` invece di `none` e `never`; la fase resta `read`.
+- In enrich si giudica ogni record sulle richieste partite per quel record (nel
+  batch, quelle del suo blocco): un record la cui richiesta non è partita resta
+  `none`. Gli errori prima di ogni invio restano `none` e `never`.
+- Il contesto è il contatore degli invii che l'esecuzione aveva già, ora anche
+  per record. Nessuna variante nuova di EngineError e nessun cambio della
+  superficie congelata.
+- La deviazione ERR-014 dichiarata con il passaggio alla v1.1.0 è rimossa da
+  adoption-manifest.json.
 
 ### Deadline sul runtime (RT-023)
 
