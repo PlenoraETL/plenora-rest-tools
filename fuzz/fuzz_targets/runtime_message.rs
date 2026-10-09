@@ -141,8 +141,8 @@ fuzz_target!(|dati: &[u8]| {
             &esiti::stringhe_distintive(&serde_json::to_value(&richiesta).expect("richiesta")),
         );
     }
-    // Identità del risultato (Runtime Binding 1.0 RT-019 e RT-020, proposti
-    // in plenora-contracts #21): correlazione e operazione sono copiate byte
+    // Identità del risultato (Runtime Binding 1.0 RT-019 e RT-020,
+    // plenora-contracts v1.1.0): correlazione e operazione sono copiate byte
     // per byte solo se canoniche, altrimenti omesse; mai inventate. La
     // causazione è l'identificativo della richiesta, solo se canonico.
     let correlazione = richiesta.metadata.get("plenora.trace.correlation_id");

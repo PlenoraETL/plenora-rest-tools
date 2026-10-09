@@ -365,6 +365,16 @@ fn vendored_contract_files_match_their_pins() {
     for name in [UPLOAD_REQUEST, DOWNLOAD_SUCCESS, UPLOAD_UNKNOWN_ERROR] {
         assert!(pins.contains_key(name), "{name} is not pinned");
     }
+    // The complete probe set of the adopted revision (Runtime Vectors 1.0
+    // §6), exercised by `rejection_probes_hold_on_the_rest_request_vector`.
+    assert!(pins.contains_key("schemas/runtime-probe-v1.schema.json"));
+    assert_eq!(
+        pins.keys()
+            .filter(|name| name.starts_with("runtime-probes-v1/"))
+            .count(),
+        21,
+        "every rejection probe of the adopted revision is vendored"
+    );
     // Every REST fixture is exercised below, and only REST fixtures are
     // vendored: one with another operation would be dead weight.
     let advertised = capabilities()
@@ -843,44 +853,39 @@ async fn contract_negative_examples_are_refused_at_the_runtime_boundary() {
     }
 }
 
-/// Rejection probes of Runtime Binding 1.0 §11-13 (RT-016 to RT-022) as
-/// **proposed, not yet normative**: plenora-contracts pull request 21, copied
-/// with their SHA-256 into `contracts/proposte` (see its `source.json`). When
-/// the proposal reaches the contracts' main branch they move to
-/// `contracts/upstream` unchanged.
+/// Rejection probes of Runtime Binding 1.0 §11-13 (RT-016 to RT-022) and
+/// Runtime Vectors 1.0 §6, from the adopted revision (plenora-contracts
+/// v1.1.0): copied byte for byte into `contracts/upstream/runtime-probes-v1`
+/// and pinned there like the other vendored files.
 ///
 /// Each probe is one metadata mutation of a request vector. The probes are
 /// written against several components' vectors; the routing rules they
 /// exercise are the same for every component, so each mutation is applied to
 /// the REST upload request vector, and the expected metadata is read with
 /// that base: a key the probe expects keeps the base value, or the mutated
-/// value when the probe mutated that very key.
+/// value when the probe mutated that very key. The probes whose base is the
+/// REST request vector, which §6 requires of this adopter, run against their
+/// own base exactly.
 #[tokio::test]
-async fn proposed_rejection_probes_hold_on_the_rest_request_vector() {
-    let root = repository_root().join("contracts").join("proposte");
-    let source = read_json(&root.join("source.json"));
-    assert!(
-        source["status"]
-            .as_str()
-            .is_some_and(|status| status.starts_with("proposed, not normative")),
-        "the proposal must stay marked as such until it is merged"
-    );
+async fn rejection_probes_hold_on_the_rest_request_vector() {
+    let source = read_json(&upstream_root().join("source.json"));
     let pins = source["files"].as_object().unwrap();
-    for (name, pin) in pins {
-        assert_eq!(
-            sha256_hex(&fs::read(root.join(name)).unwrap()),
-            pin["sha256"].as_str().unwrap(),
-            "{name} differs from the pinned proposal"
-        );
-    }
     let base = vector(UPLOAD_REQUEST);
     let mut exercised = 0;
+    let mut own_base = 0;
     for name in pins
         .keys()
         .filter(|name| name.starts_with("runtime-probes-v1/"))
     {
-        let probe = read_json(&root.join(name));
+        let probe = read_json(&upstream_root().join(name));
         let expected = &probe["expected"];
+        if probe["base"]
+            .as_str()
+            .is_some_and(|base| base.starts_with("rest-"))
+        {
+            assert_eq!(probe["base"], "rest-upload-request.json", "{name}");
+            own_base += 1;
+        }
         // RT-006 for a control REST advertises: idempotency keys are
         // supported by every rest.* operation, so this probe's premise does
         // not exist here.
@@ -976,4 +981,8 @@ async fn proposed_rejection_probes_hold_on_the_rest_request_vector() {
         exercised += 1;
     }
     assert_eq!(exercised, 20, "every applicable probe is exercised");
+    assert_eq!(
+        own_base, 2,
+        "both probes on the REST request vector are exercised"
+    );
 }

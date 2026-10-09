@@ -332,10 +332,10 @@ const IDEMPOTENCY_KEY: &str = "plenora.execution.idempotency_key";
 /// A refusal before invocation: phase `validate`, no remote effect, and
 /// `never` retry, since the same message fails the same way again.
 ///
-/// The category follows the rule the four Plenora libraries share pending
-/// ratification in plenora-contracts (R1): `unsupported` for a well-formed
-/// value this component does not advertise, `protocol` for a value that is
-/// absent, malformed or not canonical.
+/// The category follows RT-018 (Runtime Binding 1.0, plenora-contracts
+/// v1.1.0): `unsupported` for a well-formed value this component does not
+/// advertise, `protocol` for a value that is absent, malformed or not
+/// canonical; the three other axes are those of RT-016.
 fn refusal(category: ErrorCategory, message: &'static str) -> ErrorPayload {
     let code = match category {
         ErrorCategory::Unsupported => "RUNTIME_UNSUPPORTED",

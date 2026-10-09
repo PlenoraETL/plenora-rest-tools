@@ -57,16 +57,21 @@ conformità alle superfici comuni. Attualmente il componente adotta:
 - plenora-cli-v2.
 
 I file del repository dei contratti che il gate usa (i vettori runtime-v1 di
-REST, gli schemi runtime-vector-v1, error-v1 e adoption-manifest-v4, la
-specifica dei vettori) sono copiati byte per byte in upstream/, con revisione e
+REST, le 21 sonde di rifiuto runtime-probes-v1 di Runtime Binding 1.0
+§11-13, gli schemi runtime-vector-v1, runtime-probe-v1, error-v1 e
+adoption-manifest-v4, la specifica dei vettori) sono copiati byte per byte in upstream/, con revisione e
 SHA-256 in upstream/source.json. La revisione deve coincidere con quella di
 adoption-manifest.json; il validatore e il test runtime_vectors rifiutano una
-copia diversa dal suo pin o un file senza pin.
+copia diversa dal suo pin o un file senza pin. Il test runtime_vectors esegue
+ogni sonda sul vettore di richiesta di rest.upload (quelle scritte per altri
+componenti con la stessa mutazione), tranne
+storage-get-idempotency-key-unsupported: REST annuncia la chiave di
+idempotenza su ogni operazione, quindi la premessa di quella sonda qui non
+esiste.
 
-contracts/proposte contiene, con lo stesso sistema di pin, le sonde di rifiuto
-runtime-probes-v1 della proposta plenora-contracts #21 (Runtime Binding 1.0
-§11-13), non ancora normativa: il test runtime_vectors le esegue già, così
-l'adozione è immediata quando la proposta entra nel contratto.
+Una regola dei contratti comuni non rispettata è dichiarata tra le deviazioni
+del manifest; oggi ERR-014, vedi
+[limiti e deviazioni](../docs/limiti.md#deviazioni-dai-contratti-adottati).
 
 plenora-arrow-interchange-v1 è dichiarato non applicabile. La libreria scambia
 oggetti JSON e artifact opachi, non record batch Arrow.
@@ -96,14 +101,18 @@ binario è quello di plenora_rest_core::capabilities() con in più l'interfaccia
 `cli` (artifact plenora-rest) e la superficie `cli` sulle cinque operazioni;
 la superficie Rust congelata non cambia.
 
-Il binding comune bindings/cli-v1.json di plenora-contracts elenca
-plenora-rest-tools con `artifact: null` e il profilo rest-tools dice «CLI: not
-required». Le spellature sopra sono quindi del componente e restano non
-normative finché il contratto comune non le adotta; fino ad allora possono
-cambiare solo con una voce nel CHANGELOG. Nel manifest di adozione l'artefatto
-CLI si chiama plenora-rest-linux-x86_64, il nome del file di release, perché
-plenora-rest identifica già la wheel e un nome non può descrivere due artefatti
-diversi.
+Dalla v1.1.0 di plenora-contracts (decisione 0012) la CLI di rest-tools è una
+superficie facoltativa: il catalogo la seleziona come `conditional` e la elenca
+sulle cinque operazioni, e il binding comune bindings/cli-v1.json registra il
+comando `plenora-rest`, le tre spellature di discovery e
+`<operazione> --input REQUEST.json --format json`. Le spellature sopra sono
+quelle del binding e sono quindi normative: cambiarle richiede un nuovo
+contratto. La superficie Rust (plenora_rest_core::capabilities) non elenca
+`cli`, come il profilo ammette per un artefatto senza il comando.
+
+Nel manifest di adozione l'artefatto CLI si chiama plenora-rest-linux-x86_64,
+il nome del file di release, perché plenora-rest identifica già la wheel e un
+nome non può descrivere due artefatti diversi.
 
 Il manifest di adozione è la fonte per revisione, versione e digest degli
 artefatti. Questi valori non vengono duplicati nella documentazione.
@@ -189,8 +198,9 @@ Il validatore controlla:
 4. digest canonici dei sei schemi;
 5. export pubblici Rust e Python;
 6. firma del binding Rust;
-7. pin dei file in upstream/, vettori runtime contro il loro schema e
-   manifesto di adozione contro lo schema v4 e le regole di ADOPTION.md.
+7. pin dei file in upstream/, vettori runtime e sonde di rifiuto contro i loro
+   schemi e manifesto di adozione contro lo schema v4 e le regole di
+   ADOPTION.md.
 
 Per una modifica breaking si crea una nuova versione del contratto e si
 mantiene la v1 invariata finché esistono consumer supportati.

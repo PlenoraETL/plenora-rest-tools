@@ -66,7 +66,9 @@ component-owned payload. It includes:
   and sink roles with bounded metadata, explicit overwrite and publication
   policy;
 - typed failures with `none` and `unknown` remote effects;
-- safe retry and recovery-required dispositions.
+- safe retry and recovery-required dispositions;
+- storage cleanup failures after a proven publication, with a local and a
+  remote residue (ERR-015).
 
 The storage subset includes requests for all seven selected operations, list
 and get/put success envelopes, and partial/unknown transfer errors. Its payload
@@ -86,3 +88,21 @@ as `plenora-runtime-vector-v1` documents.
 Fixture payload objects remain illustrative. A component validates them using
 its own immutable payload schema; runtime-tools preserves their serialized
 bytes and does not infer domain semantics from their fields.
+
+## 6. Rejection probes
+
+The documents in [`vectors/runtime-probes-v1`](../../vectors/runtime-probes-v1/)
+(`plenora-runtime-probe-v1`, schema
+[`runtime-probe-v1.schema.json`](../../schemas/runtime-probe-v1.schema.json))
+are a minimum set of the negative probes of section 5, with their expected
+results. Each names a request vector of `vectors/runtime-v1`, one metadata key
+that it sets to a value of any JSON type or removes, and the result the
+mutated request produces under RT-016 to RT-022: the four error axes and every
+routing and correlation key of the result with its exact value, a key not
+listed being absent. `plenora.message.id` is always new and
+`plenora.message.causation_id` follows RT-020; neither is listed.
+
+An adopter MUST exercise every probe whose base request it advertises; the
+runtime transport consumer MUST exercise the complete set. The repository
+validator derives each expected result from the rules and rejects a probe
+that disagrees with them or that relies on behavior 1.0 does not decide.

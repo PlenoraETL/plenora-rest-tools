@@ -5330,9 +5330,9 @@ async fn an_expired_deadline_is_refused_before_anything_runs() {
 
 #[test]
 fn a_deadline_is_any_rfc_3339_spelling_of_utc() {
-    // Runtime Binding 1.0 RT-021 (proposed in plenora-contracts #21): every
-    // RFC 3339 spelling of UTC is accepted; a non-zero offset (local time)
-    // and `-00:00` (offset unknown) are not UTC.
+    // Runtime Binding 1.0 RT-021 (plenora-contracts v1.1.0): every RFC 3339
+    // spelling of UTC is accepted, as decision 0010 keeps it in 1.0; a
+    // non-zero offset (local time) and `-00:00` (offset unknown) are not UTC.
     for accepted in [
         "2099-01-01T00:00:00Z",
         "2099-01-01T00:00:00z",

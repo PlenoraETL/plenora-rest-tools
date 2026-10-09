@@ -17,9 +17,11 @@ use std::collections::BTreeMap;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-/// I tre schemi di plenora-contracts al commit 1e902dfa, con il digest
-/// canonico (JSON compatto a chiavi ordinate, come `canonical_digest` di
-/// scripts/validate_contracts.py) che ne blocca il contenuto.
+/// I tre schemi di plenora-contracts v1.1.0 (3c395a8d; identici al commit
+/// 1e902dfa adottato prima, perché gli schemi pubblicati sono immutabili),
+/// con il digest canonico (JSON compatto a chiavi ordinate, come
+/// `canonical_digest` di scripts/validate_contracts.py) che ne blocca il
+/// contenuto.
 const SCHEMAS: [(&str, &str, &str); 3] = [
     (
         "cli-envelope-v2.schema.json",
@@ -55,7 +57,7 @@ impl Registry {
             let digest = format!("{:x}", Sha256::digest(canonical.as_bytes()));
             assert_eq!(
                 digest, expected,
-                "{name} differs from plenora-contracts 1e902dfa"
+                "{name} differs from plenora-contracts v1.1.0"
             );
             let id = document["$id"].as_str().unwrap().to_owned();
             by_id.insert(id, document);

@@ -169,10 +169,9 @@ plenora-rest test|generate|enrich|download|upload --input REQUEST.json [--config
   passano mai dalla riga di comando: stanno nel file della richiesta o nello
   standard input.
 
-La CLI non è ancora nel binding comune `bindings/cli-v1.json` di
-plenora-contracts, che per rest-tools dichiara `artifact: null` (il profilo
-dice «CLI: not required»): le spellature dei comandi sono del componente e
-restano non normative finché il contratto comune non le adotta. Vedi
+Le spellature dei comandi sono quelle del binding comune `bindings/cli-v1.json`
+di plenora-contracts, che dalla v1.1.0 registra la CLI di rest-tools come
+superficie facoltativa (decisione 0012). Vedi
 [contracts/README.md](contracts/README.md#cli).
 
 ## Sicurezza predefinita
