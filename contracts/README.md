@@ -132,6 +132,13 @@ I messaggi runtime sono envelope JSON stretti. UUID, capability, operazione,
 versioni, content type, deadline, direzione degli artifact e correlazione
 devono essere validi prima dell'esecuzione.
 
+Sul runtime la deadline viaggia solo nella metadata
+`plenora.execution.deadline` (Runtime Binding 1.0, RT-023). Un payload con
+`options.deadline`, da solo o insieme alla metadata, è rifiutato prima
+dell'invocazione con RUNTIME_DEADLINE_IN_PAYLOAD (invalid_configuration,
+validate, none, never). Rust, CLI e Python non hanno metadata e usano
+`options.deadline`.
+
 Sul confine runtime sono vietati:
 
 - byte grezzi di file;
