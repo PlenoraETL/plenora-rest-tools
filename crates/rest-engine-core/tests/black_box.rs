@@ -5763,12 +5763,9 @@ async fn failures_before_any_request_keep_no_remote_effect() {
     )
     .await;
     assert_eq!(blocked["metrics"]["requests"], 0, "{blocked}");
-    assert_nothing_sent(
-        &blocked["errors"][0],
-        "UNSAFE_ADDRESS",
-        "validate",
-        &blocked,
-    );
+    // Refused while the endpoint is resolved: the connect phase had started
+    // (ERR-003), but nothing was sent, so no effect and no retry.
+    assert_nothing_sent(&blocked["errors"][0], "UNSAFE_ADDRESS", "connect", &blocked);
 
     // A missing parameter fails while the request is prepared.
     let missing = execute(
@@ -6006,7 +6003,7 @@ async fn a_page_from_the_cache_is_interpreted_in_the_read_phase() {
         (
             200,
             br#"{"items":[{"id":2}],"next":"http://localhost:9/page3"}"#.to_vec(),
-            vec![("Cache-Control", "max-age=600")],
+            vec![],
         ),
         (
             200,
@@ -6016,7 +6013,7 @@ async fn a_page_from_the_cache_is_interpreted_in_the_read_phase() {
     ])
     .await;
     let engine = local_engine();
-    let cache = json!({"enabled": true, "fresh_for_ms": 600_000});
+    let cache = never_stale_cache();
     let warmed = execute(
         &engine,
         json!({
@@ -6113,4 +6110,64 @@ async fn concurrent_records_keep_their_own_phase() {
         assert_eq!(errors[1]["input_index"], 1, "{result}");
         assert_after_sent_request(&errors[1], "INVALID_URL", "connect", &result);
     }
+}
+
+/// A cache whose entries cannot become stale while a test runs: the freshness
+/// is the largest the contract admits (about 584 million years), and the
+/// cached responses carry no `max-age` of their own. The test does not depend
+/// on how long it takes.
+fn never_stale_cache() -> Value {
+    json!({"enabled": true, "fresh_for_ms": u64::MAX})
+}
+
+#[tokio::test]
+async fn a_first_page_served_from_the_cache_keeps_no_remote_effect() {
+    // The whole execution is served from the cache: the first page, cached
+    // by an earlier execution, has a cross-origin next link that is refused
+    // while the page is interpreted. The phase is read; nothing was sent, so
+    // the effect stays none and the retry never.
+    let (base_url, server, observed) = owned_recorded_server(vec![(
+        200,
+        br#"{"items":[{"id":1}],"next":"http://localhost:9/page2"}"#.to_vec(),
+        vec![],
+    )])
+    .await;
+    let engine = local_engine();
+    let cache = never_stale_cache();
+    let warmed = execute(
+        &engine,
+        json!({
+            "schema_version": 1,
+            "operation": "test",
+            "connection": {"url": format!("{base_url}page1"), "method": "GET", "cache": cache}
+        }),
+    )
+    .await;
+    assert_eq!(warmed["status"], "success", "{warmed}");
+    server.await.unwrap();
+    let result = execute(
+        &engine,
+        json!({
+            "schema_version": 1,
+            "operation": "generate",
+            "connection": {
+                "url": format!("{base_url}page1"),
+                "method": "GET",
+                "cache": cache,
+                "response": {"records_path": "items"},
+                "pagination": {"type": "link", "link_path": "next"}
+            }
+        }),
+    )
+    .await;
+    assert_eq!(
+        observed.lock().unwrap().len(),
+        1,
+        "page 1 came from the cache"
+    );
+    assert_eq!(result["metrics"]["requests"], 0, "{result}");
+    assert_eq!(result["metrics"]["cache_hits"], 1, "{result}");
+    let error = &result["errors"][0];
+    assert_eq!(error["category"], "authorization", "{result}");
+    assert_nothing_sent(error, "UNSAFE_ADDRESS", "read", &result);
 }

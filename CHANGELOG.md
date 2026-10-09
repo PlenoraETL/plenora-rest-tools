@@ -36,21 +36,24 @@ release finché una release non viene preparata.
   tentativo uscivano con remote_effect `none` e retry `never`. Ora escono con
   remote_effect `unknown` e retry `requires_recovery`; categoria, codice,
   messaggio e dettagli non cambiano (#32).
-- La fase resta quella dell'errore (ERR-003): `write` per un file che non si
-  riapre, `connect` per un token rifiutato. Solo `validate`, che vuol dire
-  «prima di ogni attività di rete», non può restare tale. Diventa la fase
-  pubblica in cui il trasporto si trovava (prepare, connect, read, write),
-  registrata dal contesto dell'esecuzione e, in enrich, per record (i record
-  aggiornano solo la propria fase, mai quella dell'esecuzione, quindi
-  l'ordine dei record concorrenti non conta; una risposta presa dalla cache
-  entra in `read` senza contare come invio):
-  - `connect` per la sessione cookie chiusa prima del polling, e per il
-    circuit breaker o la cache che rifiutano la richiesta dopo il token
-    OAuth;
+- La fase si stabilisce a parte dall'effetto, anche senza invii, e resta
+  quella dell'errore (ERR-003): `write` per un file che non si riapre,
+  `connect` per un token rifiutato. Solo `validate`, che vuol dire «prima di
+  ogni attività di rete», diventa la fase pubblica in cui il trasporto si
+  trovava (prepare, connect, read, write). La registra il contesto
+  dell'esecuzione e, in enrich, il record: i record aggiornano solo la
+  propria fase, mai quella dell'esecuzione, quindi l'ordine dei record
+  concorrenti non conta. Una risposta presa dalla cache entra in `read` senza
+  contare come invio:
+  - `connect` per un indirizzo locale rifiutato mentre si risolve l'endpoint
+    (prima `validate`; senza invii resta `none`/`never`), per la sessione
+    cookie chiusa prima del polling, e per il circuit breaker o la cache che
+    rifiutano la richiesta dopo il token OAuth;
   - `prepare` per un body multipart che non si costruisce;
   - `read` per un redirect, un URL di polling o un link di paginazione
-    rifiutati mentre il motore interpreta una risposta, anche presa dalla
-    cache.
+    rifiutati mentre il motore interpreta una risposta. Se l'esecuzione è
+    servita interamente dalla cache la fase è `read`, ma l'effetto resta
+    `none` e il retry `never`: nulla è partito.
 - Cambia anche `PAGINATION_LIMIT_REACHED` di un risultato partial: le pagine
   sono state richieste, quindi l'errore esce con `unknown` e
   `requires_recovery` invece di `none` e `never`; la fase resta `read`.

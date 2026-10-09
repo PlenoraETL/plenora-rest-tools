@@ -476,30 +476,39 @@ motore solleva di solito prima della rete (validazione, policy, preparazione,
 autenticazione, I/O locale, errori interni) escono con remote_effect
 `unknown` e retry `requires_recovery` se arrivano dopo un invio, con
 qualunque metodo e qualunque risposta, compresi un redirect e una richiesta
-di token OAuth. La fase resta quella della variante (ERR-003): `write` per un
-file locale, `connect` per un token, `read` per un limite di paginazione.
-L'unica eccezione è `validate`, che vuol dire «prima di ogni attività di
-rete» e non può valere dopo un invio. Diventa la fase pubblica in cui il
-trasporto era entrato quando l'errore è nato: il contesto dell'esecuzione la
-registra nei punti in cui il trasporto entra in prepare, connect, read e
-write. In enrich ogni record ha la propria fase e non tocca quella
-dell'esecuzione, così il risultato non dipende dall'ordine dei record
-concorrenti. Una risposta presa dalla cache entra in `read`, senza contare
-come invio. Così:
-- la sessione cookie chiusa prima del polling, e il circuit breaker o la
-  cache che rifiutano la richiesta dopo il token OAuth, danno `connect`;
+di token OAuth. Sono i casi di un redirect cross-origin rifiutato dopo un
+POST, di un URL di polling rifiutato dopo che il job è stato accettato, di un
+file sorgente che non si riapre per un nuovo tentativo e di un limite di
+paginazione raggiunto. Categoria, codice, messaggio e dettagli restano
+quelli della variante. Il conteggio è quello degli invii reali, non delle
+risposte servite dalla cache: senza invii l'effetto resta `none` e il retry
+`never`. In enrich un errore di un record si giudica sulle richieste partite
+per quel record (nel batch, quelle del blocco che lo conteneva): un record la
+cui richiesta non è partita resta `none` anche se altri record sono stati
+inviati. Un errore che dichiara già un effetto (`unknown`, `committed`)
+conserva i suoi assi.
+
+La fase si stabilisce a parte, anche senza invii (ERR-003, l'ultima fase nota
+per iniziata). Resta quella della variante: `write` per un file locale,
+`connect` per un token, `read` per un limite di paginazione. L'unica
+eccezione è `validate`, che vuol dire «prima di ogni attività di rete».
+Diventa la fase pubblica in cui il trasporto era entrato quando l'errore è
+nato. Il contesto dell'esecuzione la registra nei punti in cui il trasporto
+entra in prepare, connect, read e write. In enrich ogni record ha la propria
+fase e non tocca quella dell'esecuzione, così il risultato non dipende
+dall'ordine dei record concorrenti. Una risposta presa dalla cache entra in
+`read`, senza contare come invio. Così:
+
+- l'indirizzo locale rifiutato mentre si risolve l'endpoint, la sessione
+  cookie chiusa prima del polling, e il circuit breaker o la cache che
+  rifiutano la richiesta dopo il token OAuth, danno `connect`;
 - un body multipart che non si costruisce dà `prepare`;
 - un redirect, un URL di polling o un link di paginazione rifiutati mentre si
-  interpreta una risposta, anche presa dalla cache, danno `read`. Sono i casi di un redirect cross-origin rifiutato
-dopo un POST, di un URL di polling rifiutato dopo che il job è stato
-accettato, di un file sorgente che non si riapre per un nuovo tentativo e di
-un limite di paginazione raggiunto. Categoria, codice, messaggio e dettagli
-restano quelli della variante. Il conteggio è quello degli invii reali, non
-delle risposte servite dalla cache. In enrich un errore di un record si
-giudica sulle richieste partite per quel record (nel batch, quelle del
-blocco che lo conteneva): un record la cui richiesta non è partita resta
-`none` anche se altri record sono stati inviati. Un errore che dichiara già
-un effetto (`unknown`, `committed`) conserva i suoi assi.
+  interpreta una risposta danno `read`. Se la risposta viene dalla cache e
+  nessuna richiesta è partita, l'errore resta `none` e `never`.
+
+Un errore `validate` dopo un invio senza fase registrata prende `read`, la
+fase con cui parte ogni invio.
 
 Anche il tipo Rust EngineError non contiene testo di terzi, nemmeno
 nascosto. Le varianti che descrivono un fallimento a parole contengono un

@@ -4477,22 +4477,30 @@ fn is_transferable_cross_origin_header(name: &str) -> bool {
 /// left keeps `none` while others went out. Only requests actually sent count
 /// ([`ExecutionTally`]), not responses served from the cache.
 ///
-/// The phase follows the same split: a record error takes its record's
-/// phase, an error of the whole execution the phase of the paths outside any
-/// record. In enrich every request runs inside a record, so the execution has
-/// no phase of its own: an execution error raised after the records' requests
-/// (an internal failure, a cancellation, a deadline) keeps the phase of its
-/// variant, and one whose variant says `validate` takes `read` explicitly,
-/// never a phase left by whichever record ran last.
+/// The phase is normalized first and on its own, also with no request sent
+/// (an execution served entirely from the cache): a `validate` error raised
+/// after the transport entered a phase takes that phase. The effect and the
+/// retry change only when a request was sent; otherwise they stay `none` and
+/// `never`, since nothing went out.
+///
+/// The phase follows the same split as the requests: a record error takes its
+/// record's phase, an error of the whole execution the phase of the paths
+/// outside any record. In enrich every request runs inside a record, so the
+/// execution has no phase of its own: an execution error raised after the
+/// records' requests (an internal failure, a cancellation, a deadline) keeps
+/// the phase of its variant, and one whose variant says `validate` takes
+/// `read` explicitly when requests were sent, never a phase left by whichever
+/// record ran last.
 fn account_for_sent_requests(result: &mut ExecutionResult, tally: &ExecutionTally) {
     let operation_sent = tally.requests.load(Ordering::Relaxed) > 0;
     for error in &mut result.errors {
+        crate::error::normalize_phase(error, tally.phase(error.input_index));
         let sent = match error.input_index {
             None => operation_sent,
             Some(index) => tally.record_requests(index) > 0,
         };
         if sent {
-            crate::error::after_sent_request(error, tally.phase(error.input_index));
+            crate::error::after_sent_request(error);
         }
     }
 }

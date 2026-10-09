@@ -394,8 +394,26 @@ impl RetryAdvice {
     };
 }
 
-/// Corrects the axes of an error raised after a request of the operation (or
-/// of its input record) was sent (Typed Errors 1.0, ERR-014).
+/// The phase of an error whose variant says `validate`, "before any network
+/// activity", but that was raised after the transport entered a public phase
+/// (ERR-003, the last phase known to have started): `entered`, the phase
+/// recorded by the execution context. The cookie session, the circuit breaker
+/// or the cache refusing a request give `connect`; a body that cannot be built
+/// gives `prepare`; a redirect, a polling URL or a pagination link refused
+/// while a response is interpreted give `read`, also when that response came
+/// from the cache and nothing was sent. Other phases are the variant's own and
+/// are kept. This says when the error happened, not what it did remotely:
+/// [`after_sent_request`] decides that, from the requests actually sent.
+pub(crate) fn normalize_phase(error: &mut ExecutionError, entered: Option<ErrorPhase>) {
+    if error.phase == ErrorPhase::Validate
+        && let Some(entered) = entered
+    {
+        error.phase = entered;
+    }
+}
+
+/// Corrects the effect of an error raised after a request of the operation
+/// (or of its input record) was sent (Typed Errors 1.0, ERR-014).
 ///
 /// The axes of a variant describe where it is normally raised: before the
 /// network, for most of those that report `remote_effect: none`. Raised once a
@@ -405,25 +423,20 @@ impl RetryAdvice {
 /// URL refused after the job was accepted, a source file that cannot be
 /// reopened for a second attempt. Such an error reports `unknown` and
 /// `requires_recovery`. Category, code, message and details are kept: they
-/// still say what failed.
+/// still say what failed. Called only when a request was sent: without one
+/// the error keeps `none` and `never`, whatever its phase.
 ///
-/// The phase is the variant's own (ERR-003, the last phase known to have
-/// started): `write` for a local file that cannot be reopened, `connect` for
-/// a token request that failed, `read` for a pagination limit. The one
-/// exception is `validate`, which means "before any network activity" and
-/// cannot hold once a request was sent. It becomes `entered`, the public
-/// phase the transport had last entered when the error was raised (connect
-/// for the circuit breaker or the cache refusing a request after its OAuth
-/// token, prepare for a body that cannot be built, read for a redirect or a
-/// polling URL refused while reading a response). Without a recorded phase
-/// it is `read`, the phase every sent request starts. An error that already
-/// reports an effect (`unknown`, `committed`, `partial`) keeps all its axes.
-pub(crate) fn after_sent_request(error: &mut ExecutionError, entered: Option<ErrorPhase>) {
+/// The phase was set by [`normalize_phase`]. An error still in `validate`
+/// here had no recorded phase; once a request was sent that cannot hold, and
+/// it becomes `read`, the phase every sent request starts. An error that
+/// already reports an effect (`unknown`, `committed`, `partial`) keeps all its
+/// axes.
+pub(crate) fn after_sent_request(error: &mut ExecutionError) {
     if error.remote_effect == RemoteEffect::None {
         error.remote_effect = RemoteEffect::Unknown;
         error.retry = RetryAdvice::REQUIRES_RECOVERY;
         if error.phase == ErrorPhase::Validate {
-            error.phase = entered.unwrap_or(ErrorPhase::Read);
+            error.phase = ErrorPhase::Read;
         }
     }
 }
