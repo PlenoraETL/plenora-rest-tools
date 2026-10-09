@@ -5848,3 +5848,89 @@ async fn batch_enrich_judges_the_remote_effect_on_the_records_it_sent() {
     assert_eq!(error_of(1)["remote_effect"], "none", "{result}");
     assert_eq!(error_of(1)["retry"]["kind"], "never", "{result}");
 }
+
+/// A request whose OAuth token is obtained first: the token request is sent,
+/// then `connection` decides what happens to the request itself.
+async fn after_an_oauth_token(connection_extra: Value, method: &str, input: Value) -> Value {
+    let (base_url, server, observed) = recorded_server(vec![(
+        200,
+        r#"{"access_token":"engine-token","token_type":"Bearer","expires_in":3600}"#,
+        vec![],
+    )])
+    .await;
+    let mut connection = json!({
+        "url": format!("{base_url}resource"),
+        "method": method,
+        "auth": {
+            "type": "oauth2_client_credentials",
+            "token_url": format!("{base_url}token"),
+            "client_id": "client",
+            "client_secret": "secret"
+        }
+    });
+    for (key, value) in connection_extra.as_object().unwrap() {
+        connection[key] = value.clone();
+    }
+    let result = execute(
+        &local_engine(),
+        json!({
+            "schema_version": 1,
+            "operation": "test",
+            "connection": connection,
+            "input": input
+        }),
+    )
+    .await;
+    server.await.unwrap();
+    let observed = observed.lock().unwrap();
+    assert_eq!(observed.len(), 1, "only the token request: {result}");
+    assert!(observed[0].starts_with("POST /token "), "{result}");
+    result
+}
+
+#[tokio::test]
+async fn a_circuit_breaker_refusal_after_the_token_keeps_the_connect_phase() {
+    // The circuit breaker is consulted after the token was obtained: the
+    // refusal is in connect, not in validate.
+    let result = after_an_oauth_token(
+        json!({"circuit_breaker": {"enabled": true, "failure_threshold": 0}}),
+        "GET",
+        json!({}),
+    )
+    .await;
+    assert_after_sent_request(&result["errors"][0], "INVALID_INPUT", "connect", &result);
+}
+
+#[tokio::test]
+async fn a_cache_refusal_after_the_token_keeps_the_connect_phase() {
+    // An authenticated request may be cached only with allow_authenticated;
+    // the bearer token exists only once the token request has gone out.
+    let result = after_an_oauth_token(
+        json!({"cache": {"enabled": true, "fresh_for_ms": 60_000}}),
+        "GET",
+        json!({}),
+    )
+    .await;
+    assert_after_sent_request(&result["errors"][0], "POLICY_VIOLATION", "connect", &result);
+}
+
+#[tokio::test]
+async fn an_invalid_multipart_type_after_the_token_keeps_the_prepare_phase() {
+    // The multipart body is built after the token: an invalid MIME type of a
+    // part fails while the request is prepared.
+    let result = after_an_oauth_token(
+        json!({"request": {"body_type": "multipart"}}),
+        "POST",
+        json!({
+            "params": {
+                "attachment": {
+                    "filename": "hello.txt",
+                    "content_type": "not a mime type",
+                    "data_base64": "aGVsbG8="
+                }
+            }
+        }),
+    )
+    .await;
+    assert_after_sent_request(&result["errors"][0], "INVALID_INPUT", "prepare", &result);
+}

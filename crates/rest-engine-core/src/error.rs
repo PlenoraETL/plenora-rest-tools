@@ -411,17 +411,19 @@ impl RetryAdvice {
 /// started): `write` for a local file that cannot be reopened, `connect` for
 /// a token request that failed, `read` for a pagination limit. The one
 /// exception is `validate`, which means "before any network activity" and
-/// cannot hold once a request was sent: those variants (a redirect or a
-/// polling URL refused) are raised while the engine interprets a response,
-/// so the phase that had started is `read`, which covers sending a request
-/// and reading its answer. An error that already reports an effect
-/// (`unknown`, `committed`, `partial`) keeps all its axes.
-pub(crate) fn after_sent_request(error: &mut ExecutionError) {
+/// cannot hold once a request was sent. It becomes `entered`, the public
+/// phase the transport had last entered when the error was raised (connect
+/// for the circuit breaker or the cache refusing a request after its OAuth
+/// token, prepare for a body that cannot be built, read for a redirect or a
+/// polling URL refused while reading a response). Without a recorded phase
+/// it is `read`, the phase every sent request starts. An error that already
+/// reports an effect (`unknown`, `committed`, `partial`) keeps all its axes.
+pub(crate) fn after_sent_request(error: &mut ExecutionError, entered: Option<ErrorPhase>) {
     if error.remote_effect == RemoteEffect::None {
         error.remote_effect = RemoteEffect::Unknown;
         error.retry = RetryAdvice::REQUIRES_RECOVERY;
         if error.phase == ErrorPhase::Validate {
-            error.phase = ErrorPhase::Read;
+            error.phase = entered.unwrap_or(ErrorPhase::Read);
         }
     }
 }

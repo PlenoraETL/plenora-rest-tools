@@ -36,7 +36,8 @@ use url::Host;
 
 use crate::{
     ApiKeyLocation, AuthConfig, CachePolicy, CircuitBreakerPolicy, CookiePolicy, CookieSession,
-    EngineConfig, EngineError, HttpMethod, OAuthClientAuth, ProxyConfig, RetryPolicy, TlsConfig,
+    EngineConfig, EngineError, ErrorPhase, HttpMethod, OAuthClientAuth, ProxyConfig, RetryPolicy,
+    TlsConfig,
 };
 
 static DOWNLOAD_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -56,11 +57,27 @@ static DOWNLOAD_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 /// happened remotely. `records` keeps that count per input record, for the
 /// operations whose errors belong to one record (enrich): a request counts
 /// for every record of the [`RECORD_SCOPE`] it was sent in.
+///
+/// `phases` is the public phase the transport last entered (prepare,
+/// connect, read, write; ERR-003), for the execution and for each record of
+/// the scope. It gives the phase of an error whose variant says `validate`,
+/// "before any network activity", but that is raised after a request was
+/// sent: the circuit breaker or the cache refusing the request after an
+/// OAuth token was obtained (connect), a multipart body that cannot be built
+/// (prepare), a redirect refused while reading a response (read). Per record,
+/// so that concurrent records do not overwrite each other's phase.
 #[derive(Default)]
 pub(crate) struct ExecutionTally {
     pub(crate) requests: AtomicU64,
     pub(crate) retries: AtomicU64,
     pub(crate) records: std::sync::Mutex<BTreeMap<usize, u64>>,
+    phases: std::sync::Mutex<PhaseTrack>,
+}
+
+#[derive(Default)]
+struct PhaseTrack {
+    operation: Option<ErrorPhase>,
+    records: BTreeMap<usize, ErrorPhase>,
 }
 
 impl ExecutionTally {
@@ -73,6 +90,36 @@ impl ExecutionTally {
             .copied()
             .unwrap_or(0)
     }
+
+    /// The public phase last entered by the execution, or by input record
+    /// `index`.
+    pub(crate) fn phase(&self, index: Option<usize>) -> Option<ErrorPhase> {
+        let track = self
+            .phases
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match index {
+            None => track.operation,
+            Some(index) => track.records.get(&index).copied(),
+        }
+    }
+}
+
+/// Records that the transport enters the public `phase`, for the execution
+/// and for every record of the current [`RECORD_SCOPE`].
+pub(crate) fn enter_phase(phase: ErrorPhase) {
+    tally(|tally| {
+        let mut track = tally
+            .phases
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        track.operation = Some(phase);
+        let _ = RECORD_SCOPE.try_with(|indices| {
+            for index in indices.iter() {
+                track.records.insert(*index, phase);
+            }
+        });
+    });
 }
 
 tokio::task_local! {
@@ -812,6 +859,9 @@ impl Transport {
         self.validate_request(&request)?;
         let _jar_lease = self.admit_cookie_jar(&mut request).await?;
         let auth_stats = self.resolve_auth(&mut request).await?;
+        // The token request, if any, ran its own phases; this request is back
+        // to being admitted (cache, circuit breaker), part of connect.
+        enter_phase(ErrorPhase::Connect);
 
         let mut response = self.execute_cached(&request).await?;
         response.auth_requests = auth_stats.network_requests;
@@ -859,6 +909,7 @@ impl Transport {
             );
         }
         let auth_stats = self.resolve_auth(&mut request).await?;
+        enter_phase(ErrorPhase::Connect);
         let mut response = self
             .download_with_circuit(&request, target, success_statuses)
             .await?;
@@ -918,6 +969,7 @@ impl Transport {
                 | AuthConfig::OAuth2Password { .. }
                 | AuthConfig::ArcgisToken { .. }
         ) {
+            enter_phase(ErrorPhase::Connect);
             let (token, stats) = self.oauth_token(request).await?;
             request.auth = AuthConfig::Bearer { token };
             Ok(stats)
@@ -1566,9 +1618,11 @@ impl Transport {
         let mut rate_limit_wait_ms = 0_u64;
 
         for redirects in 0..=request.max_redirects {
+            enter_phase(ErrorPhase::Connect);
             let client = self
                 .client_for(&url, &request.tls, request.proxy.as_ref(), request)
                 .await?;
+            enter_phase(ErrorPhase::Prepare);
             let headers = request_headers(request)?;
             let mut request_url = url.clone();
             apply_query_auth(&mut request_url, &request.auth);
@@ -1604,6 +1658,7 @@ impl Transport {
 
             let (permit, waited_ms) = self.admit_request(request.requests_per_second).await?;
             network_requests = network_requests.saturating_add(1);
+            enter_phase(ErrorPhase::Read);
             tally(|tally| {
                 tally.requests.fetch_add(1, Ordering::Relaxed);
                 if retry && redirects == 0 {
@@ -2431,6 +2486,7 @@ async fn persist_download(
     target: &Path,
     overwrite: bool,
 ) -> Result<(), EngineError> {
+    enter_phase(ErrorPhase::Write);
     if !overwrite {
         fs::hard_link(temporary, target)
             .await

@@ -38,8 +38,14 @@ release finché una release non viene preparata.
   messaggio e dettagli non cambiano (#32).
 - La fase resta quella dell'errore (ERR-003): `write` per un file che non si
   riapre, `connect` per un token rifiutato. Solo `validate`, che vuol dire
-  «prima di ogni attività di rete», diventa `read`: i redirect e gli URL di
-  polling rifiutati nascono mentre il motore interpreta una risposta.
+  «prima di ogni attività di rete», non può restare tale. Diventa la fase
+  pubblica in cui il trasporto si trovava (prepare, connect, read, write),
+  registrata dal contesto dell'esecuzione e, in enrich, per record:
+  - `connect` per il circuit breaker o la cache che rifiutano la richiesta
+    dopo il token OAuth;
+  - `prepare` per un body multipart che non si costruisce;
+  - `read` per un redirect o un URL di polling rifiutati mentre il motore
+    interpreta una risposta.
 - Cambia anche `PAGINATION_LIMIT_REACHED` di un risultato partial: le pagine
   sono state richieste, quindi l'errore esce con `unknown` e
   `requires_recovery` invece di `none` e `never`; la fase resta `read`.

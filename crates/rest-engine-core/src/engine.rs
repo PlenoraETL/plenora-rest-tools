@@ -4484,7 +4484,7 @@ fn account_for_sent_requests(result: &mut ExecutionResult, tally: &ExecutionTall
             Some(index) => tally.record_requests(index) > 0,
         };
         if sent {
-            crate::error::after_sent_request(error);
+            crate::error::after_sent_request(error, tally.phase(error.input_index));
         }
     }
 }
