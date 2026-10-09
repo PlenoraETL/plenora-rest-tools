@@ -68,7 +68,7 @@ compreso l'errore atteso per un guasto, e gli invarianti da controllare:
 | 429 e 5xx | Retry-After rispettato, 5xx transitori recuperati, 5xx persistenti con esattamente max_attempts tentativi |
 | risposta interrotta | connessione chiusa prima della risposta, corpo POST letto e connessione chiusa (effetto remoto possibile, nessun retry non idempotente), risposta troncata, risposta assente con timeout |
 | guasti di rete | DNS inesistente (.invalid), porta chiusa, TLS verso la porta in chiaro, connect timeout verso un indirizzo che non risponde |
-| controllo | deadline (Engine::execute, Engine::execute_with_control, payload del RuntimeBinding), cancellazione locale |
+| controllo | deadline (Engine::execute, Engine::execute_with_control, rifiuto della deadline nel payload del RuntimeBinding), cancellazione locale |
 | paginazione | offset e link con errore transitorio a metà, cursor con errore persistente a metà (nessun output parziale) |
 | enrichment concorrente | ordine e contenuto conservati con completamenti fuori ordine e 503 transitori |
 | job asincroni | polling, errore transitorio di polling, polling timeout con recovery e resume senza nuovo submit, cancellazione e deadline con cancellazione remota |
@@ -264,7 +264,12 @@ sono ripetute ([report](../campaign/reports/README.md)).
    execute_with_control applica la più vicina tra la deadline del controllo e
    `options.deadline` (test `the_request_deadline_binds_every_entry_point`).
 2. **Deadline nel payload del RuntimeBinding ignorata** — corretto dalla
-   stessa modifica (test `runtime_honours_the_deadline_carried_in_the_payload`).
+   stessa modifica. Con plenora-contracts v1.1.0 (RT-023) sul runtime la
+   deadline viaggia solo come metadata: quella nel payload è ora rifiutata con
+   RUNTIME_DEADLINE_IN_PAYLOAD (test
+   `a_deadline_only_in_the_payload_is_refused_for_every_operation`) e la
+   metadata chiude la chiamata
+   (`runtime_honours_the_deadline_carried_in_the_metadata`).
 3. **metrics.requests e metrics.retries azzerati nei fallimenti** — corretto:
    un contatore per esecuzione registra ogni invio e ogni retry, compresa la
    cancellazione remota dei job (test

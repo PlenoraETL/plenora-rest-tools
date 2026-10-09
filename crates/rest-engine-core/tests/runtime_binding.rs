@@ -564,7 +564,7 @@ async fn runtime_requests_carry_cookie_session_handles_opened_by_the_host() {
 }
 
 #[tokio::test]
-async fn runtime_honours_the_deadline_carried_in_the_payload() {
+async fn runtime_honours_the_deadline_carried_in_the_metadata() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
@@ -588,14 +588,16 @@ async fn runtime_honours_the_deadline_carried_in_the_payload() {
     let resources = EmptyResources;
     let binding = RuntimeBinding::new(&engine, &resources);
     let mut request = runtime_request(&format!("http://{address}/"));
-    request.payload["options"] = json!({"deadline": rfc3339});
+    request
+        .metadata
+        .insert("plenora.execution.deadline".to_owned(), rfc3339);
     let started = std::time::Instant::now();
     let response = tokio::time::timeout(
         Duration::from_secs(10),
         binding.invoke(request, CancellationToken::new()),
     )
     .await
-    .expect("the payload deadline ends the call");
+    .expect("the metadata deadline ends the call");
     assert!(started.elapsed() < Duration::from_secs(5));
     assert_eq!(response.kind, RuntimeMessageKind::Error);
     assert_eq!(response.payload["code"], "TIMEOUT");
@@ -813,25 +815,88 @@ async fn deadline_refusals_follow_the_shared_matrix() {
         assert_refusal(&refused(request).await, "protocol", malformed);
     }
 
-    // Already expired, in either channel: timeout before any resource.
+    // Already expired in the metadata: timeout before any resource.
     let mut in_metadata = with_credential(runtime_request("http://127.0.0.1:9/"));
     in_metadata
         .metadata
         .insert(deadline.to_owned(), "2000-01-01T00:00:00Z".to_owned());
-    let mut in_payload = with_credential(runtime_request("http://127.0.0.1:9/"));
-    in_payload.payload["options"] = json!({"deadline": "2000-01-01T00:00:00Z"});
-    for (label, request) in [("metadata", in_metadata), ("payload", in_payload)] {
-        let response = refused(request).await;
-        assert_refusal(&response, "timeout", label);
-        assert_eq!(response.payload["code"], "DEADLINE_EXPIRED", "{label}");
-    }
+    let response = refused(in_metadata).await;
+    assert_refusal(&response, "timeout", "metadata");
+    assert_eq!(response.payload["code"], "DEADLINE_EXPIRED");
 
-    // Both channels, even with the same value: refused, neither wins.
+    // RT-023: in the payload the deadline is refused, alone (expired or
+    // not) or next to the metadata one, even with the same value.
+    let mut expired = with_credential(runtime_request("http://127.0.0.1:9/"));
+    expired.payload["options"] = json!({"deadline": "2000-01-01T00:00:00Z"});
+    let mut future = with_credential(runtime_request("http://127.0.0.1:9/"));
+    future.payload["options"] = json!({"deadline": "2099-01-01T00:00:00Z"});
     let mut both = with_credential(runtime_request("http://127.0.0.1:9/"));
     both.metadata
         .insert(deadline.to_owned(), "2099-01-01T00:00:00Z".to_owned());
     both.payload["options"] = json!({"deadline": "2099-01-01T00:00:00Z"});
-    assert_refusal(&refused(both).await, "invalid_configuration", "both");
+    for (label, request) in [("expired", expired), ("future", future), ("both", both)] {
+        let response = refused(request).await;
+        assert_refusal(&response, "invalid_configuration", label);
+        assert_eq!(
+            response.payload["code"], "RUNTIME_DEADLINE_IN_PAYLOAD",
+            "{label}"
+        );
+    }
+}
+
+/// RT-023: on the runtime the deadline travels only as metadata, so a
+/// deadline only in the payload is refused before invocation for every
+/// operation, with both input contracts (they declare `options.deadline` for
+/// the Rust, CLI and Python surfaces, which have no metadata).
+#[tokio::test]
+async fn a_deadline_only_in_the_payload_is_refused_for_every_operation() {
+    for (operation, contract, payload) in [
+        ("rest.test", EXECUTION_REQUEST_CONTRACT, None),
+        ("rest.generate", EXECUTION_REQUEST_CONTRACT, None),
+        ("rest.enrich", EXECUTION_REQUEST_CONTRACT, None),
+        (
+            "rest.download",
+            FILE_TRANSFER_INPUT_CONTRACT,
+            Some(json!({
+                "schema_version": 1,
+                "operation": "download",
+                "connection": {"url": "http://127.0.0.1:9/", "method": "GET"},
+                "input": {"file": {"artifact_sink": {"reference": "artifact://tenant/export"}}}
+            })),
+        ),
+        (
+            "rest.upload",
+            FILE_TRANSFER_INPUT_CONTRACT,
+            Some(json!({
+                "schema_version": 1,
+                "operation": "upload",
+                "connection": {"url": "http://127.0.0.1:9/", "method": "PUT"},
+                "input": {"file": {"artifact_source": {"reference": "artifact://tenant/import"}}}
+            })),
+        ),
+    ] {
+        let mut request = runtime_request("http://127.0.0.1:9/");
+        request.metadata.insert(
+            "plenora.capability.operation".to_owned(),
+            operation.to_owned(),
+        );
+        request
+            .metadata
+            .insert("plenora.input.contract".to_owned(), contract.to_owned());
+        match payload {
+            Some(payload) => request.payload = payload,
+            None => {
+                request.payload["operation"] = json!(operation.trim_start_matches("rest."));
+            }
+        }
+        request.payload["options"] = json!({"deadline": "2099-01-01T00:00:00Z"});
+        let response = refused(request).await;
+        assert_refusal(&response, "invalid_configuration", operation);
+        assert_eq!(
+            response.payload["code"], "RUNTIME_DEADLINE_IN_PAYLOAD",
+            "{operation}"
+        );
+    }
 }
 
 #[tokio::test]

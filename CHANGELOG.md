@@ -52,6 +52,17 @@ release finché una release non viene preparata.
 - La deviazione ERR-014 dichiarata con il passaggio alla v1.1.0 è rimossa da
   adoption-manifest.json.
 
+### Deadline sul runtime (RT-023)
+
+- Sul runtime la deadline viaggia solo come metadata
+  `plenora.execution.deadline`. Un messaggio con `options.deadline` nel
+  payload è rifiutato prima dell'invocazione con il nuovo codice
+  RUNTIME_DEADLINE_IN_PAYLOAD (invalid_configuration, validate, none, never),
+  anche quando la deadline è sola. Prima veniva applicata. Lo stesso codice
+  sostituisce INVALID_INPUT per la deadline presente in entrambi i canali.
+  Rust, CLI e SDK Python, che non hanno metadata, continuano a usare
+  `options.deadline` (#35).
+
 ## 0.3.0 (2026-10-06)
 
 Contiene modifiche incompatibili dell'API Rust e del contratto delle
