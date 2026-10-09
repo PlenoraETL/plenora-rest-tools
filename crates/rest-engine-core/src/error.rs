@@ -403,16 +403,26 @@ impl RetryAdvice {
 /// OAuth token request included), the same failure cannot prove that the
 /// remote side did nothing: a cross-origin redirect after a POST, a polling
 /// URL refused after the job was accepted, a source file that cannot be
-/// reopened for a second attempt. Such an error reports `unknown`, the phase
-/// of the last request started (`read`, which covers sending the request,
-/// ERR-003) and `requires_recovery`. Category, code, message and details are
-/// kept: they still say what failed. An error that already reports an effect
-/// (`unknown`, `committed`, `partial`) keeps its axes.
+/// reopened for a second attempt. Such an error reports `unknown` and
+/// `requires_recovery`. Category, code, message and details are kept: they
+/// still say what failed.
+///
+/// The phase is the variant's own (ERR-003, the last phase known to have
+/// started): `write` for a local file that cannot be reopened, `connect` for
+/// a token request that failed, `read` for a pagination limit. The one
+/// exception is `validate`, which means "before any network activity" and
+/// cannot hold once a request was sent: those variants (a redirect or a
+/// polling URL refused) are raised while the engine interprets a response,
+/// so the phase that had started is `read`, which covers sending a request
+/// and reading its answer. An error that already reports an effect
+/// (`unknown`, `committed`, `partial`) keeps all its axes.
 pub(crate) fn after_sent_request(error: &mut ExecutionError) {
     if error.remote_effect == RemoteEffect::None {
         error.remote_effect = RemoteEffect::Unknown;
-        error.phase = ErrorPhase::Read;
         error.retry = RetryAdvice::REQUIRES_RECOVERY;
+        if error.phase == ErrorPhase::Validate {
+            error.phase = ErrorPhase::Read;
+        }
     }
 }
 

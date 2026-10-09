@@ -33,13 +33,16 @@ release finché una release non viene preparata.
   compresi i redirect e le richieste di token OAuth. Prima un redirect
   cross-origin rifiutato dopo un POST, un URL di polling cross-origin dopo un
   submit accettato o un file sorgente che non si riapriva per un nuovo
-  tentativo uscivano con fase `validate`, remote_effect `none` e retry
-  `never`. Ora questi errori escono con fase `read`, remote_effect `unknown` e
-  retry `requires_recovery`; categoria, codice, messaggio e dettagli non
-  cambiano (#32).
+  tentativo uscivano con remote_effect `none` e retry `never`. Ora escono con
+  remote_effect `unknown` e retry `requires_recovery`; categoria, codice,
+  messaggio e dettagli non cambiano (#32).
+- La fase resta quella dell'errore (ERR-003): `write` per un file che non si
+  riapre, `connect` per un token rifiutato. Solo `validate`, che vuol dire
+  «prima di ogni attività di rete», diventa `read`: i redirect e gli URL di
+  polling rifiutati nascono mentre il motore interpreta una risposta.
 - Cambia anche `PAGINATION_LIMIT_REACHED` di un risultato partial: le pagine
-  sono state richieste, quindi l'errore esce con `read`, `unknown` e
-  `requires_recovery` invece di `none` e `never`.
+  sono state richieste, quindi l'errore esce con `unknown` e
+  `requires_recovery` invece di `none` e `never`; la fase resta `read`.
 - In enrich si giudica ogni record sulle richieste partite per quel record (nel
   batch, quelle del suo blocco): un record la cui richiesta non è partita resta
   `none`. Gli errori prima di ogni invio restano `none` e `never`.
@@ -48,11 +51,6 @@ release finché una release non viene preparata.
   superficie congelata.
 - La deviazione ERR-014 dichiarata con il passaggio alla v1.1.0 è rimossa da
   adoption-manifest.json.
-- RT-023: una deadline solo nel payload (`options.deadline`, presente in
-  entrambi i contratti d'input) non è ignorata: vale per tutte e cinque le
-  operazioni sul runtime, e se è già scaduta la chiamata è rifiutata con
-  DEADLINE_EXPIRED prima dell'invocazione. Nuovo test
-  a_deadline_only_in_the_payload_binds_every_operation.
 
 ## 0.3.0 (2026-10-06)
 

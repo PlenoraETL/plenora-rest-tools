@@ -5534,11 +5534,11 @@ async fn a_zero_backoff_base_never_waits_whatever_the_factor() {
 }
 
 /// ERR-014: the axes of an error raised once a request of the operation went
-/// out. Only the remote effect, the phase and the retry change; the category
-/// and the code still say what failed.
-fn assert_after_sent_request(error: &Value, code: &str, result: &Value) {
+/// out. The remote effect and the retry change; the phase is the one that had
+/// started (ERR-003), and the category and the code still say what failed.
+fn assert_after_sent_request(error: &Value, code: &str, phase: &str, result: &Value) {
     assert_eq!(error["code"], code, "{result}");
-    assert_eq!(error["phase"], "read", "{result}");
+    assert_eq!(error["phase"], phase, "{result}");
     assert_eq!(error["remote_effect"], "unknown", "{result}");
     assert_eq!(error["retry"]["kind"], "requires_recovery", "{result}");
 }
@@ -5582,7 +5582,7 @@ async fn a_cross_origin_redirect_after_a_post_does_not_claim_no_remote_effect() 
     assert_eq!(result["metrics"]["requests"], 1, "{result}");
     let error = &result["errors"][0];
     assert_eq!(error["category"], "authorization", "{result}");
-    assert_after_sent_request(error, "UNSAFE_ADDRESS", &result);
+    assert_after_sent_request(error, "UNSAFE_ADDRESS", "read", &result);
 }
 
 #[tokio::test]
@@ -5615,7 +5615,7 @@ async fn a_cross_origin_poll_after_an_accepted_submit_does_not_claim_no_remote_e
     server.await.unwrap();
     assert_eq!(observed.lock().unwrap().len(), 1);
     assert_eq!(result["status"], "failed", "{result}");
-    assert_after_sent_request(&result["errors"][0], "UNSAFE_ADDRESS", &result);
+    assert_after_sent_request(&result["errors"][0], "UNSAFE_ADDRESS", "read", &result);
 }
 
 #[tokio::test]
@@ -5669,7 +5669,8 @@ async fn a_source_file_lost_before_a_retry_does_not_claim_no_remote_effect() {
     assert_eq!(result["metrics"]["requests"], 1, "{result}");
     let error = &result["errors"][0];
     assert_eq!(error["category"], "io", "{result}");
-    assert_after_sent_request(error, "FILE_IO", &result);
+    // The failure is the local reopening of the source: phase write.
+    assert_after_sent_request(error, "FILE_IO", "write", &result);
     fs::remove_dir_all(directory).await.unwrap();
 }
 
@@ -5699,7 +5700,8 @@ async fn a_failed_token_request_does_not_claim_no_remote_effect() {
     server.await.unwrap();
     let error = &result["errors"][0];
     assert_eq!(error["category"], "authentication", "{result}");
-    assert_after_sent_request(error, "AUTHENTICATION_FAILED", &result);
+    // Obtaining the token is the connect phase.
+    assert_after_sent_request(error, "AUTHENTICATION_FAILED", "connect", &result);
 }
 
 #[tokio::test]
@@ -5741,7 +5743,7 @@ async fn enrich_judges_the_remote_effect_on_the_requests_of_each_record() {
         let errors = result["errors"].as_array().unwrap();
         assert_eq!(errors.len(), 2, "{result}");
         assert_eq!(errors[0]["input_index"], 0, "{result}");
-        assert_after_sent_request(&errors[0], "UNSAFE_ADDRESS", &result);
+        assert_after_sent_request(&errors[0], "UNSAFE_ADDRESS", "read", &result);
         assert_eq!(errors[1]["input_index"], 1, "{result}");
         assert_eq!(errors[1]["remote_effect"], "none", "{result}");
         assert_eq!(errors[1]["retry"]["kind"], "never", "{result}");
@@ -5842,7 +5844,7 @@ async fn batch_enrich_judges_the_remote_effect_on_the_records_it_sent() {
             .find(|error| error["input_index"] == index)
             .unwrap_or_else(|| panic!("no error for record {index}: {result}"))
     };
-    assert_after_sent_request(error_of(0), "UNSAFE_ADDRESS", &result);
+    assert_after_sent_request(error_of(0), "UNSAFE_ADDRESS", "read", &result);
     assert_eq!(error_of(1)["remote_effect"], "none", "{result}");
     assert_eq!(error_of(1)["retry"]["kind"], "never", "{result}");
 }

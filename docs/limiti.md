@@ -63,7 +63,7 @@ ancora dati (righe dell'ultima pagina lasciate fuori, una pagina piena
 all'ultimo posto disponibile, un cursore o un link successivo ancora
 presente), il risultato è **partial**: le righe lette sono in `output` e
 `errors` contiene `PAGINATION_LIMIT_REACHED` (categoria `resource_limit`,
-fase `read`, remote_effect `unknown` e retry `requires_recovery` perché le
+fase `read`, remote_effect `unknown` e retry `requires_recovery`, perché le
 pagine sono state richieste, vedi
 [Errori ed effetti remoti](architecture.md#errori-ed-effetti-remoti);
 `details.max_rows` e, per cursor e link, `details.max_pages`). La paginazione è completa, e il risultato `success`,
