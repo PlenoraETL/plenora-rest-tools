@@ -93,8 +93,9 @@ impl ExecutionControl {
 /// Whether `value` is an RFC 3339 timestamp in UTC.
 ///
 /// The runtime binding names the deadline an absolute RFC 3339 timestamp in
-/// UTC (Runtime Binding 1.0 RT-021, proposed in plenora-contracts #21). Every
-/// RFC 3339 spelling of UTC is accepted: `Z` or `z`, `+00:00`, a lowercase
+/// UTC (Runtime Binding 1.0 RT-021, plenora-contracts v1.1.0). Every RFC 3339
+/// spelling of UTC is accepted, as decision 0010 keeps it in 1.0: `Z` or `z`,
+/// `+00:00`, a lowercase
 /// `t`, a fraction of a second. A non-zero offset is local time, and `-00:00`
 /// means "offset unknown" in RFC 3339, so neither names a UTC instant and both
 /// are refused, as is anything that is not RFC 3339.

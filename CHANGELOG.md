@@ -4,6 +4,37 @@ Le modifiche che cambiano il comportamento osservabile, l'API pubblica o la
 politica delle dipendenze. La versione dei manifest resta quella dell'ultima
 release finché una release non viene preparata.
 
+## Unreleased
+
+### Contratti: plenora-contracts v1.1.0
+
+- Il pin adottato passa da 1e902df alla v1.1.0 di plenora-contracts
+  (3c395a8d) in adoption-manifest.json e contracts/upstream/source.json, che
+  cita anche il tag. La v1.1.0 discende dal pin precedente e non cambia nessuno
+  schema, vettore o binding già pubblicato: i file copiati prima restano
+  identici, tranne la specifica dei vettori (nuovo §6 sulle sonde di rifiuto),
+  aggiornata.
+- Le sonde di rifiuto runtime-probes-v1 e lo schema runtime-probe-v1
+  (Runtime Binding 1.0 §11-13, RT-016..RT-023, decisione 0010) sono ora
+  normative: passano da contracts/proposte, che non esiste più, a
+  contracts/upstream con gli stessi byte. Il test runtime_vectors le esegue
+  come contratto adottato (rejection_probes_hold_on_the_rest_request_vector),
+  comprese le due sul vettore di rest.upload, e scripts/validate_contracts.py
+  le valida contro il loro schema. Il binding runtime non cambia: rispettava
+  già la matrice.
+- CLI (decisione 0012): le spellature di plenora-rest sono quelle del binding
+  comune bindings/cli-v1.json e diventano normative; il catalogo rest-tools
+  seleziona la CLI come superficie facoltativa. Nessun cambio del binario.
+- Deviazione dichiarata, ERR-014 (Typed Errors 1.0, ratificata nella v1.1.0):
+  un errore di un tipo che il motore solleva prima della rete esce con fase
+  `validate`, remote_effect `none` e retry `never` anche quando una richiesta
+  della stessa operazione è già partita (per esempio un POST a cui il server
+  risponde con un redirect cross-origin, o un job asincrono accettato e poi
+  un URL di polling cross-origin). La correzione richiede scelte semantiche
+  ancora da decidere, vedi
+  [limiti e deviazioni](docs/limiti.md#deviazioni-dai-contratti-adottati) e
+  l'issue #32.
+
 ## 0.3.0 (2026-10-06)
 
 Contiene modifiche incompatibili dell'API Rust e del contratto delle

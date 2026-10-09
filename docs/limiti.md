@@ -123,7 +123,12 @@ motivo. Sono gli unici.
 
 ## Deviazioni dai contratti adottati
 
-`adoption-manifest.json` non dichiara deviazioni (`"deviations": []`).
+`adoption-manifest.json` dichiara una deviazione, la stessa su tutte e quattro
+le superfici perché gli assi d'errore vengono dal core:
+
+| Regola | Ambito | Rischio | Rientro |
+| --- | --- | --- | --- |
+| ERR-014 (Typed Errors 1.0, plenora-contracts v1.1.0) | un errore di un tipo che il motore solleva prima della rete (redirect o URL di polling cross-origin bloccati, errore di file locale in un nuovo tentativo) esce con fase `validate`, remote_effect `none` e retry `never` anche quando una richiesta della stessa operazione è già partita: per esempio un POST a cui il server risponde con un 307 cross-origin, o un job asincrono già accettato | il chiamante legge «nessun effetto remoto» quando l'effetto non è escluso | la correzione richiede scelte semantiche (perimetro, fase, retry, meccanismo) da decidere: [issue #32](https://github.com/PlenoraETL/plenora-rest-tools/issues/32) |
 
 Decisioni del maintainer registrate nei contratti del componente, non
 deviazioni dai contratti comuni:

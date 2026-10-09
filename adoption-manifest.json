@@ -3,7 +3,7 @@
   "component": "plenora-rest-tools",
   "contracts_source": {
     "repository": "https://github.com/PlenoraETL/plenora-contracts.git",
-    "revision": "1e902dfaab5819c1d9ce785878d5b26dbeae48b3"
+    "revision": "3c395a8db96df739024e203b22794af340dc8a7f"
   },
   "profile": "plenora-rest-tools-profile-v1",
   "artifacts": [
@@ -131,5 +131,10 @@
       ]
     }
   ],
-  "deviations": []
+  "deviations": [
+    {"rule": "ERR-014", "artifact": "plenora-rest-core", "surface": "rust", "observed_behavior": "An error of a kind the engine raises before the network (for example a blocked cross-origin redirect or polling URL, or a local file error on a retry attempt) reports phase validate, remote_effect none and retry never even when a request of the same operation was already sent, e.g. a POST answered with a cross-origin 307 or an accepted asynchronous job. ERR-014 requires remote_effect unknown there.", "tracking": "https://github.com/PlenoraETL/plenora-rest-tools/issues/32", "detectable_before_invocation": false},
+    {"rule": "ERR-014", "artifact": "plenora-rest", "surface": "python_sdk", "observed_behavior": "An error of a kind the engine raises before the network (for example a blocked cross-origin redirect or polling URL, or a local file error on a retry attempt) reports phase validate, remote_effect none and retry never even when a request of the same operation was already sent, e.g. a POST answered with a cross-origin 307 or an accepted asynchronous job. ERR-014 requires remote_effect unknown there.", "tracking": "https://github.com/PlenoraETL/plenora-rest-tools/issues/32", "detectable_before_invocation": false},
+    {"rule": "ERR-014", "artifact": "plenora-rest-linux-x86_64", "surface": "cli", "observed_behavior": "An error of a kind the engine raises before the network (for example a blocked cross-origin redirect or polling URL, or a local file error on a retry attempt) reports phase validate, remote_effect none and retry never even when a request of the same operation was already sent, e.g. a POST answered with a cross-origin 307 or an accepted asynchronous job. ERR-014 requires remote_effect unknown there.", "tracking": "https://github.com/PlenoraETL/plenora-rest-tools/issues/32", "detectable_before_invocation": false},
+    {"rule": "ERR-014", "artifact": "plenora.rest-tools", "surface": "runtime", "observed_behavior": "An error of a kind the engine raises before the network (for example a blocked cross-origin redirect or polling URL, or a local file error on a retry attempt) reports phase validate, remote_effect none and retry never even when a request of the same operation was already sent, e.g. a POST answered with a cross-origin 307 or an accepted asynchronous job. ERR-014 requires remote_effect unknown there.", "tracking": "https://github.com/PlenoraETL/plenora-rest-tools/issues/32", "detectable_before_invocation": false}
+  ]
 }

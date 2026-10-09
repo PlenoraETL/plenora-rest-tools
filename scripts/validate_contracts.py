@@ -569,7 +569,8 @@ def validate_upstream() -> int:
     from the revision the adoption manifest declares, and nothing may sit in
     the directory without a pin. The runtime vectors are then validated
     against the copied runtime-vector schema (error payloads also against the
-    common error schema), and the adoption manifest against the copied
+    common error schema), the rejection probes against the copied
+    runtime-probe schema, and the adoption manifest against the copied
     manifest v4 schema plus the cross-reference rules of ADOPTION.md.
     Returns the number of documents validated.
     """
@@ -606,6 +607,7 @@ def validate_upstream() -> int:
         "runtime-vector-v1.schema.json",
         "error-v1.schema.json",
         "adoption-manifest-v4.schema.json",
+        "runtime-probe-v1.schema.json",
     )
     schemas = {name: load_json(UPSTREAM_ROOT / "schemas" / name) for name in names}
     for name, schema in schemas.items():
@@ -642,6 +644,22 @@ def validate_upstream() -> int:
                 vector.get("payload"),
                 f"contracts/upstream/{name} payload",
             )
+        checked += 1
+
+    # Rejection probes (Runtime Binding 1.0 §11-13, RUNTIME-VECTORS-1.0 §6):
+    # the adopter exercises every probe whose base request it advertises, so a
+    # probe on a REST base must name a REST request vector that is vendored
+    # here; probes on other components' bases are applied to the REST request
+    # vector by the runtime_vectors test.
+    probes = sorted(name for name in pins if name.startswith("runtime-probes-v1/"))
+    if not probes:
+        fail("contracts/upstream must vendor the runtime-probes-v1 rejection probes")
+    for name in probes:
+        probe = load_json(UPSTREAM_ROOT / name)
+        check("runtime-probe-v1.schema.json", probe, f"contracts/upstream/{name}")
+        base = probe.get("base", "")
+        if base.startswith("rest-") and f"runtime-v1/{base}" not in pins:
+            fail(f"contracts/upstream/{name} names a REST base vector that is not vendored")
         checked += 1
 
     check("adoption-manifest-v4.schema.json", manifest, "adoption-manifest.json")
