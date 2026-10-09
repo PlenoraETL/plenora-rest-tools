@@ -4476,6 +4476,14 @@ fn is_transferable_cross_origin_header(name: &str) -> bool {
 /// the requests sent for that record only, so a record whose own request never
 /// left keeps `none` while others went out. Only requests actually sent count
 /// ([`ExecutionTally`]), not responses served from the cache.
+///
+/// The phase follows the same split: a record error takes its record's
+/// phase, an error of the whole execution the phase of the paths outside any
+/// record. In enrich every request runs inside a record, so the execution has
+/// no phase of its own: an execution error raised after the records' requests
+/// (an internal failure, a cancellation, a deadline) keeps the phase of its
+/// variant, and one whose variant says `validate` takes `read` explicitly,
+/// never a phase left by whichever record ran last.
 fn account_for_sent_requests(result: &mut ExecutionResult, tally: &ExecutionTally) {
     let operation_sent = tally.requests.load(Ordering::Relaxed) > 0;
     for error in &mut result.errors {

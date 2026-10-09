@@ -481,11 +481,16 @@ file locale, `connect` per un token, `read` per un limite di paginazione.
 L'unica eccezione è `validate`, che vuol dire «prima di ogni attività di
 rete» e non può valere dopo un invio. Diventa la fase pubblica in cui il
 trasporto era entrato quando l'errore è nato: il contesto dell'esecuzione la
-registra, anche per record in enrich, nei punti in cui il trasporto entra in
-prepare, connect, read e write. Così il circuit breaker o la cache che
-rifiutano la richiesta dopo il token OAuth danno `connect`, un body multipart
-che non si costruisce dà `prepare`, un redirect o un URL di polling rifiutati
-mentre si interpreta una risposta danno `read`. Sono i casi di un redirect cross-origin rifiutato
+registra nei punti in cui il trasporto entra in prepare, connect, read e
+write. In enrich ogni record ha la propria fase e non tocca quella
+dell'esecuzione, così il risultato non dipende dall'ordine dei record
+concorrenti. Una risposta presa dalla cache entra in `read`, senza contare
+come invio. Così:
+- la sessione cookie chiusa prima del polling, e il circuit breaker o la
+  cache che rifiutano la richiesta dopo il token OAuth, danno `connect`;
+- un body multipart che non si costruisce dà `prepare`;
+- un redirect, un URL di polling o un link di paginazione rifiutati mentre si
+  interpreta una risposta, anche presa dalla cache, danno `read`. Sono i casi di un redirect cross-origin rifiutato
 dopo un POST, di un URL di polling rifiutato dopo che il job è stato
 accettato, di un file sorgente che non si riapre per un nuovo tentativo e di
 un limite di paginazione raggiunto. Categoria, codice, messaggio e dettagli

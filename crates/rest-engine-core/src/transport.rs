@@ -64,8 +64,12 @@ static DOWNLOAD_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 /// "before any network activity", but that is raised after a request was
 /// sent: the circuit breaker or the cache refusing the request after an
 /// OAuth token was obtained (connect), a multipart body that cannot be built
-/// (prepare), a redirect refused while reading a response (read). Per record,
-/// so that concurrent records do not overwrite each other's phase.
+/// (prepare), a redirect refused while reading a response (read).
+///
+/// Inside a [`RECORD_SCOPE`] only the phases of the scope's records change;
+/// the phase of the execution changes only on paths outside any record. So
+/// concurrent records never overwrite each other's phase or the execution's,
+/// and no phase depends on the order in which records reach the transport.
 #[derive(Default)]
 pub(crate) struct ExecutionTally {
     pub(crate) requests: AtomicU64,
@@ -105,20 +109,22 @@ impl ExecutionTally {
     }
 }
 
-/// Records that the transport enters the public `phase`, for the execution
-/// and for every record of the current [`RECORD_SCOPE`].
+/// Records that the transport enters the public `phase`: for every record of
+/// the current [`RECORD_SCOPE`], or for the execution outside any record.
 pub(crate) fn enter_phase(phase: ErrorPhase) {
     tally(|tally| {
         let mut track = tally
             .phases
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        track.operation = Some(phase);
-        let _ = RECORD_SCOPE.try_with(|indices| {
+        let in_records = RECORD_SCOPE.try_with(|indices| {
             for index in indices.iter() {
                 track.records.insert(*index, phase);
             }
         });
+        if in_records.is_err() {
+            track.operation = Some(phase);
+        }
     });
 }
 
@@ -857,6 +863,9 @@ impl Transport {
 
     pub async fn execute(&self, mut request: PreparedRequest) -> Result<ResponseData, EngineError> {
         self.validate_request(&request)?;
+        // Admitting the cookie session, obtaining the token and consulting the
+        // cache and the circuit breaker are the connect phase of this request.
+        enter_phase(ErrorPhase::Connect);
         let _jar_lease = self.admit_cookie_jar(&mut request).await?;
         let auth_stats = self.resolve_auth(&mut request).await?;
         // The token request, if any, ran its own phases; this request is back
@@ -882,6 +891,7 @@ impl Transport {
         success_statuses: &[u16],
     ) -> Result<DownloadData, EngineError> {
         self.validate_request(&request)?;
+        enter_phase(ErrorPhase::Connect);
         let _jar_lease = self.admit_cookie_jar(&mut request).await?;
         if target.resume {
             if request.method != HttpMethod::Get {
@@ -1035,6 +1045,9 @@ impl Transport {
                 && fresh_for_ms > 0
                 && cached.validated_at.elapsed() <= Duration::from_millis(fresh_for_ms);
             if fresh {
+                // Interpreted from here on like a response that was read; it
+                // is not a request sent, so the tally does not count it.
+                enter_phase(ErrorPhase::Read);
                 return Ok(cached_response(cached, 1, 0));
             }
         }
@@ -2993,8 +3006,41 @@ mod tests {
         time::{Duration, UNIX_EPOCH},
     };
 
-    use super::{is_public_address, parse_retry_after, same_origin};
+    use super::{
+        EXECUTION_TALLY, ExecutionTally, RECORD_SCOPE, enter_phase, is_public_address,
+        parse_retry_after, same_origin,
+    };
+    use crate::ErrorPhase;
     use reqwest::Url;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn records_never_move_the_phase_of_the_execution() {
+        // Determinism: inside a record scope only the record's phase moves,
+        // whatever order concurrent records run in; the execution's phase
+        // moves only outside any record.
+        let tally = Arc::new(ExecutionTally::default());
+        EXECUTION_TALLY
+            .scope(tally.clone(), async {
+                enter_phase(ErrorPhase::Prepare);
+                RECORD_SCOPE
+                    .scope(Arc::from([0_usize]), async {
+                        enter_phase(ErrorPhase::Read);
+                    })
+                    .await;
+                RECORD_SCOPE
+                    .scope(Arc::from([1_usize, 2]), async {
+                        enter_phase(ErrorPhase::Connect);
+                    })
+                    .await;
+            })
+            .await;
+        assert_eq!(tally.phase(None), Some(ErrorPhase::Prepare));
+        assert_eq!(tally.phase(Some(0)), Some(ErrorPhase::Read));
+        assert_eq!(tally.phase(Some(1)), Some(ErrorPhase::Connect));
+        assert_eq!(tally.phase(Some(2)), Some(ErrorPhase::Connect));
+        assert_eq!(tally.phase(Some(3)), None);
+    }
 
     #[test]
     fn blocks_non_public_addresses() {

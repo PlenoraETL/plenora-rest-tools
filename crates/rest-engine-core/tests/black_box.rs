@@ -5934,3 +5934,183 @@ async fn an_invalid_multipart_type_after_the_token_keeps_the_prepare_phase() {
     .await;
     assert_after_sent_request(&result["errors"][0], "INVALID_INPUT", "prepare", &result);
 }
+
+#[tokio::test]
+async fn a_cookie_session_closed_before_the_poll_keeps_the_connect_phase() {
+    // The submit is accepted; the server closes the caller's cookie session
+    // before answering, so the poll is refused while its cookie session is
+    // admitted: connect, after a request that went out.
+    let engine = Arc::new(Engine::new(EngineConfig {
+        allow_private_networks: true,
+        allow_cookie_store: true,
+        ..EngineConfig::default()
+    }));
+    let session = engine.open_cookie_session().await.unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base_url = format!("http://{}/", listener.local_addr().unwrap());
+    let server_engine = engine.clone();
+    let server_session = session.clone();
+    let poll_url = format!("{base_url}jobs/1");
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = timeout(Duration::from_secs(30), listener.accept())
+            .await
+            .expect("the submit")
+            .unwrap();
+        let request = read_request(&mut stream).await;
+        server_engine
+            .close_cookie_session(&server_session)
+            .await
+            .unwrap();
+        let body = format!(r#"{{"status":"pending","poll":"{poll_url}"}}"#);
+        let head = format!(
+            "HTTP/1.1 202 Accepted\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(head.as_bytes()).await.unwrap();
+        stream.write_all(body.as_bytes()).await.unwrap();
+        stream.shutdown().await.unwrap();
+        request
+    });
+    let result = execute(
+        &engine,
+        json!({
+            "schema_version": 1,
+            "operation": "test",
+            "connection": {
+                "url": base_url,
+                "method": "POST",
+                "cookies": {"session": session},
+                "polling": {
+                    "url_path": "poll",
+                    "status_path": "status",
+                    "interval_ms": 0,
+                    "max_attempts": 3
+                }
+            }
+        }),
+    )
+    .await;
+    let submit = server.await.unwrap();
+    assert!(submit.starts_with("POST / "), "{submit}");
+    assert_eq!(result["metrics"]["requests"], 1, "{result}");
+    assert_after_sent_request(&result["errors"][0], "POLICY_VIOLATION", "connect", &result);
+}
+
+#[tokio::test]
+async fn a_page_from_the_cache_is_interpreted_in_the_read_phase() {
+    // Page 2 is cached by an earlier execution. The pagination reads page 1
+    // from the server and page 2 from the cache, whose cross-origin next link
+    // is refused while the page is interpreted: read, not the connect of the
+    // cache lookup.
+    let (base_url, server, observed) = owned_recorded_server(vec![
+        (
+            200,
+            br#"{"items":[{"id":2}],"next":"http://localhost:9/page3"}"#.to_vec(),
+            vec![("Cache-Control", "max-age=600")],
+        ),
+        (
+            200,
+            br#"{"items":[{"id":1}],"next":"page2"}"#.to_vec(),
+            vec![("Cache-Control", "no-store")],
+        ),
+    ])
+    .await;
+    let engine = local_engine();
+    let cache = json!({"enabled": true, "fresh_for_ms": 600_000});
+    let warmed = execute(
+        &engine,
+        json!({
+            "schema_version": 1,
+            "operation": "test",
+            "connection": {"url": format!("{base_url}page2"), "method": "GET", "cache": cache}
+        }),
+    )
+    .await;
+    assert_eq!(warmed["status"], "success", "{warmed}");
+    let result = execute(
+        &engine,
+        json!({
+            "schema_version": 1,
+            "operation": "generate",
+            "connection": {
+                "url": format!("{base_url}page1"),
+                "method": "GET",
+                "cache": cache,
+                "response": {"records_path": "items"},
+                "pagination": {"type": "link", "link_path": "next"}
+            }
+        }),
+    )
+    .await;
+    server.await.unwrap();
+    assert_eq!(
+        observed.lock().unwrap().len(),
+        2,
+        "page 2 came from the cache"
+    );
+    assert_eq!(result["metrics"]["cache_hits"], 1, "{result}");
+    let error = &result["errors"][0];
+    assert_eq!(error["category"], "authorization", "{result}");
+    assert_after_sent_request(error, "UNSAFE_ADDRESS", "read", &result);
+}
+
+#[tokio::test]
+async fn concurrent_records_keep_their_own_phase() {
+    // Record 0 is redirected to another origin (refused while its response
+    // is read); record 1 to its own origin with credentials in the URL
+    // (refused while the next hop connects). Each record error carries the
+    // phase of its own record, whatever order the records run in.
+    for concurrency in [1, 2] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (mut stream, _) = timeout(Duration::from_secs(30), listener.accept())
+                    .await
+                    .expect("one request per record")
+                    .unwrap();
+                let request = read_request(&mut stream).await;
+                let location = if request.starts_with("GET /items/a ") {
+                    "http://localhost:9/elsewhere".to_owned()
+                } else {
+                    assert!(request.starts_with("GET /items/b "), "{request}");
+                    format!("http://user@{address}/next")
+                };
+                let head = format!(
+                    "HTTP/1.1 307 Temporary Redirect\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                );
+                stream.write_all(head.as_bytes()).await.unwrap();
+                stream.shutdown().await.unwrap();
+            }
+        });
+        let result = execute(
+            &local_engine(),
+            json!({
+                "schema_version": 1,
+                "operation": "enrich",
+                "connection": {
+                    "url": format!("http://{address}/items/{{id}}"),
+                    "method": "GET",
+                    "parameters": [{
+                        "name": "id",
+                        "mode": "mapped",
+                        "source": "id",
+                        "required": true,
+                        "location": "path"
+                    }],
+                    "request": {"allow_redirects": true, "max_redirects": 3}
+                },
+                "input": {"records": [{"id": "a"}, {"id": "b"}]},
+                "options": {"continue_on_error": true, "enrichment_concurrency": concurrency}
+            }),
+        )
+        .await;
+        server.await.unwrap();
+        let errors = result["errors"].as_array().unwrap();
+        assert_eq!(errors.len(), 2, "{result}");
+        assert_eq!(errors[0]["input_index"], 0, "{result}");
+        assert_after_sent_request(&errors[0], "UNSAFE_ADDRESS", "read", &result);
+        assert_eq!(errors[1]["input_index"], 1, "{result}");
+        assert_after_sent_request(&errors[1], "INVALID_URL", "connect", &result);
+    }
+}

@@ -40,12 +40,17 @@ release finché una release non viene preparata.
   riapre, `connect` per un token rifiutato. Solo `validate`, che vuol dire
   «prima di ogni attività di rete», non può restare tale. Diventa la fase
   pubblica in cui il trasporto si trovava (prepare, connect, read, write),
-  registrata dal contesto dell'esecuzione e, in enrich, per record:
-  - `connect` per il circuit breaker o la cache che rifiutano la richiesta
-    dopo il token OAuth;
+  registrata dal contesto dell'esecuzione e, in enrich, per record (i record
+  aggiornano solo la propria fase, mai quella dell'esecuzione, quindi
+  l'ordine dei record concorrenti non conta; una risposta presa dalla cache
+  entra in `read` senza contare come invio):
+  - `connect` per la sessione cookie chiusa prima del polling, e per il
+    circuit breaker o la cache che rifiutano la richiesta dopo il token
+    OAuth;
   - `prepare` per un body multipart che non si costruisce;
-  - `read` per un redirect o un URL di polling rifiutati mentre il motore
-    interpreta una risposta.
+  - `read` per un redirect, un URL di polling o un link di paginazione
+    rifiutati mentre il motore interpreta una risposta, anche presa dalla
+    cache.
 - Cambia anche `PAGINATION_LIMIT_REACHED` di un risultato partial: le pagine
   sono state richieste, quindi l'errore esce con `unknown` e
   `requires_recovery` invece di `none` e `never`; la fase resta `read`.
