@@ -470,6 +470,23 @@ ripetizione. Quando una richiesta potrebbe essere stata inviata ma l'esito non
 è noto, l'effetto remoto è unknown e il retry può richiedere quarantena o
 recovery.
 
+Un errore riporta remote_effect `none` solo se nessuna richiesta
+dell'operazione è partita (Typed Errors 1.0, ERR-014). Gli errori che il
+motore solleva di solito prima della rete (validazione, policy, preparazione,
+autenticazione, I/O locale, errori interni) escono con fase `read`,
+remote_effect `unknown` e retry `requires_recovery` se arrivano dopo un
+invio, con qualunque metodo e qualunque risposta, compresi un redirect e una
+richiesta di token OAuth. Sono i casi di un redirect cross-origin rifiutato
+dopo un POST, di un URL di polling rifiutato dopo che il job è stato
+accettato, di un file sorgente che non si riapre per un nuovo tentativo e di
+un limite di paginazione raggiunto. Categoria, codice, messaggio e dettagli
+restano quelli della variante. Il conteggio è quello degli invii reali, non
+delle risposte servite dalla cache. In enrich un errore di un record si
+giudica sulle richieste partite per quel record (nel batch, quelle del
+blocco che lo conteneva): un record la cui richiesta non è partita resta
+`none` anche se altri record sono stati inviati. Un errore che dichiara già
+un effetto (`unknown`, `committed`) conserva i suoi assi.
+
 Anche il tipo Rust EngineError non contiene testo di terzi, nemmeno
 nascosto. Le varianti che descrivono un fallimento a parole contengono un
 ErrorDetail, che si costruisce soltanto da una stringa statica (`&'static str`)

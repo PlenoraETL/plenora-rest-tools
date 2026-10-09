@@ -334,8 +334,10 @@ pub enum ErrorPhase {
 #[serde(rename_all = "snake_case")]
 pub enum RemoteEffect {
     /// `none`: reported for the failure kinds the engine classifies as not
-    /// changing remote state: validation, policy, request preparation,
-    /// connection and authentication, local I/O and internal failures.
+    /// changing remote state (validation, policy, request preparation,
+    /// connection and authentication, local I/O and internal failures), and
+    /// only while no request of the operation, or of the input record, was
+    /// sent; afterwards the same failures report `unknown` (ERR-014).
     None,
     /// `partial`: part of the work was applied remotely. Part of the shared
     /// vocabulary; the engine does not report it today.
@@ -390,6 +392,28 @@ impl RetryAdvice {
     const REQUIRES_RECOVERY: Self = Self {
         kind: RetryKind::RequiresRecovery,
     };
+}
+
+/// Corrects the axes of an error raised after a request of the operation (or
+/// of its input record) was sent (Typed Errors 1.0, ERR-014).
+///
+/// The axes of a variant describe where it is normally raised: before the
+/// network, for most of those that report `remote_effect: none`. Raised once a
+/// request has gone out, whatever its method and its answer (a redirect, an
+/// OAuth token request included), the same failure cannot prove that the
+/// remote side did nothing: a cross-origin redirect after a POST, a polling
+/// URL refused after the job was accepted, a source file that cannot be
+/// reopened for a second attempt. Such an error reports `unknown`, the phase
+/// of the last request started (`read`, which covers sending the request,
+/// ERR-003) and `requires_recovery`. Category, code, message and details are
+/// kept: they still say what failed. An error that already reports an effect
+/// (`unknown`, `committed`, `partial`) keeps its axes.
+pub(crate) fn after_sent_request(error: &mut ExecutionError) {
+    if error.remote_effect == RemoteEffect::None {
+        error.remote_effect = RemoteEffect::Unknown;
+        error.phase = ErrorPhase::Read;
+        error.retry = RetryAdvice::REQUIRES_RECOVERY;
+    }
 }
 
 /// Serializable form of an [`EngineError`]: the `plenora-error-v1` object

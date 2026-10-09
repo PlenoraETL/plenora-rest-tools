@@ -4820,8 +4820,11 @@ fn assert_limit(result: &Value, rows: Value, details: Value) {
     let error = &result["errors"][0];
     assert_eq!(error["code"], "PAGINATION_LIMIT_REACHED", "{result}");
     assert_eq!(error["category"], "resource_limit");
-    assert_eq!(error["remote_effect"], "none");
-    assert_eq!(error["retry"]["kind"], "never");
+    // ERR-014: the pages were requested, so the limit cannot claim that
+    // nothing happened remotely.
+    assert_eq!(error["phase"], "read");
+    assert_eq!(error["remote_effect"], "unknown");
+    assert_eq!(error["retry"]["kind"], "requires_recovery");
     assert_eq!(error["details"], details);
     assert_eq!(result["errors"].as_array().unwrap().len(), 1);
 }
@@ -5528,4 +5531,318 @@ async fn a_zero_backoff_base_never_waits_whatever_the_factor() {
     assert_eq!(result["status"], "success", "{result}");
     assert_eq!(result["metrics"]["requests"], 4);
     assert_eq!(result["metrics"]["retries"], 3);
+}
+
+/// ERR-014: the axes of an error raised once a request of the operation went
+/// out. Only the remote effect, the phase and the retry change; the category
+/// and the code still say what failed.
+fn assert_after_sent_request(error: &Value, code: &str, result: &Value) {
+    assert_eq!(error["code"], code, "{result}");
+    assert_eq!(error["phase"], "read", "{result}");
+    assert_eq!(error["remote_effect"], "unknown", "{result}");
+    assert_eq!(error["retry"]["kind"], "requires_recovery", "{result}");
+}
+
+/// The axes of a failure before any request: nothing went out.
+fn assert_nothing_sent(error: &Value, code: &str, phase: &str, result: &Value) {
+    assert_eq!(error["code"], code, "{result}");
+    assert_eq!(error["phase"], phase, "{result}");
+    assert_eq!(error["remote_effect"], "none", "{result}");
+    assert_eq!(error["retry"]["kind"], "never", "{result}");
+}
+
+#[tokio::test]
+async fn a_cross_origin_redirect_after_a_post_does_not_claim_no_remote_effect() {
+    // The POST and its body reach the server, which answers with a redirect
+    // to another origin; the engine refuses to follow it. The server may have
+    // acted on the POST: a 3xx is not proof that it did not.
+    let (url, server, observed) = recorded_server(vec![(
+        307,
+        "",
+        vec![("Location", "http://localhost:9/elsewhere")],
+    )])
+    .await;
+    let result = execute(
+        &local_engine(),
+        json!({
+            "schema_version": 1,
+            "operation": "test",
+            "connection": {
+                "url": url,
+                "method": "POST",
+                "parameters": [{"name": "a", "mode": "fixed", "value": 1, "location": "body"}],
+                "request": {"allow_redirects": true, "max_redirects": 3, "body_type": "json"}
+            }
+        }),
+    )
+    .await;
+    server.await.unwrap();
+    assert_eq!(observed.lock().unwrap().len(), 1);
+    assert_eq!(result["status"], "failed", "{result}");
+    assert_eq!(result["metrics"]["requests"], 1, "{result}");
+    let error = &result["errors"][0];
+    assert_eq!(error["category"], "authorization", "{result}");
+    assert_after_sent_request(error, "UNSAFE_ADDRESS", &result);
+}
+
+#[tokio::test]
+async fn a_cross_origin_poll_after_an_accepted_submit_does_not_claim_no_remote_effect() {
+    // The job was accepted; only then is its polling URL refused.
+    let (url, server, observed) = recorded_server(vec![(
+        202,
+        r#"{"status":"pending","poll":"http://localhost:9/jobs/1"}"#,
+        vec![],
+    )])
+    .await;
+    let result = execute(
+        &local_engine(),
+        json!({
+            "schema_version": 1,
+            "operation": "test",
+            "connection": {
+                "url": url,
+                "method": "POST",
+                "polling": {
+                    "url_path": "poll",
+                    "status_path": "status",
+                    "interval_ms": 0,
+                    "max_attempts": 3
+                }
+            }
+        }),
+    )
+    .await;
+    server.await.unwrap();
+    assert_eq!(observed.lock().unwrap().len(), 1);
+    assert_eq!(result["status"], "failed", "{result}");
+    assert_after_sent_request(&result["errors"][0], "UNSAFE_ADDRESS", &result);
+}
+
+#[tokio::test]
+async fn a_source_file_lost_before_a_retry_does_not_claim_no_remote_effect() {
+    // The first attempt of the upload is sent; the server removes the source
+    // file before answering 503, so the second attempt cannot reopen it. The
+    // local failure follows a request that went out.
+    let directory = transfer_directory("retry-source");
+    let source = directory.join("payload.bin");
+    fs::write(&source, b"payload").await.unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let removed = source.clone();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = timeout(Duration::from_secs(30), listener.accept())
+            .await
+            .expect("the first attempt")
+            .unwrap();
+        let request = read_request(&mut stream).await;
+        std::fs::remove_file(&removed).unwrap();
+        stream
+            .write_all(
+                b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        stream.shutdown().await.unwrap();
+        request
+    });
+    let result = execute(
+        &transfer_engine(&directory, 1024, 1024),
+        json!({
+            "schema_version": 1,
+            "operation": "upload",
+            "connection": {
+                "url": format!("http://{address}/"),
+                "method": "PUT",
+                "request": {"body_type": "raw"},
+                "retry": {"max_attempts": 2, "backoff_base_ms": 0}
+            },
+            "input": {"file": {"path": "payload.bin"}}
+        }),
+    )
+    .await;
+    let first = server.await.unwrap();
+    assert!(
+        first.ends_with("payload"),
+        "the first attempt carried the body"
+    );
+    assert_eq!(result["status"], "failed", "{result}");
+    assert_eq!(result["metrics"]["requests"], 1, "{result}");
+    let error = &result["errors"][0];
+    assert_eq!(error["category"], "io", "{result}");
+    assert_after_sent_request(error, "FILE_IO", &result);
+    fs::remove_dir_all(directory).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_failed_token_request_does_not_claim_no_remote_effect() {
+    // The OAuth token request is a request of the operation too.
+    let (base_url, server, _) =
+        recorded_server(vec![(400, r#"{"error":"invalid_client"}"#, vec![])]).await;
+    let result = execute(
+        &local_engine(),
+        json!({
+            "schema_version": 1,
+            "operation": "test",
+            "connection": {
+                "url": format!("{base_url}resource"),
+                "method": "GET",
+                "auth": {
+                    "type": "oauth2_client_credentials",
+                    "token_url": format!("{base_url}token"),
+                    "client_id": "client",
+                    "client_secret": "secret"
+                }
+            }
+        }),
+    )
+    .await;
+    server.await.unwrap();
+    let error = &result["errors"][0];
+    assert_eq!(error["category"], "authentication", "{result}");
+    assert_after_sent_request(error, "AUTHENTICATION_FAILED", &result);
+}
+
+#[tokio::test]
+async fn enrich_judges_the_remote_effect_on_the_requests_of_each_record() {
+    // Record 0 is sent and redirected to another origin; record 1 lacks its
+    // parameter and is never sent, although record 0 was. Sequential and
+    // concurrent enrichment judge each record the same way.
+    for concurrency in [1, 2] {
+        let (url, server, observed) = recorded_server(vec![(
+            307,
+            "",
+            vec![("Location", "http://localhost:9/elsewhere")],
+        )])
+        .await;
+        let result = execute(
+            &local_engine(),
+            json!({
+                "schema_version": 1,
+                "operation": "enrich",
+                "connection": {
+                    "url": url,
+                    "method": "GET",
+                    "parameters": [{
+                        "name": "id",
+                        "mode": "mapped",
+                        "source": "id",
+                        "required": true,
+                        "location": "query"
+                    }],
+                    "request": {"allow_redirects": true, "max_redirects": 3}
+                },
+                "input": {"records": [{"id": "a"}, {"other": "b"}]},
+                "options": {"continue_on_error": true, "enrichment_concurrency": concurrency}
+            }),
+        )
+        .await;
+        server.await.unwrap();
+        assert_eq!(observed.lock().unwrap().len(), 1, "{result}");
+        let errors = result["errors"].as_array().unwrap();
+        assert_eq!(errors.len(), 2, "{result}");
+        assert_eq!(errors[0]["input_index"], 0, "{result}");
+        assert_after_sent_request(&errors[0], "UNSAFE_ADDRESS", &result);
+        assert_eq!(errors[1]["input_index"], 1, "{result}");
+        assert_eq!(errors[1]["remote_effect"], "none", "{result}");
+        assert_eq!(errors[1]["retry"]["kind"], "never", "{result}");
+    }
+}
+
+#[tokio::test]
+async fn failures_before_any_request_keep_no_remote_effect() {
+    // Loopback is refused by default before the request is sent.
+    let blocked = execute(
+        &Engine::new(EngineConfig::default()),
+        json!({
+            "schema_version": 1,
+            "operation": "test",
+            "connection": {"url": "http://127.0.0.1:9/", "method": "POST"}
+        }),
+    )
+    .await;
+    assert_eq!(blocked["metrics"]["requests"], 0, "{blocked}");
+    assert_nothing_sent(
+        &blocked["errors"][0],
+        "UNSAFE_ADDRESS",
+        "validate",
+        &blocked,
+    );
+
+    // A missing parameter fails while the request is prepared.
+    let missing = execute(
+        &local_engine(),
+        json!({
+            "schema_version": 1,
+            "operation": "test",
+            "connection": {
+                "url": "http://127.0.0.1:9/",
+                "method": "GET",
+                "parameters": [{
+                    "name": "id",
+                    "mode": "mapped",
+                    "source": "id",
+                    "required": true,
+                    "location": "query"
+                }]
+            }
+        }),
+    )
+    .await;
+    assert_eq!(missing["metrics"]["requests"], 0, "{missing}");
+    assert_eq!(missing["errors"][0]["remote_effect"], "none", "{missing}");
+    assert_eq!(missing["errors"][0]["retry"]["kind"], "never", "{missing}");
+    assert_ne!(missing["errors"][0]["phase"], "read", "{missing}");
+}
+
+#[tokio::test]
+async fn batch_enrich_judges_the_remote_effect_on_the_records_it_sent() {
+    // Record 0 goes out in the batch request, which is redirected to another
+    // origin; record 1 fails its parameter and is left out of that request.
+    let (url, server, observed) = recorded_server(vec![(
+        307,
+        "",
+        vec![("Location", "http://localhost:9/elsewhere")],
+    )])
+    .await;
+    let result = execute(
+        &local_engine(),
+        json!({
+            "schema_version": 1,
+            "operation": "enrich",
+            "connection": {
+                "url": url,
+                "method": "POST",
+                "parameters": [{
+                    "name": "id",
+                    "mode": "mapped",
+                    "source": "id",
+                    "required": true,
+                    "location": "body"
+                }],
+                "request": {"body_type": "json", "allow_redirects": true, "max_redirects": 3},
+                "batch": {
+                    "enabled": true,
+                    "max_size": 2,
+                    "input_key": "items",
+                    "input_format": "array",
+                    "output_path": "results"
+                }
+            },
+            "input": {"records": [{"id": 1}, {"other": 2}]},
+            "options": {"continue_on_error": true}
+        }),
+    )
+    .await;
+    server.await.unwrap();
+    assert_eq!(observed.lock().unwrap().len(), 1, "{result}");
+    let errors = result["errors"].as_array().unwrap();
+    let error_of = |index: u64| {
+        errors
+            .iter()
+            .find(|error| error["input_index"] == index)
+            .unwrap_or_else(|| panic!("no error for record {index}: {result}"))
+    };
+    assert_after_sent_request(error_of(0), "UNSAFE_ADDRESS", &result);
+    assert_eq!(error_of(1)["remote_effect"], "none", "{result}");
+    assert_eq!(error_of(1)["retry"]["kind"], "never", "{result}");
 }

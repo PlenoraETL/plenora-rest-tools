@@ -30,7 +30,8 @@ use crate::{
     response_body,
     transport::{
         DownloadTarget, EXECUTION_TALLY, ExecutionTally, PreparedBody, PreparedFile,
-        PreparedFileSource, PreparedRequest, PreparedStream, ResponseData, Transport, same_origin,
+        PreparedFileSource, PreparedRequest, PreparedStream, RECORD_SCOPE, ResponseData, Transport,
+        same_origin,
     },
 };
 
@@ -259,6 +260,7 @@ impl Engine {
             .metrics
             .retries
             .max(tally.retries.load(Ordering::Relaxed));
+        account_for_sent_requests(&mut result, &tally);
         result
     }
 
@@ -886,14 +888,17 @@ impl Engine {
             let mut source = request.input.params.clone();
             source.extend(record.clone());
             let result = match resolve_parameters(&request.connection, &source) {
-                Ok(parameters) => self
-                    .request_json(
-                        &request.connection,
-                        &parameters,
-                        None,
-                        metrics,
-                        responses,
-                        &scoped_options,
+                Ok(parameters) => RECORD_SCOPE
+                    .scope(
+                        Arc::from([index]),
+                        self.request_json(
+                            &request.connection,
+                            &parameters,
+                            None,
+                            metrics,
+                            responses,
+                            &scoped_options,
+                        ),
                     )
                     .await
                     .map(|(value, _, _, _)| value)
@@ -943,38 +948,40 @@ impl Engine {
     ) -> Result<OperationResult, EngineError> {
         let concurrency = request.options.enrichment_concurrency;
         let outcomes = stream::iter(request.input.records.iter().cloned().enumerate().map(
-            |(index, record)| async move {
-                let mut local_metrics = ExecutionMetrics::default();
-                let mut local_responses = Vec::new();
-                let scoped_options = scoped_execution_options(&request.options, index);
-                let mut source = request.input.params.clone();
-                source.extend(record.clone());
-                let result = match resolve_parameters(&request.connection, &source) {
-                    Ok(parameters) => self
-                        .request_json(
-                            &request.connection,
-                            &parameters,
-                            None,
-                            &mut local_metrics,
-                            &mut local_responses,
-                            &scoped_options,
-                        )
-                        .await
-                        .map(|(value, _, _, _)| value)
-                        .and_then(|value| {
-                            response_records(&request.connection, &value).and_then(|values| {
-                                map_records(values, &request.connection.response)
-                            })
-                        }),
-                    Err(error) => Err(error),
-                };
-                EnrichmentOutcome {
-                    index,
-                    record,
-                    result,
-                    metrics: local_metrics,
-                    responses: local_responses,
-                }
+            |(index, record)| {
+                RECORD_SCOPE.scope(Arc::from([index]), async move {
+                    let mut local_metrics = ExecutionMetrics::default();
+                    let mut local_responses = Vec::new();
+                    let scoped_options = scoped_execution_options(&request.options, index);
+                    let mut source = request.input.params.clone();
+                    source.extend(record.clone());
+                    let result = match resolve_parameters(&request.connection, &source) {
+                        Ok(parameters) => self
+                            .request_json(
+                                &request.connection,
+                                &parameters,
+                                None,
+                                &mut local_metrics,
+                                &mut local_responses,
+                                &scoped_options,
+                            )
+                            .await
+                            .map(|(value, _, _, _)| value)
+                            .and_then(|value| {
+                                response_records(&request.connection, &value).and_then(|values| {
+                                    map_records(values, &request.connection.response)
+                                })
+                            }),
+                        Err(error) => Err(error),
+                    };
+                    EnrichmentOutcome {
+                        index,
+                        record,
+                        result,
+                        metrics: local_metrics,
+                        responses: local_responses,
+                    }
+                })
             },
         ))
         .buffer_unordered(concurrency)
@@ -1091,16 +1098,26 @@ impl Engine {
                 Ok(Vec::new())
             } else {
                 let payload = batch_payload(batch, parameters);
-                self.request_json(
-                    &connection,
-                    &payload,
-                    None,
-                    metrics,
-                    responses,
-                    &scoped_options,
-                )
-                .await
-                .and_then(|(value, _, _, _)| batch_response(&value, batch, &connection.response))
+                let scope = valid
+                    .iter()
+                    .map(|offset| base_index + offset)
+                    .collect::<Arc<[usize]>>();
+                RECORD_SCOPE
+                    .scope(
+                        scope,
+                        self.request_json(
+                            &connection,
+                            &payload,
+                            None,
+                            metrics,
+                            responses,
+                            &scoped_options,
+                        ),
+                    )
+                    .await
+                    .and_then(|(value, _, _, _)| {
+                        batch_response(&value, batch, &connection.response)
+                    })
             };
             let mapped = match batch_result {
                 Ok(mapped) if mapped.len() == valid.len() => Some(mapped),
@@ -4451,6 +4468,25 @@ fn is_transferable_cross_origin_header(name: &str) -> bool {
             | "range"
             | "user-agent"
     )
+}
+
+/// ERR-014: an error raised after a request was sent cannot report that
+/// nothing happened remotely. An error of the whole operation is judged on
+/// every request the execution sent; an error of one input record (enrich) on
+/// the requests sent for that record only, so a record whose own request never
+/// left keeps `none` while others went out. Only requests actually sent count
+/// ([`ExecutionTally`]), not responses served from the cache.
+fn account_for_sent_requests(result: &mut ExecutionResult, tally: &ExecutionTally) {
+    let operation_sent = tally.requests.load(Ordering::Relaxed) > 0;
+    for error in &mut result.errors {
+        let sent = match error.input_index {
+            None => operation_sent,
+            Some(index) => tally.record_requests(index) > 0,
+        };
+        if sent {
+            crate::error::after_sent_request(error);
+        }
+    }
 }
 
 fn failed_result(error: EngineError) -> ExecutionResult {

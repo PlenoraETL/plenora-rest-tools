@@ -49,14 +49,37 @@ static DOWNLOAD_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 /// would report zero requests while the remote side had received every
 /// attempt. The tally survives the failure: `Engine::execute_with_control`
 /// scopes it around the execution and reads it for the result.
+///
+/// The same count says whether a failure may have had a remote effect
+/// (Typed Errors 1.0, ERR-014): once a request of the operation went out,
+/// whatever its method or its answer, an error cannot claim that nothing
+/// happened remotely. `records` keeps that count per input record, for the
+/// operations whose errors belong to one record (enrich): a request counts
+/// for every record of the [`RECORD_SCOPE`] it was sent in.
 #[derive(Default)]
 pub(crate) struct ExecutionTally {
     pub(crate) requests: AtomicU64,
     pub(crate) retries: AtomicU64,
+    pub(crate) records: std::sync::Mutex<BTreeMap<usize, u64>>,
+}
+
+impl ExecutionTally {
+    /// Requests sent on behalf of input record `index`.
+    pub(crate) fn record_requests(&self, index: usize) -> u64 {
+        self.records
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&index)
+            .copied()
+            .unwrap_or(0)
+    }
 }
 
 tokio::task_local! {
     pub(crate) static EXECUTION_TALLY: Arc<ExecutionTally>;
+    /// Input records a request is sent for: one record in enrich, the
+    /// records of the chunk in a batch enrich.
+    pub(crate) static RECORD_SCOPE: Arc<[usize]>;
 }
 
 fn tally(update: impl FnOnce(&ExecutionTally)) {
@@ -1586,6 +1609,16 @@ impl Transport {
                 if retry && redirects == 0 {
                     tally.retries.fetch_add(1, Ordering::Relaxed);
                 }
+                let _ = RECORD_SCOPE.try_with(|indices| {
+                    let mut records = tally
+                        .records
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    for index in indices.iter() {
+                        let count = records.entry(*index).or_insert(0);
+                        *count = count.saturating_add(1);
+                    }
+                });
             });
             rate_limit_wait_ms = rate_limit_wait_ms.saturating_add(waited_ms);
             let response = builder.send().await.map_err(map_reqwest_error)?;

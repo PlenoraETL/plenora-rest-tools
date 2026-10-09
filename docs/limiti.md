@@ -63,8 +63,10 @@ ancora dati (righe dell'ultima pagina lasciate fuori, una pagina piena
 all'ultimo posto disponibile, un cursore o un link successivo ancora
 presente), il risultato è **partial**: le righe lette sono in `output` e
 `errors` contiene `PAGINATION_LIMIT_REACHED` (categoria `resource_limit`,
-remote_effect `none`, retry `never`, `details.max_rows` e, per cursor e link,
-`details.max_pages`). La paginazione è completa, e il risultato `success`,
+fase `read`, remote_effect `unknown` e retry `requires_recovery` perché le
+pagine sono state richieste, vedi
+[Errori ed effetti remoti](architecture.md#errori-ed-effetti-remoti);
+`details.max_rows` e, per cursor e link, `details.max_pages`). La paginazione è completa, e il risultato `success`,
 solo quando è la sorgente a dire che i dati sono finiti: una pagina corta,
 nessun cursore o link successivo, oppure un cursore o link già seguito.
 
@@ -123,12 +125,7 @@ motivo. Sono gli unici.
 
 ## Deviazioni dai contratti adottati
 
-`adoption-manifest.json` dichiara una deviazione, la stessa su tutte e quattro
-le superfici perché gli assi d'errore vengono dal core:
-
-| Regola | Ambito | Rischio | Rientro |
-| --- | --- | --- | --- |
-| ERR-014 (Typed Errors 1.0, plenora-contracts v1.1.0) | un errore di un tipo che il motore solleva prima della rete (redirect o URL di polling cross-origin bloccati, errore di file locale in un nuovo tentativo) esce con fase `validate`, remote_effect `none` e retry `never` anche quando una richiesta della stessa operazione è già partita: per esempio un POST a cui il server risponde con un 307 cross-origin, o un job asincrono già accettato | il chiamante legge «nessun effetto remoto» quando l'effetto non è escluso | la correzione richiede scelte semantiche (perimetro, fase, retry, meccanismo) da decidere: [issue #32](https://github.com/PlenoraETL/plenora-rest-tools/issues/32) |
+`adoption-manifest.json` non dichiara deviazioni (`"deviations": []`).
 
 Decisioni del maintainer registrate nei contratti del componente, non
 deviazioni dai contratti comuni:

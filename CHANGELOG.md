@@ -25,15 +25,34 @@ release finché una release non viene preparata.
 - CLI (decisione 0012): le spellature di plenora-rest sono quelle del binding
   comune bindings/cli-v1.json e diventano normative; il catalogo rest-tools
   seleziona la CLI come superficie facoltativa. Nessun cambio del binario.
-- Deviazione dichiarata, ERR-014 (Typed Errors 1.0, ratificata nella v1.1.0):
-  un errore di un tipo che il motore solleva prima della rete esce con fase
-  `validate`, remote_effect `none` e retry `never` anche quando una richiesta
-  della stessa operazione è già partita (per esempio un POST a cui il server
-  risponde con un redirect cross-origin, o un job asincrono accettato e poi
-  un URL di polling cross-origin). La correzione richiede scelte semantiche
-  ancora da decidere, vedi
-  [limiti e deviazioni](docs/limiti.md#deviazioni-dai-contratti-adottati) e
-  l'issue #32.
+
+### Effetto remoto dopo un invio (ERR-014)
+
+- Un errore non riporta più remote_effect `none` se una richiesta
+  dell'operazione è già partita, con qualunque metodo e qualunque risposta,
+  compresi i redirect e le richieste di token OAuth. Prima un redirect
+  cross-origin rifiutato dopo un POST, un URL di polling cross-origin dopo un
+  submit accettato o un file sorgente che non si riapriva per un nuovo
+  tentativo uscivano con fase `validate`, remote_effect `none` e retry
+  `never`. Ora questi errori escono con fase `read`, remote_effect `unknown` e
+  retry `requires_recovery`; categoria, codice, messaggio e dettagli non
+  cambiano (#32).
+- Cambia anche `PAGINATION_LIMIT_REACHED` di un risultato partial: le pagine
+  sono state richieste, quindi l'errore esce con `read`, `unknown` e
+  `requires_recovery` invece di `none` e `never`.
+- In enrich si giudica ogni record sulle richieste partite per quel record (nel
+  batch, quelle del suo blocco): un record la cui richiesta non è partita resta
+  `none`. Gli errori prima di ogni invio restano `none` e `never`.
+- Il contesto è il contatore degli invii che l'esecuzione aveva già, ora anche
+  per record. Nessuna variante nuova di EngineError e nessun cambio della
+  superficie congelata.
+- La deviazione ERR-014 dichiarata con il passaggio alla v1.1.0 è rimossa da
+  adoption-manifest.json.
+- RT-023: una deadline solo nel payload (`options.deadline`, presente in
+  entrambi i contratti d'input) non è ignorata: vale per tutte e cinque le
+  operazioni sul runtime, e se è già scaduta la chiamata è rifiutata con
+  DEADLINE_EXPIRED prima dell'invocazione. Nuovo test
+  a_deadline_only_in_the_payload_binds_every_operation.
 
 ## 0.3.0 (2026-10-06)
 
