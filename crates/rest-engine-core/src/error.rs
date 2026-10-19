@@ -537,6 +537,12 @@ impl EngineError {
 
     fn public_message(&self) -> &'static str {
         match self {
+            Self::InvalidInput(detail) | Self::Authentication(detail)
+                if detail.text() == "control document contains duplicate JSON members" =>
+            {
+                "control document contains duplicate JSON members"
+            }
+
             Self::InvalidInput(_) => "REST input is invalid",
             Self::UnsupportedSchema { .. } => "REST contract version is unsupported",
             Self::InvalidUrl(_) => "REST URL is invalid",

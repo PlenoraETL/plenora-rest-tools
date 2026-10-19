@@ -54,3 +54,43 @@ impl plenora_rest_core::RuntimeResources for NoResources {
         unreachable!()
     }
 }
+
+#[test]
+fn capabilities_match_the_adopted_catalog_without_claiming_optional_cli() {
+    let catalog: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../contracts/upstream/catalogs/rest-tools-v1.json"
+    ))
+    .unwrap();
+    let capabilities = serde_json::to_value(capabilities()).unwrap();
+    let actual = capabilities["operations"].as_array().unwrap();
+    let target = catalog["operations"].as_array().unwrap();
+    assert_eq!(actual.len(), target.len());
+    for expected in target {
+        let operation = actual
+            .iter()
+            .find(|operation| {
+                operation["id"] == expected["id"] && operation["version"] == expected["version"]
+            })
+            .unwrap();
+        for field in ["side_effect", "controls"] {
+            assert_eq!(operation[field], expected[field]);
+        }
+        for direction in ["input", "output"] {
+            for field in ["contract", "content_types"] {
+                assert_eq!(operation[direction][field], expected[direction][field]);
+            }
+        }
+        let surfaces = operation["surfaces"].as_array().unwrap();
+        for surface in expected["surfaces"].as_array().unwrap() {
+            if catalog["target_surfaces"][surface.as_str().unwrap()] == "required" {
+                assert!(surfaces.contains(surface));
+            }
+        }
+        assert!(!surfaces.contains(&serde_json::json!("cli")));
+        assert!(
+            operation["attributes"]
+                .get("plenora.surface_side_effects")
+                .is_none()
+        );
+    }
+}

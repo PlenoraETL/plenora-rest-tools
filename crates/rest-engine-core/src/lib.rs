@@ -10,6 +10,9 @@
 mod capability;
 mod contract;
 mod control;
+// Public support module shared by the workspace adapters.
+#[doc(hidden)]
+pub mod control_json;
 mod engine;
 mod error;
 mod exact;

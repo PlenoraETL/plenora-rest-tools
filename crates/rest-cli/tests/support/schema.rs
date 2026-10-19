@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-/// I tre schemi di plenora-contracts v1.1.0 (3c395a8d; identici al commit
+/// I tre schemi di plenora-contracts 3aec9f7 (identici al commit
 /// 1e902dfa adottato prima, perché gli schemi pubblicati sono immutabili),
 /// con il digest canonico (JSON compatto a chiavi ordinate, come
 /// `canonical_digest` di scripts/validate_contracts.py) che ne blocca il

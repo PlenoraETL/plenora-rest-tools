@@ -6,6 +6,16 @@ release finché una release non viene preparata.
 
 ## Unreleased
 
+- Adozione locale di plenora-contracts 3aec9f7: Public Catalogs 2.0 sul
+  catalogo/profilo REST v1 invariato, Runtime Binding 2.0 in discovery con wire
+  v1. Registro per requisito e copie upstream verificate per SHA-256.
+- RT-024: i limiti in risultati parziali diventano errori runtime, conservando
+  gli assi e i recovery omessi. Deviazione esplicita sul budget aggregato di
+  materializzazione ancora assente.
+- Gate contratti: diagnostica statica senza dati, regressioni con sentinella,
+  controllo del registro e jsonschema 4.26.0 nel gate Docker.
+
+
 ### Contratti: plenora-contracts v1.1.0
 
 - Il pin adottato passa da 1e902df alla v1.1.0 di plenora-contracts

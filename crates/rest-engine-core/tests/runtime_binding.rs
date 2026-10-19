@@ -1065,3 +1065,116 @@ async fn an_envelope_with_a_duplicate_member_is_not_answered() {
     .unwrap();
     assert_eq!(answered.payload["category"], "protocol");
 }
+
+#[test]
+fn runtime_v2_discovery_preserves_v1_wire_and_selectors() {
+    let document = plenora_rest_core::capabilities();
+    let runtime = document
+        .interfaces
+        .iter()
+        .find(|interface| interface.kind == plenora_rest_core::Surface::Runtime)
+        .unwrap();
+    assert_eq!(runtime.contract, "plenora-runtime-binding-v2");
+    assert_eq!(runtime.version, 2);
+    assert_eq!(plenora_rest_core::RUNTIME_BINDING_VERSION, 1);
+    assert_eq!(RUNTIME_INTERFACE_CONTRACT, "plenora-runtime-binding-v1");
+    assert!(
+        document
+            .operations
+            .iter()
+            .all(|operation| operation.version == 1)
+    );
+}
+
+#[tokio::test]
+async fn runtime_pagination_limit_is_an_error_not_a_truncated_success() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = [0_u8; 2048];
+        let _ = stream.read(&mut request).await.unwrap();
+        let body = br#"{"items":[{"v":1},{"v":2}]}"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(response.as_bytes()).await.unwrap();
+        stream.write_all(body).await.unwrap();
+        stream.shutdown().await.unwrap();
+    });
+    let engine = local_engine();
+    let resources = EmptyResources;
+    let binding = RuntimeBinding::new(&engine, &resources);
+    let mut request = runtime_request(&format!("http://{address}/"));
+    request.metadata.insert(
+        "plenora.capability.operation".to_owned(),
+        "rest.generate".to_owned(),
+    );
+    request.payload["operation"] = json!("generate");
+    request.payload["connection"]["response"] = json!({"records_path": "items"});
+    request.payload["connection"]["pagination"] =
+        json!({"type": "page", "page_size": 2, "max_rows": 1});
+    let response = invoke_serialized(&binding, request, CancellationToken::new()).await;
+    server.await.unwrap();
+    assert_eq!(response.kind, RuntimeMessageKind::Error);
+    assert_eq!(response.contract, "plenora-runtime-binding-v1");
+    assert_eq!(response.schema_version, 1);
+    assert_eq!(response.payload["category"], "resource_limit");
+    assert_eq!(response.payload["phase"], "read");
+    assert_eq!(response.payload["remote_effect"], "unknown");
+    assert_eq!(response.payload["retry"]["kind"], "requires_recovery");
+    assert_eq!(response.payload["code"], "PAGINATION_LIMIT_REACHED");
+    assert!(response.payload.get("output").is_none());
+}
+
+#[tokio::test]
+async fn json_control_documents_reject_duplicate_members_before_dispatch() {
+    let engine = Engine::new(EngineConfig::default());
+    let binding = RuntimeBinding::new(&engine, &EmptyResources);
+    let clean = serde_json::to_string(&runtime_request("http://127.0.0.1/")).unwrap();
+    for document in [
+        clean.replace(
+            "\"plenora.capability.version\":\"1\"",
+            "\"plenora.capability.version\":\"secret\",\"plenora.capability.version\":\"1\"",
+        ),
+        clean.replace(
+            "\"params\":{}",
+            "\"params\":{\"x\":[{\"secret\":0,\"secret\":1}]}",
+        ),
+        clean
+            .replace("\"params\":{}", "\"params\":{\"secret\":0,\"secret\":1}")
+            .replace(
+                "\"plenora.capability.version\":\"1\"",
+                "\"plenora.capability.version\":null",
+            ),
+    ] {
+        assert_ne!(document, clean);
+        let error = binding
+            .invoke_json(&document, CancellationToken::new())
+            .await
+            .unwrap_err();
+        let EngineError::InvalidInput(detail) = error else {
+            panic!("wrong error")
+        };
+        assert_eq!(
+            detail.text(),
+            "control document contains duplicate JSON members"
+        );
+    }
+    assert!(
+        binding
+            .invoke_json(&clean, CancellationToken::new())
+            .await
+            .is_ok()
+    );
+    let execution = r#"{"schema_version":1,"operation":"test","connection":{"url":"http://127.0.0.1/"},"input":{"params":{"secret":1,"secret":2}}}"#;
+    let error = engine.execute_json(execution).await.unwrap_err();
+    let EngineError::InvalidInput(detail) = error else {
+        panic!("wrong error")
+    };
+    assert_eq!(
+        detail.text(),
+        "control document contains duplicate JSON members"
+    );
+}

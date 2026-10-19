@@ -37,7 +37,9 @@ POLICY = (
 
 
 def fail(message: str) -> NoReturn:
-    raise SystemExit(message)
+    # Decision 0021 / project rule 6: callers may contain untrusted values.
+    # Never render their diagnostic text, including schema exception messages.
+    raise SystemExit("contract validation failed")
 
 
 def load_json(path: Path) -> Any:
@@ -634,8 +636,27 @@ def validate_upstream() -> int:
                 f"{errors[0].json_path}: {errors[0].message}"
             )
 
+    catalog = load_json(UPSTREAM_ROOT / "catalogs/rest-tools-v1.json")
+    catalog_schema = load_json(UPSTREAM_ROOT / "schemas/public-catalog-v1.schema.json")
+    if not Draft202012Validator(catalog_schema).is_valid(catalog):
+        fail("invalid adopted REST catalog")
+    requirements = load_json(ROOT / "contracts/adoption-requirements.json")
+    if requirements["revision"] != adopted["revision"] or requirements["profile"] != manifest["profile"]:
+        fail("requirement register differs from adoption")
+    if requirements["catalog"] != "catalogs/rest-tools-v1.json":
+        fail("unexpected REST catalog")
+    required_rules = {"CAT-001", "CAT-002", "CAT-003", "RT-024", "RT-025", "RT-026", "RT-027", "ERR-015", "ERR-016", "SB-001", "INTEROP-001..005", "GEO-000..020/REJ-001..004", "RA-001..010", "decision-0021", "contracts-40"}
+    entries = requirements["requirements"]
+    if {entry["rule"] for entry in entries} != required_rules or len(entries) != len(required_rules):
+        fail("incomplete requirement register")
+    for entry in entries:
+        if entry["status"] not in {"implemented", "deviation", "not_applicable"} or not entry["reason"] or not entry["evidence"]:
+            fail("invalid requirement status")
+    if {entry["rule"] for entry in entries if entry["status"] == "deviation"} != {entry["rule"] for entry in manifest["deviations"]}:
+        fail("requirement deviations differ from adoption")
+
     checked = 0
-    for name in sorted(name for name in pins if name.startswith("runtime-v1/")):
+    for name in sorted(name for name in pins if (name.startswith("runtime-v1/") or name.startswith("vectors/runtime-v2/"))):
         vector = load_json(UPSTREAM_ROOT / name)
         check("runtime-vector-v1.schema.json", vector, f"contracts/upstream/{name}")
         if vector.get("kind") == "error":
@@ -782,4 +803,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        raise SystemExit("contract validation failed internally") from None

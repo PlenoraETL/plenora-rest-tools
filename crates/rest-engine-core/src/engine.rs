@@ -527,6 +527,9 @@ impl Engine {
         if self.is_closed() {
             return Err(EngineError::EngineClosed);
         }
+        crate::control_json::validate(request_json.as_bytes()).map_err(|error| {
+            EngineError::InvalidInput(ErrorDetail::at(error.message, error.line, error.column))
+        })?;
         let request = serde_json::from_str::<ExecutionRequest>(request_json).map_err(|error| {
             EngineError::InvalidInput(ErrorDetail::at(
                 "request is not valid JSON for the contract",

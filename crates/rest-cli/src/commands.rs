@@ -151,6 +151,7 @@ async fn prepare(
         None => EngineConfig::default(),
         Some(path) => {
             let bytes = read_file(&path, MAX_CONFIG_BYTES, Document::Config).await?;
+            validate_control_json(&bytes)?;
             serde_json::from_slice::<EngineConfig>(&bytes)
                 .map_err(|error| invalid_json(Document::Config, &error))?
         }
@@ -161,6 +162,7 @@ async fn prepare(
         }
         Source::File(path) => read_file(&path, MAX_REQUEST_BYTES, Document::Request).await?,
     };
+    validate_control_json(&bytes)?;
     let request = serde_json::from_slice::<ExecutionRequest>(&bytes)
         .map_err(|error| invalid_json(Document::Request, &error))?;
     if request.operation != operation.execution() {
@@ -341,6 +343,17 @@ async fn read_bounded(
         ));
     }
     Ok(bytes)
+}
+
+fn validate_control_json(bytes: &[u8]) -> Result<(), OperationOutcome> {
+    plenora_rest_core::control_json::validate(bytes).map_err(|error| {
+        OperationOutcome::Failure(CliError::invalid("INVALID_INPUT", error.message).payload(
+            BTreeMap::from([
+                ("line".to_owned(), Value::from(error.line)),
+                ("column".to_owned(), Value::from(error.column)),
+            ]),
+        ))
+    })
 }
 
 #[cfg(test)]

@@ -141,7 +141,8 @@ where
     /// Validates the envelope, resolves its references, runs the execution
     /// and returns the response envelope. Never fails as a Rust call: every
     /// refusal or failed execution is an `error` envelope whose payload is the
-    /// error object of the first execution error (with `details.async_jobs`
+    /// error object of the first resource-limit error, or the first execution
+    /// error if no limit was reached (with `details.async_jobs`
     /// when asynchronous jobs remained active); otherwise a `success`
     /// envelope carries the execution result.
     pub async fn invoke(
@@ -163,26 +164,7 @@ where
             return error_message(&request, error.payload());
         }
         let result = self.engine.execute_with_control(execution, control).await;
-        if result.status == ExecutionStatus::Failed {
-            let mut error = result
-                .errors
-                .first()
-                .map(execution_error_payload)
-                .unwrap_or_else(|| {
-                    EngineError::Runtime(ErrorDetail::from("execution failed without an error"))
-                        .payload()
-                });
-            if !result.recoveries.is_empty() {
-                error.details.insert(
-                    "async_jobs".to_owned(),
-                    serde_json::to_value(&result.recoveries)
-                        .unwrap_or_else(|_| Value::Array(Vec::new())),
-                );
-            }
-            error_message(&request, error)
-        } else {
-            success_message(&request, output_contract, result)
-        }
+        execution_message(&request, output_contract, result)
     }
 
     /// Serialized form of [`RuntimeBinding::invoke`].
@@ -197,12 +179,10 @@ where
         request_json: &str,
         cancellation: CancellationToken,
     ) -> Result<String, EngineError> {
-        // The envelope is read as a typed message first, so a duplicate
-        // member or an unknown one is refused exactly as before. Only a
-        // document that fails that because some metadata value is not a
-        // string is read again, with metadata of any JSON type, to answer it
-        // with a protocol refusal (RT-017): the metadata of the binding are
-        // strings, and a `null` or a number is neither absent nor valid.
+        // Check before either typed parsing or the metadata fallback can lose keys.
+        crate::control_json::validate(request_json.as_bytes()).map_err(|error| {
+            EngineError::InvalidInput(ErrorDetail::at(error.message, error.line, error.column))
+        })?;
         let typed = serde_json::from_str::<RuntimeMessage>(request_json);
         let response = match typed {
             Ok(request) => self.invoke(request, cancellation).await,
@@ -851,6 +831,52 @@ fn has_dot_segment(reference: &str) -> bool {
     })
 }
 
+fn execution_message(
+    request: &RuntimeMessage,
+    output_contract: &str,
+    result: ExecutionResult,
+) -> RuntimeMessage {
+    // RT-024: a limit is never a successful, truncated runtime result,
+    // including a partial execution with an earlier, unrelated error.
+    // Deviation RT-024 (docs/limiti.md): aggregate materialization has no
+    // byte budget yet; allocation exhaustion may terminate the process.
+    // Re-entry: a bounded serializer and a host transport budget.
+    let limit_error = result
+        .errors
+        .iter()
+        .find(|error| error.category == ErrorCategory::ResourceLimit);
+    if result.status == ExecutionStatus::Failed || limit_error.is_some() {
+        let mut error = limit_error
+            .or_else(|| result.errors.first())
+            .map(execution_error_payload)
+            .unwrap_or_else(|| {
+                EngineError::Runtime(ErrorDetail::from("execution failed without an error"))
+                    .payload()
+            });
+        // The engine records omitted recovery handles on its first error.
+        // Keep that count even when RT-024 selects a later limit error.
+        if let Some(omitted) = result
+            .errors
+            .first()
+            .and_then(|first| first.details.get("recoveries_omitted"))
+        {
+            error
+                .details
+                .insert("recoveries_omitted".to_owned(), omitted.clone());
+        }
+        if !result.recoveries.is_empty() {
+            error.details.insert(
+                "async_jobs".to_owned(),
+                serde_json::to_value(&result.recoveries)
+                    .unwrap_or_else(|_| Value::Array(Vec::new())),
+            );
+        }
+        error_message(request, error)
+    } else {
+        success_message(request, output_contract, result)
+    }
+}
+
 fn success_message(
     request: &RuntimeMessage,
     output_contract: &str,
@@ -960,6 +986,49 @@ mod tests {
 
         fn resolve_artifact_sink(&self, _reference: &str) -> Result<PathBuf, EngineError> {
             Err(EngineError::InvalidInput(ErrorDetail::from("missing sink")))
+        }
+    }
+
+    #[test]
+    fn a_later_limit_keeps_the_omitted_recovery_count() {
+        use super::*;
+        let payload = EngineError::Timeout.payload();
+        let first = crate::ExecutionError {
+            category: payload.category,
+            phase: payload.phase,
+            remote_effect: payload.remote_effect,
+            retry: payload.retry,
+            code: payload.code,
+            message: payload.message,
+            input_index: Some(0),
+            details: BTreeMap::from([("recoveries_omitted".to_owned(), Value::from(7))]),
+        };
+        let mut limit = first.clone();
+        limit.category = ErrorCategory::ResourceLimit;
+        limit.code = "RESPONSE_TOO_LARGE".to_owned();
+        limit.details.clear();
+        let request = RuntimeMessage {
+            schema_version: 1,
+            contract: RUNTIME_INTERFACE_CONTRACT.to_owned(),
+            kind: RuntimeMessageKind::Request,
+            content_type: JSON_CONTENT_TYPE.to_owned(),
+            metadata: BTreeMap::new(),
+            payload: Value::Null,
+        };
+        for status in [ExecutionStatus::Partial, ExecutionStatus::Failed] {
+            let result = ExecutionResult {
+                schema_version: 1,
+                status,
+                output: crate::ExecutionOutput::None,
+                metrics: Default::default(),
+                responses: vec![],
+                errors: vec![first.clone(), limit.clone()],
+                recoveries: vec![],
+            };
+            let response = execution_message(&request, EXECUTION_RESULT_CONTRACT, result);
+            assert_eq!(response.kind, RuntimeMessageKind::Error);
+            assert_eq!(response.payload["category"], "resource_limit");
+            assert_eq!(response.payload["details"]["recoveries_omitted"], 7);
         }
     }
 

@@ -20,8 +20,8 @@ Per lavorare senza Docker sono utili:
 - CPython da 3.10 a 3.14;
 - Maturin compatibile con pyproject.toml.
 
-La CI usa Linux (gate Docker) e Windows (job nativo). macOS può essere un
-ambiente di sviluppo, ma non è una piattaforma distribuita o supportata.
+La CI usa Linux (gate Docker) e Windows (job nativo). macOS puÃ² essere un
+ambiente di sviluppo, ma non Ã¨ una piattaforma distribuita o supportata.
 
 ## Struttura del repository
 
@@ -44,7 +44,7 @@ scripts                       verifica, contratti e release
 
 ## Ciclo rapido Rust
 
-Durante lo sviluppo è possibile eseguire controlli mirati:
+Durante lo sviluppo Ã¨ possibile eseguire controlli mirati:
 
 ~~~powershell
 cargo check --workspace --all-targets --locked
@@ -56,11 +56,11 @@ cargo +1.98.0 check --workspace --all-targets --locked
 ~~~
 
 rust-toolchain.toml fissa lo stesso compilatore in locale, nella CI Linux
-e Windows e nella build di release; cambiarlo è una modifica esplicita che
+e Windows e nella build di release; cambiarlo Ã¨ una modifica esplicita che
 riesegue il gate completo. La MSRV pubblicata (rust-version in Cargo.toml)
-è una promessa distinta, verificata dallo stage msrv del gate Docker.
+Ã¨ una promessa distinta, verificata dallo stage msrv del gate Docker.
 
-Il secondo Clippy è il gate anti-panic: nel codice delle librerie e del
+Il secondo Clippy Ã¨ il gate anti-panic: nel codice delle librerie e del
 binario CLI niente unwrap, expect, panic, unreachable, todo, unimplemented e
 niente indicizzazioni o slicing che possano uscire dai limiti. Un invariante
 interno violato diventa un errore tipizzato (RUNTIME_ERROR), mai un panic
@@ -77,14 +77,14 @@ cargo run -p plenora-rest-cli -- test --input request.json --config engine.json 
 cargo test -p plenora-rest-cli
 ~~~
 
-I test di unità coprono il parser (ogni flag sconosciuto, valore mancante,
-flag ripetuto, posizionale in più, formato diverso da json, comando
+I test di unitÃ  coprono il parser (ogni flag sconosciuto, valore mancante,
+flag ripetuto, posizionale in piÃ¹, formato diverso da json, comando
 sconosciuto, argomento non Unicode), la proiezione degli exit code, la
 conversione dei risultati e il panic convertito in errore internal. I test
 black-box in crates/rest-cli/tests/cli.rs lanciano il binario compilato e
-controllano un solo documento JSON più newline su stdout, stderr vuoto, exit
+controllano un solo documento JSON piÃ¹ newline su stdout, stderr vuoto, exit
 code per categoria (0, 2, 4, 5, 6 e, su Unix, 130 con un SIGINT vero) e la
-validità di ogni envelope contro gli schemi comuni cli-envelope-v2, error-v1 e
+validitÃ  di ogni envelope contro gli schemi comuni cli-envelope-v2, error-v1 e
 capabilities-v2. Gli schemi sono copiati da plenora-contracts in
 crates/rest-cli/tests/fixtures/contracts, con il digest canonico verificato dal
 test; li interpreta un validatore minimo in tests/support/schema.rs, chiuso
@@ -92,27 +92,27 @@ sulle parole chiave e sui pattern che conosce, invece di una dipendenza
 jsonschema che porterebbe decine di crate in Cargo.lock per tre schemi di
 test.
 
-## Fuzz e test di proprietà
+## Fuzz e test di proprietÃ 
 
 I parser dell'input remoto non fidato (corpo della risposta JSON, NDJSON,
 CSV, XML, testo e binario; percorsi JSON; header Link, Retry-After,
 Content-Range, ETag, Cache-Control, Set-Cookie) e dell'input di richiesta
 (ExecutionRequest, RuntimeMessage) hanno due livelli di prova.
 
-I test di proprietà stanno nel crate core
+I test di proprietÃ  stanno nel crate core
 (`crates/rest-engine-core/src/property_tests.rs`) e girano con
-`cargo test --workspace`, quindi in ogni gate. Ogni proprietà ha un oracolo
+`cargo test --workspace`, quindi in ogni gate. Ogni proprietÃ  ha un oracolo
 scritto nel test: un interprete di riferimento per i percorsi JSON, scrittori
-CSV, NDJSON e XML che conoscono già il valore atteso, la grammatica di RFC 8288
+CSV, NDJSON e XML che conoscono giÃ  il valore atteso, la grammatica di RFC 8288
 e RFC 9110 per gli header, la regola documentata dei riferimenti runtime.
 L'input rifiutato porta un canarino che nessun errore deve riportare. Il seme
 e il numero di casi sono fissati nel codice e la prova non scrive file: la
-suite è deterministica e dura meno di un secondo. Un controesempio trovato
+suite Ã¨ deterministica e dura meno di un secondo. Un controesempio trovato
 diventa un test unitario accanto al parser che corregge.
 
 I target di fuzz stanno in `fuzz/`, crate `cargo-fuzz` con workspace e
-Cargo.lock propri, fuori dalla MSRV: target, proprietà, formato degli input,
-cosa non è raggiungibile e comandi sono in [fuzz/README.md](../fuzz/README.md).
+Cargo.lock propri, fuori dalla MSRV: target, proprietÃ , formato degli input,
+cosa non Ã¨ raggiungibile e comandi sono in [fuzz/README.md](../fuzz/README.md).
 Raggiungono i parser privati con la feature `fuzzing` del crate core, che
 abilita un modulo `doc(hidden)` non pubblico e fuori dal contratto v1. I due
 target che eseguono il motore riscrivono ogni URL in un loopback letterale
@@ -120,7 +120,7 @@ che la configurazione di default rifiuta: nessuna connessione, nessun DNS.
 
 Il workflow Fuzz controlla formattazione e compilazione dei target e
 l'allineamento del corpus iniziale su ogni pull request e push a main; la
-campagna gira ogni lunedì e a mano per 600 secondi a target, sulle pull
+campagna gira ogni lunedÃ¬ e a mano per 600 secondi a target, sulle pull
 request che toccano `fuzz/` per 60 secondi. Un crash o un timeout rendono rosso
 il job e i reperti restano come artefatto. libFuzzer non gira su Windows MSVC:
 in locale le campagne si lanciano su Linux.
@@ -137,7 +137,7 @@ Il gate costruisce ambienti self-contained e verifica:
 
 1. cargo check dell'intero workspace con Rust 1.98.0 e Cargo.lock;
 2. JSON Schema Draft 2020-12, un corpus di istanze valide e non valide per ogni
-   schema, e compatibilità delle superfici v1;
+   schema, e compatibilitÃ  delle superfici v1;
 3. rustfmt;
 4. Clippy con tutti i warning negati;
 5. Clippy anti-panic sulle librerie e sul binario CLI;
@@ -145,7 +145,7 @@ Il gate costruisce ambienti self-contained e verifica:
 7. baseline breve di concorrenza, fault transitori e streaming;
 8. rustdoc dell'API con tutti i warning negati; plenora-rest-core dichiara
    `#![deny(missing_docs)]`, quindi ogni elemento pubblico senza
-   documentazione ferma già la compilazione;
+   documentazione ferma giÃ  la compilazione;
 9. build release della wheel;
 10. installazione e test dello SDK in un ambiente Python pulito;
 11. installazione della stessa wheel ABI3 su CPython 3.10-3.14.
@@ -162,7 +162,7 @@ python/tests da fuori del checkout.
 
 ## Campagna operativa
 
-La campagna operativa è separata dal gate: dura da minuti a ore e il suo esito
+La campagna operativa Ã¨ separata dal gate: dura da minuti a ore e il suo esito
 dipende dalla macchina. cargo test esegue soltanto i test dell'harness (una
 campagna in-process di pochi secondi e il verificatore su report con
 violazioni). Le fasi si lanciano con:
@@ -191,23 +191,23 @@ separate con cargo-llvm-cov 0.9.1 e coverage.py 7.16.1:
 - lo SDK Python (plenora_rest), dalla stessa esecuzione, con i rami.
 
 scripts/check_coverage.py confronta ogni report con il minimo dichiarato in
-scripts/coverage_budget.json e fallisce chiuso se il report è incoerente o
+scripts/coverage_budget.json e fallisce chiuso se il report Ã¨ incoerente o
 misura file fuori dai sorgenti dichiarati; scripts/test_check_coverage.py ne
-prova i rifiuti. I minimi partono appena sotto i valori misurati: alzarli è
+prova i rifiuti. I minimi partono appena sotto i valori misurati: alzarli Ã¨
 una modifica ordinaria del budget, abbassarli va motivato nella pull request.
 
 ## Versioni delle dipendenze
 
 Le dipendenze dirette in Cargo.toml sono fissate alla versione esatta
-(`=x.y.z`) presente in Cargo.lock: il manifest dichiara così il grafo che i
-gate hanno qualificato, e ogni cambio di versione è una modifica esplicita del
+(`=x.y.z`) presente in Cargo.lock: il manifest dichiara cosÃ¬ il grafo che i
+gate hanno qualificato, e ogni cambio di versione Ã¨ una modifica esplicita del
 manifest in una pull request dedicata, non l'effetto di un `cargo update`. Le
 dipendenze transitive sono fissate da Cargo.lock, usato con --locked da ogni
 gate.
 
-Il costo è dichiarato: un crate che dipenda da plenora-rest-core eredita i pin
+Il costo Ã¨ dichiarato: un crate che dipenda da plenora-rest-core eredita i pin
 esatti, e la risoluzione fallisce se richiede un'altra versione delle stesse
-dipendenze (per esempio un serde o un tokio diversi). Il crate oggi è
+dipendenze (per esempio un serde o un tokio diversi). Il crate oggi Ã¨
 distribuito come artifact di release, non su crates.io; se diventasse una
 dipendenza di altri crate, i pin andrebbero rivalutati per quel caso.
 
@@ -227,17 +227,17 @@ Il workflow Audit esegue cargo-deny secondo la policy in deny.toml (advisory,
 licenze, sorgenti, wildcard), sul Cargo.lock del workspace e su quello di
 `fuzz/`, e pip-audit sulla toolchain Python fissata dai gate. Gira su pull
 request, push a main, una volta al giorno e su avvio manuale. L'unica
-eccezione di licenza è NCSA per libfuzzer-sys, che esiste solo nel lock di
+eccezione di licenza Ã¨ NCSA per libfuzzer-sys, che esiste solo nel lock di
 `fuzz/`; sul workspace cargo-deny la segnala come eccezione non usata, un
 avviso e non un errore.
 
-Ogni advisory accettata in deny.toml lo è soltanto perché nessuna versione
+Ogni advisory accettata in deny.toml lo Ã¨ soltanto perchÃ© nessuna versione
 corretta della dipendenza compila sulla MSRV pubblicata. Il workflow esegue
 scripts/check_advisory_exemptions.py, che fallisce se una di quelle eccezioni
 sopravvive a un innalzamento della MSRV.
 
-È deliberatamente separato dal gate di verifica: interroga un database di
-advisory esterno, quindi il suo esito può cambiare a parità di commit. Tenerlo
+Ãˆ deliberatamente separato dal gate di verifica: interroga un database di
+advisory esterno, quindi il suo esito puÃ² cambiare a paritÃ  di commit. Tenerlo
 fuori da verify.ps1 mantiene riproducibile il gate di release.
 
 ## Modifiche ai contratti
@@ -250,7 +250,7 @@ Per una modifica interna che non tocca il confine pubblico:
 
 Per una modifica pubblica:
 
-1. stabilire se il cambiamento è compatibile;
+1. stabilire se il cambiamento Ã¨ compatibile;
 2. per un breaking change creare una nuova versione di schema e binding;
 3. mantenere i file v1 immutati;
 4. aggiornare capability, binding, test delle superfici e adozione;
@@ -266,7 +266,7 @@ python ./scripts/validate_contracts.py --print-baseline
 
 ## Build della release
 
-La release locale riproducibile è:
+La release locale riproducibile Ã¨:
 
 ~~~powershell
 pwsh ./scripts/release.ps1
@@ -276,7 +276,7 @@ Lo script:
 
 - costruisce crate, wheel e binario CLI Linux due volte senza cache;
 - confronta nomi e byte degli artefatti (esattamente un .crate, una .whl e
-  plenora-rest-linux-x86_64; qualunque altro file è un errore);
+  plenora-rest-linux-x86_64; qualunque altro file Ã¨ un errore);
 - copia il risultato in dist;
 - genera un SBOM SPDX 2.3;
 - aggiunge la wheel Windows e plenora-rest-windows-x86_64.exe indicate con
@@ -287,10 +287,10 @@ Lo script:
 
 adoption-manifest.json registra i digest degli artefatti riproducibili
 costruiti nell'immagine Linux fissata per digest (crate, wheel manylinux e
-binario CLI Linux). Il binario Linux è costruito nello stesso stage di crate e
+binario CLI Linux). Il binario Linux Ã¨ costruito nello stesso stage di crate e
 wheel, con lo stesso compilatore, SOURCE_DATE_EPOCH, rimappatura dei path e
 strip dei simboli. Wheel ed eseguibile Windows sono linkati su un runner la cui
-immagine non è fissata: sono in SHA256SUMS, nell'SBOM e nelle attestazioni di
+immagine non Ã¨ fissata: sono in SHA256SUMS, nell'SBOM e nelle attestazioni di
 provenance, ma non hanno un digest nel manifesto da confrontare.
 
 Gli artefatti prodotti sono:
@@ -342,11 +342,11 @@ git push origin vX.Y.Z
 ~~~
 
 Prima del tag la sezione del CHANGELOG della versione va intestata con la
-data, `## X.Y.Z (AAAA-MM-GG)`: è il testo della release.
+data, `## X.Y.Z (AAAA-MM-GG)`: Ã¨ il testo della release.
 
 Il workflow Release controlla che tag e cinque fonti di versione coincidano,
 estrae la sezione datata del CHANGELOG come note di rilascio (fallisce se
-manca, se non ha data o se è vuota), riesegue il gate, ricostruisce gli
+manca, se non ha data o se Ã¨ vuota), riesegue il gate, ricostruisce gli
 artefatti, genera attestazioni di provenance e SBOM e pubblica una GitHub
 Release.
 
@@ -362,7 +362,7 @@ I documenti descrivono soltanto:
 - lavoro futuro nella sola roadmap.
 
 Versioni, revisioni e digest che hanno una fonte machine-readable non devono
-essere copiati in più documenti. La storia delle decisioni appartiene a Git,
+essere copiati in piÃ¹ documenti. La storia delle decisioni appartiene a Git,
 alle pull request e alle release.
 
 Ogni modifica documentale deve mantenere:
@@ -378,3 +378,13 @@ Ogni modifica documentale deve mantenere:
 - [Architettura](architecture.md)
 - [Contratti](../contracts/README.md)
 - [Roadmap](roadmap.md)
+
+
+Per l'adozione dei contratti, `python scripts/validate_contracts.py` verifica
+anche il registro per requisito, il catalogo e i pin; la regressione della
+diagnostica senza dati gira con
+`python -m unittest discover -s scripts -p test_validate_contracts.py`
+ed è inclusa nel gate Docker. I test `runtime_binding`, `runtime_vectors`,
+`public_surface` e quelli CLI verificano discovery e comportamento pubblico.
+Il repository non dichiara un budget di dimensione del codice; il budget di
+coverage è distinto e resta invariato.

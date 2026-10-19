@@ -357,6 +357,8 @@ fn read_json<T: for<'de> Deserialize<'de>>(
     invalid: &'static str,
 ) -> Result<T, CampaignError> {
     let text = std::fs::read_to_string(path).map_err(|_| CampaignError::new(missing))?;
+    plenora_rest_core::control_json::validate(text.as_bytes())
+        .map_err(|error| CampaignError::new(error.message))?;
     serde_json::from_str(&text).map_err(|_| CampaignError::new(invalid))
 }
 
@@ -378,4 +380,22 @@ pub fn load_limits(path: &Path) -> Result<Limits, CampaignError> {
     )?;
     limits.validate()?;
     Ok(limits)
+}
+
+#[cfg(test)]
+mod duplicate_tests {
+    #[test]
+    fn control_files_reject_duplicate_members() {
+        let path = std::env::temp_dir().join(format!(
+            "rest-campaign-duplicates-{}.json",
+            std::process::id()
+        ));
+        std::fs::write(&path, br#"{"nested":[{"secret":1,"secret":2}]}"#).unwrap();
+        let result = super::read_json::<serde_json::Value>(&path, "missing", "invalid");
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "control document contains duplicate JSON members"
+        );
+    }
 }

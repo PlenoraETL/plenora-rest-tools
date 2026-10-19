@@ -1,8 +1,19 @@
 {
   "repository": "https://github.com/PlenoraETL/plenora-contracts.git",
-  "revision": "3c395a8db96df739024e203b22794af340dc8a7f",
-  "tag": "v1.1.0",
+  "revision": "3aec9f724f5a0ad21366f293895b4d0dbcd0aad1",
   "files": {
+    "bindings/runtime-v1.json": {
+      "upstream": "bindings/runtime-v1.json",
+      "sha256": "3c2cf9d0a32e8bb5ba348cc42fc8daabedf5974d355ab0f7037dba6c1a39e685"
+    },
+    "catalogs/rest-tools-v1.json": {
+      "upstream": "catalogs/rest-tools-v1.json",
+      "sha256": "867c7788bf83ece78348de528311b70339e2cc25c5cac731be323f070c33d614"
+    },
+    "profiles/rest-tools.md": {
+      "upstream": "profiles/rest-tools.md",
+      "sha256": "e0b2c8e9114fd79427de7cf489647527e1465fa64639f55b573ca249ed680680"
+    },
     "runtime-probes-v1/data-run-input-contract-malformed.json": {
       "upstream": "vectors/runtime-probes-v1/data-run-input-contract-malformed.json",
       "sha256": "67723dae7b7e3306354a9db7548b8ec282d47524a9683632f81a93cd1f5e9115"
@@ -107,6 +118,14 @@
       "upstream": "schemas/error-v1.schema.json",
       "sha256": "15795d92adea7a6df15dd25a045699c43ad1c79949702c70158f4725f4fed4c0"
     },
+    "schemas/public-catalog-v1.schema.json": {
+      "upstream": "schemas/public-catalog-v1.schema.json",
+      "sha256": "071558cd80630caaf63f5ea2a3ce683fe9a1fc73a44e36ed7bcbeb1fd64b7d7c"
+    },
+    "schemas/public-catalog-v2.schema.json": {
+      "upstream": "schemas/public-catalog-v2.schema.json",
+      "sha256": "4ad71cd2ccb018a92548ff6b64b5bb552a5a3d298032be871376d1ef4088f80b"
+    },
     "schemas/runtime-probe-v1.schema.json": {
       "upstream": "schemas/runtime-probe-v1.schema.json",
       "sha256": "5188813894c59c67c5c9b1aab551c6c783e13b021e5a4896c033d1636e705c47"
@@ -117,7 +136,35 @@
     },
     "specs/RUNTIME-VECTORS-1.0.md": {
       "upstream": "specs/runtime/RUNTIME-VECTORS-1.0.md",
-      "sha256": "b47bbc429bd488ea6e9345ad2e596fa9c7b75eed9f003985564d4bb8c78eda04"
+      "sha256": "56dbaf80987632369375c7f04d534e609b98d96a3ffa18acb52eb6ff7cabd5ad"
+    },
+    "specs/catalogs/PUBLIC-CATALOGS-2.0.md": {
+      "upstream": "specs/catalogs/PUBLIC-CATALOGS-2.0.md",
+      "sha256": "c92637efd8448075c934826d45dde880d073b4961e8958f6f03e4afa14fae0d0"
+    },
+    "specs/composition/INTEROP-VECTORS-1.0.md": {
+      "upstream": "specs/composition/INTEROP-VECTORS-1.0.md",
+      "sha256": "ad502f77dec0bb0c92ee48822bb7110275af437d815568675d0b2b56ef859185"
+    },
+    "specs/errors/ERRORS-1.0.md": {
+      "upstream": "specs/errors/ERRORS-1.0.md",
+      "sha256": "6c9d3a1045a515b6cdd657e407f164d6aa72da648e44881c91510f5e07502f88"
+    },
+    "specs/runtime/RUNTIME-BINDING-2.0.md": {
+      "upstream": "specs/runtime/RUNTIME-BINDING-2.0.md",
+      "sha256": "3a0141fb5588d51918af3bcfaff69628852fdbe1842eb6b75cff0625a19a03ff"
+    },
+    "specs/surfaces/SURFACE-BINDINGS-1.0.md": {
+      "upstream": "specs/surfaces/SURFACE-BINDINGS-1.0.md",
+      "sha256": "3d888a10f13f3b2ca41316f74cf94a1c52625565badd709ab353d19bd64c286f"
+    },
+    "vectors/runtime-v2/database-query-result-limit-error.json": {
+      "upstream": "vectors/runtime-v2/database-query-result-limit-error.json",
+      "sha256": "c1130270b6af52f5118b938e773ed849cf8a15495eb68dd713a19810a2e186d8"
+    },
+    "vectors/runtime-v2/database-query-transport-limit-error.json": {
+      "upstream": "vectors/runtime-v2/database-query-transport-limit-error.json",
+      "sha256": "c34da6e468930ae7ebd19327618c36d3811c6388cd75450986a938c60c24c3a7"
     }
   }
 }

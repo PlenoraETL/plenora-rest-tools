@@ -310,9 +310,26 @@ def _dump_object(value: Mapping[str, Any], name: str) -> str:
     return json.dumps(dict(value), ensure_ascii=False, separators=(",", ":"))
 
 
+class _DuplicateJsonMember(ValueError):
+    pass
+
+
+def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise _DuplicateJsonMember("control document contains duplicate JSON members")
+        result[key] = value
+    return result
+
+
 def _load_object(value: str, name: str) -> dict[str, Any]:
     try:
-        document = json.loads(value)
+        document = json.loads(value, object_pairs_hook=_unique_object)
+    except _DuplicateJsonMember:
+        payload = _invalid_result_payload(name)
+        payload["message"] = "control document contains duplicate JSON members"
+        raise PlenoraError(payload) from None
     except (TypeError, ValueError):
         raise PlenoraError(_invalid_result_payload(name)) from None
     if not isinstance(document, dict):
@@ -342,7 +359,10 @@ def _file_input(
 
 def _public_error(error: NativePlenoraError) -> PlenoraError:
     try:
-        payload = json.loads(str(error))
+        payload = json.loads(str(error), object_pairs_hook=_unique_object)
+    except _DuplicateJsonMember:
+        payload = _internal_payload()
+        payload["message"] = "control document contains duplicate JSON members"
     except (TypeError, ValueError):
         payload = _internal_payload()
     if not isinstance(payload, dict):

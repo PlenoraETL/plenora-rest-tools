@@ -1,0 +1,313 @@
+{
+  "$schema": "../schemas/surface-bindings-v1.schema.json",
+  "schema_version": 1,
+  "contract": "plenora-surface-bindings-v1",
+  "surface": "runtime",
+  "components": [
+    {
+      "component": "plenora-database-tools",
+      "artifact": "plenora.database-tools",
+      "discovery": [
+        "plenora.database-tools#capabilities@1"
+      ],
+      "bindings": [
+        {
+          "operation": "database.test_connection",
+          "version": 1,
+          "requirement": "required",
+          "entrypoints": [
+            "plenora.database-tools#database.test_connection@1"
+          ]
+        },
+        {
+          "operation": "database.list_catalogs",
+          "version": 1,
+          "requirement": "required",
+          "entrypoints": [
+            "plenora.database-tools#database.list_catalogs@1"
+          ]
+        },
+        {
+          "operation": "database.list_schemas",
+          "version": 1,
+          "requirement": "required",
+          "entrypoints": [
+            "plenora.database-tools#database.list_schemas@1"
+          ]
+        },
+        {
+          "operation": "database.list_objects",
+          "version": 1,
+          "requirement": "required",
+          "entrypoints": [
+            "plenora.database-tools#database.list_objects@1"
+          ]
+        },
+        {
+          "operation": "database.describe_object",
+          "version": 1,
+          "requirement": "required",
+          "entrypoints": [
+            "plenora.database-tools#database.describe_object@1"
+          ]
+        },
+        {
+          "operation": "database.read",
+          "version": 1,
+          "requirement": "required",
+          "entrypoints": [
+            "plenora.database-tools#database.read@1"
+          ]
+        },
+        {
+          "operation": "database.write",
+          "version": 1,
+          "requirement": "required",
+          "entrypoints": [
+            "plenora.database-tools#database.write@1"
+          ]
+        },
+        {
+          "operation": "database.query",
+          "version": 1,
+          "requirement": "conditional",
+          "entrypoints": [
+            "plenora.database-tools#database.query@1"
+          ]
+        }
+      ]
+    },
+    {
+      "component": "plenora-data-tools",
+      "artifact": "plenora.data-tools",
+      "discovery": [
+        "plenora.data-tools#capabilities@1"
+      ],
+      "bindings": [
+        {
+          "operation": "data.catalog",
+          "version": 1,
+          "requirement": "required",
+          "entrypoints": [
+            "plenora.data-tools#data.catalog@1"
+          ]
+        },
+        {
+          "operation": "data.describe",
+          "version": 1,
+          "requirement": "required",
+          "entrypoints": [
+            "plenora.data-tools#data.describe@1"
+          ]
+        },
+        {
+          "operation": "data.validate",
+          "version": 1,
+          "requirement": "required",
+          "entrypoints": [
+            "plenora.data-tools#data.validate@1"
+          ]
+        },
+        {
+          "operation": "data.run",
+          "version": 1,
+          "requirement": "required",
+          "entrypoints": [
+            "plenora.data-tools#data.run@1"
+          ]
+        },
+        {
+          "operation": "data.catalog",
+          "version": 2,
+          "requirement": "required",
+          "entrypoints": [
+            "plenora.data-tools#data.catalog@2"
+          ]
+        },
+        {
+          "operation": "data.validate",
+          "version": 2,
+          "requirement": "required",
+          "entrypoints": [
+            "plenora.data-tools#data.validate@2"
+          ]
+        },
+        {
+          "operation": "data.run",
+          "version": 3,
+          "requirement": "conditional",
+          "entrypoints": [
+            "plenora.data-tools#data.run@3"
+          ]
+        }
+      ]
+    },
+    {
+      "component": "plenora-io-tools",
+      "artifact": "plenora.io-tools",
+      "discovery": [
+        "plenora.io-tools#capabilities@1"
+      ],
+      "bindings": [
+        {
+          "operation": "io.catalog",
+          "version": 1,
+          "requirement": "required",
+          "entrypoints": [
+            "plenora.io-tools#io.catalog@1"
+          ]
+        },
+        {
+          "operation": "io.catalog",
+          "version": 2,
+          "requirement": "required",
+          "entrypoints": [
+            "plenora.io-tools#io.catalog@2"
+          ]
+        },
+        {
+          "operation": "io.inspect",
+          "version": 1,
+          "requirement": "required",
+          "entrypoints": [
+            "plenora.io-tools#io.inspect@1"
+          ]
+        },
+        {
+          "operation": "io.layers",
+          "version": 1,
+          "requirement": "required",
+          "entrypoints": [
+            "plenora.io-tools#io.layers@1"
+          ]
+        },
+        {
+          "operation": "io.read",
+          "version": 1,
+          "requirement": "required",
+          "entrypoints": [
+            "plenora.io-tools#io.read@1"
+          ]
+        },
+        {
+          "operation": "io.read",
+          "version": 2,
+          "requirement": "required",
+          "entrypoints": [
+            "plenora.io-tools#io.read@2"
+          ]
+        },
+        {
+          "operation": "io.write",
+          "version": 1,
+          "requirement": "required",
+          "entrypoints": [
+            "plenora.io-tools#io.write@1"
+          ]
+        },
+        {
+          "operation": "io.write",
+          "version": 2,
+          "requirement": "required",
+          "entrypoints": [
+            "plenora.io-tools#io.write@2"
+          ]
+        },
+        {
+          "operation": "io.convert",
+          "version": 1,
+          "requirement": "required",
+          "entrypoints": [
+            "plenora.io-tools#io.convert@1"
+          ]
+        }
+      ]
+    },
+    {
+      "component": "plenora-rest-tools",
+      "artifact": "plenora.rest-tools",
+      "discovery": [
+        "plenora.rest-tools#capabilities@1"
+      ],
+      "bindings": [
+        {
+          "operation": "rest.test",
+          "version": 1,
+          "requirement": "required",
+          "entrypoints": [
+            "plenora.rest-tools#rest.test@1"
+          ]
+        },
+        {
+          "operation": "rest.generate",
+          "version": 1,
+          "requirement": "required",
+          "entrypoints": [
+            "plenora.rest-tools#rest.generate@1"
+          ]
+        },
+        {
+          "operation": "rest.enrich",
+          "version": 1,
+          "requirement": "required",
+          "entrypoints": [
+            "plenora.rest-tools#rest.enrich@1"
+          ]
+        },
+        {
+          "operation": "rest.download",
+          "version": 1,
+          "requirement": "required",
+          "entrypoints": [
+            "plenora.rest-tools#rest.download@1"
+          ]
+        },
+        {
+          "operation": "rest.upload",
+          "version": 1,
+          "requirement": "required",
+          "entrypoints": [
+            "plenora.rest-tools#rest.upload@1"
+          ]
+        }
+      ]
+    },
+    {
+      "component": "plenora-storage-tools",
+      "artifact": "plenora.storage-tools",
+      "discovery": [
+        "plenora.storage-tools#capabilities@1"
+      ],
+      "bindings": [
+        {
+          "operation": "storage.test", "version": 1, "requirement": "required",
+          "entrypoints": ["plenora.storage-tools#storage.test@1"]
+        },
+        {
+          "operation": "storage.list", "version": 1, "requirement": "required",
+          "entrypoints": ["plenora.storage-tools#storage.list@1"]
+        },
+        {
+          "operation": "storage.stat", "version": 1, "requirement": "required",
+          "entrypoints": ["plenora.storage-tools#storage.stat@1"]
+        },
+        {
+          "operation": "storage.get", "version": 1, "requirement": "required",
+          "entrypoints": ["plenora.storage-tools#storage.get@1"]
+        },
+        {
+          "operation": "storage.put", "version": 1, "requirement": "required",
+          "entrypoints": ["plenora.storage-tools#storage.put@1"]
+        },
+        {
+          "operation": "storage.copy", "version": 1, "requirement": "required",
+          "entrypoints": ["plenora.storage-tools#storage.copy@1"]
+        },
+        {
+          "operation": "storage.delete", "version": 1, "requirement": "required",
+          "entrypoints": ["plenora.storage-tools#storage.delete@1"]
+        }
+      ]
+    }
+  ]
+}
