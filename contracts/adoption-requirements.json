@@ -1,0 +1,97 @@
+{
+  "revision": "3aec9f724f5a0ad21366f293895b4d0dbcd0aad1",
+  "catalog": "catalogs/rest-tools-v1.json",
+  "profile": "plenora-rest-tools-profile-v1",
+  "requirements": [
+    {
+      "rule": "CAT-001",
+      "status": "implemented",
+      "reason": "Capabilities report actual Rust/Python/runtime surfaces; CLI adds its own surface. Existing catalog/profile v1 retained unchanged by upstream; v2 principles adopted explicitly without relabeling the v1 document.",
+      "evidence": "public_surface; runtime_binding; CLI tests"
+    },
+    {
+      "rule": "CAT-002",
+      "status": "implemented",
+      "reason": "No catalog or binding surface removed; optional CLI absent from core discovery. Required runtime present.",
+      "evidence": "contracts/upstream/catalogs/rest-tools-v1.json"
+    },
+    {
+      "rule": "CAT-003",
+      "status": "not_applicable",
+      "reason": "REST profile declares no intentional surface absence; no successor REST catalog exists at this revision.",
+      "evidence": "contracts/upstream/profiles/rest-tools.md"
+    },
+    {
+      "rule": "RT-024",
+      "status": "deviation",
+      "reason": "Known response/file/pagination bounds return resource_limit, including partial results. No aggregate JSON materialization budget; allocation exhaustion may terminate the process. Re-entry: bounded serialization and host budget with boundary tests.",
+      "evidence": "docs/limiti.md; runtime_pagination_limit_is_an_error_not_a_truncated_success"
+    },
+    {
+      "rule": "RT-025",
+      "status": "implemented",
+      "reason": "Discovery advertises binding v2/version 2; envelope contract and capability/operation selectors remain v1. Exported RUNTIME_INTERFACE_CONTRACT retains its documented envelope meaning.",
+      "evidence": "runtime_v2_discovery_preserves_v1_wire_and_selectors; runtime_vectors"
+    },
+    {
+      "rule": "RT-026",
+      "status": "not_applicable",
+      "reason": "REST is a destination, not a sender or destination selector. Host must negotiate from discovery.",
+      "evidence": "crates/rest-engine-core/src/runtime.rs"
+    },
+    {
+      "rule": "RT-027",
+      "status": "not_applicable",
+      "reason": "No transport ingress, forwarding, retry/redrive store or routing in this component. Context belongs outside the envelope to the host.",
+      "evidence": "contracts/upstream/profiles/rest-tools.md"
+    },
+    {
+      "rule": "ERR-015",
+      "status": "implemented",
+      "reason": "Cleanup after proven download publication preserves committed effect and never retry.",
+      "evidence": "crates/rest-engine-core/src/error.rs; black_box"
+    },
+    {
+      "rule": "ERR-016",
+      "status": "implemented",
+      "reason": "Transport failures retain io and deadlines timeout with unknown effect, never internal merely because the outcome is unknown; no database commit protocol exposed.",
+      "evidence": "crates/rest-engine-core/src/error.rs; runtime_vectors"
+    },
+    {
+      "rule": "SB-001",
+      "status": "implemented",
+      "reason": "Every REST operation already declares remote. CLI returns JSON and adds no stricter effect; optional surface_side_effects must be absent, since no value is stricter than remote. Destinations for download are explicit inputs.",
+      "evidence": "crates/rest-cli/tests/cli.rs; contracts/upstream/catalogs/rest-tools-v1.json"
+    },
+    {
+      "rule": "INTEROP-001..005",
+      "status": "not_applicable",
+      "reason": "Opt-in Arrow geometry interoperability; REST exchanges JSON and opaque artifacts, no Arrow contract or operation advertised.",
+      "evidence": "contracts/upstream/specs/composition/INTEROP-VECTORS-1.0.md"
+    },
+    {
+      "rule": "GEO-000..020/REJ-001..004",
+      "status": "not_applicable",
+      "reason": "Decisions 0016 and geometry semantics apply to Arrow adopters; no geometry interpretation in REST.",
+      "evidence": "contracts/upstream/profiles/rest-tools.md"
+    },
+    {
+      "rule": "RA-001..010",
+      "status": "not_applicable",
+      "reason": "Decision 0017 REST-to-Arrow adapter is owned by the application; this component provides no such adapter and makes no Arrow conversion claim.",
+      "evidence": "C:/pg/contracts-main/decisions/0017-rest-arrow-adapter.md"
+    },
+    {
+      "rule": "decision-0021",
+      "status": "implemented",
+      "reason": "Contract gate emits fixed error text, including unexpected exceptions; values, schema diagnostics and paths are never rendered.",
+      "evidence": "scripts/test_validate_contracts.py"
+    },
+    {
+      "rule": "contracts-40",
+      "status": "not_applicable",
+      "reason": "Upstream gate_fuzz verdict-cache registry fix only. This repository has cargo-fuzz and no verdict cache; no workflow cache to invalidate. Upstream oracle is tested offline separately.",
+      "evidence": "C:/pg/contracts-main/tools/gate_fuzz.py"
+    }
+  ]
+}

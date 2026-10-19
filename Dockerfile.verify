@@ -24,7 +24,7 @@ RUN rustup component add rustfmt clippy \
     && rm -rf /var/lib/apt/lists/* \
     && python3 -m venv /opt/verify \
     && /opt/verify/bin/pip install \
-        "jsonschema==4.25.1" \
+        "jsonschema==4.26.0" \
         "maturin==1.14.1"
 
 WORKDIR /workspace
@@ -36,7 +36,8 @@ RUN test -f /tmp/msrv-ok \
         scripts/release.py \
         scripts/validate_contracts.py \
     && /opt/verify/bin/python scripts/release.py current-version \
-    && /opt/verify/bin/python scripts/validate_contracts.py
+    && /opt/verify/bin/python scripts/validate_contracts.py \
+    && /opt/verify/bin/python -m unittest discover -s scripts -p test_validate_contracts.py
 RUN cargo fmt --all -- --check
 RUN cargo clippy --workspace --all-targets --locked -- -D warnings
 # Library and binary code must not be able to panic: no unwrap, expect or panic, no

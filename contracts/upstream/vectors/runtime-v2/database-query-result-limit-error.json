@@ -1,0 +1,25 @@
+{
+  "$schema": "../../schemas/runtime-vector-v1.schema.json",
+  "schema_version": 1,
+  "contract": "plenora-runtime-vector-v1",
+  "kind": "error",
+  "content_type": "application/vnd.plenora.error+json",
+  "metadata": {
+    "plenora.message.id": "018f3d84-7b2c-7f00-8000-000000000201",
+    "plenora.capability.operation": "database.query",
+    "plenora.operation.version": "1",
+    "plenora.output.contract": "plenora-error-v1",
+    "plenora.trace.correlation_id": "018f3d84-7b2c-7f00-8000-000000000301"
+  },
+  "payload": {
+    "category": "resource_limit",
+    "phase": "read",
+    "remote_effect": "none",
+    "retry": {
+      "kind": "never"
+    },
+    "code": "RESULT_LIMIT_EXCEEDED",
+    "provider": "postgres",
+    "message": "The query result exceeds the declared bound of the runtime surface; no row was returned."
+  }
+}

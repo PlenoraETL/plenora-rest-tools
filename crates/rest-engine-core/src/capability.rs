@@ -184,8 +184,9 @@ pub fn capabilities() -> CapabilityDocument {
             },
             CapabilityInterface {
                 kind: Surface::Runtime,
-                contract: RUNTIME_INTERFACE_CONTRACT.to_owned(),
-                version: RUNTIME_BINDING_VERSION,
+                // RT-025: discovery names the contract; the envelope stays v1.
+                contract: "plenora-runtime-binding-v2".to_owned(),
+                version: 2,
                 artifact: CAPABILITY_NAME.to_owned(),
             },
         ],

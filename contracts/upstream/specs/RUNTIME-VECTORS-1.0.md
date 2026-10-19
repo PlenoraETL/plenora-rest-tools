@@ -88,6 +88,19 @@ as `plenora-runtime-vector-v1` documents.
 Fixture payload objects remain illustrative. A component validates them using
 its own immutable payload schema; runtime-tools preserves their serialized
 bytes and does not infer domain semantics from their fields.
+`database-write-error.json` (`internal`, phase `commit`) illustrates an
+unknown commit outcome caused by a defect of the component; it does not make
+every unknown commit outcome `internal`. `database-write-commit-io-error.json`
+shows the outcome of a lost confirmation and
+`database-write-commit-timeout-error.json` that of an elapsed deadline
+(ERR-016). An error vector with phase `commit` and an unknown remote
+effect whose `code` is one of `COMMIT_CONFIRMATION_LOST`,
+`COMMIT_DEADLINE_ELAPSED` and `COMMIT_OUTCOME_UNKNOWN` (a defect of the
+component) has the category the validator maps it to, `io`, `timeout` and
+`internal` respectively; a vector whose code is in the map and whose
+category is not the one it gives fails the gate. A vector with another code names no cause the map knows, and only
+its retry is checked (ERR-006): ERR-016 gives examples of causes, not an
+exhaustive list, and a cancelled commit, for example, is `cancelled`.
 
 ## 6. Rejection probes
 

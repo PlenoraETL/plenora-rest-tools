@@ -3,7 +3,7 @@
   "component": "plenora-rest-tools",
   "contracts_source": {
     "repository": "https://github.com/PlenoraETL/plenora-contracts.git",
-    "revision": "3c395a8db96df739024e203b22794af340dc8a7f"
+    "revision": "3aec9f724f5a0ad21366f293895b4d0dbcd0aad1"
   },
   "profile": "plenora-rest-tools-profile-v1",
   "artifacts": [
@@ -23,7 +23,9 @@
       "surface": "python_sdk",
       "version": "0.3.0",
       "digest": "sha256:a37e8912a79917594e35c95a4cb0935e79561c00eaaddc64890082e00fc72ee6",
-      "api_modes": ["sync"],
+      "api_modes": [
+        "sync"
+      ],
       "verification": [
         "powershell -File scripts/release.ps1",
         "install wheel in a clean virtualenv and run python/tests/test_smoke.py"
@@ -94,11 +96,12 @@
       ]
     },
     {
-      "id": "plenora-runtime-binding-v1",
+      "id": "plenora-runtime-binding-v2",
       "status": "conforming",
       "verification": [
         "cargo test -p plenora-rest-core --test runtime_binding",
-        "cargo test -p plenora-rest-core --test runtime_vectors"
+        "cargo test -p plenora-rest-core --test runtime_vectors",
+        "RT-024 deviation: docs/limiti.md; contracts/adoption-requirements.json"
       ]
     },
     {
@@ -129,7 +132,35 @@
       "verification": [
         "cargo test -p plenora-rest-core --test runtime_binding"
       ]
+    },
+    {
+      "id": "plenora-public-catalog-v2",
+      "status": "conforming",
+      "verification": [
+        "python scripts/validate_contracts.py",
+        "Existing rest-tools-v1 catalog/profile retained; CAT-001..003 adoption: contracts/adoption-requirements.json"
+      ]
+    },
+    {
+      "id": "plenora-interop-vectors-v1",
+      "status": "not_applicable"
+    },
+    {
+      "id": "plenora-arrow-geometry-semantics-v1",
+      "status": "not_applicable"
+    },
+    {
+      "id": "plenora-rest-arrow-adapter-v1",
+      "status": "not_applicable"
     }
   ],
-  "deviations": []
+  "deviations": [
+    {
+      "rule": "RT-024",
+      "surface": "runtime",
+      "observed_behavior": "Response, file and pagination bounds yield resource_limit. Aggregate result materialization has no byte budget; allocation exhaustion may terminate the process instead of returning a typed error. Transport bounds belong to the host.",
+      "tracking": "docs/limiti.md: RT-024; re-entry: bounded aggregate serialization and host budget, with boundary tests.",
+      "detectable_before_invocation": false
+    }
+  ]
 }
