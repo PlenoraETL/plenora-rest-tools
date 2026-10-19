@@ -1127,3 +1127,54 @@ async fn runtime_pagination_limit_is_an_error_not_a_truncated_success() {
     assert_eq!(response.payload["code"], "PAGINATION_LIMIT_REACHED");
     assert!(response.payload.get("output").is_none());
 }
+
+#[tokio::test]
+async fn json_control_documents_reject_duplicate_members_before_dispatch() {
+    let engine = Engine::new(EngineConfig::default());
+    let binding = RuntimeBinding::new(&engine, &EmptyResources);
+    let clean = serde_json::to_string(&runtime_request("http://127.0.0.1/")).unwrap();
+    for document in [
+        clean.replace(
+            "\"plenora.capability.version\":\"1\"",
+            "\"plenora.capability.version\":\"secret\",\"plenora.capability.version\":\"1\"",
+        ),
+        clean.replace(
+            "\"params\":{}",
+            "\"params\":{\"x\":[{\"secret\":0,\"secret\":1}]}",
+        ),
+        clean
+            .replace("\"params\":{}", "\"params\":{\"secret\":0,\"secret\":1}")
+            .replace(
+                "\"plenora.capability.version\":\"1\"",
+                "\"plenora.capability.version\":null",
+            ),
+    ] {
+        assert_ne!(document, clean);
+        let error = binding
+            .invoke_json(&document, CancellationToken::new())
+            .await
+            .unwrap_err();
+        let EngineError::InvalidInput(detail) = error else {
+            panic!("wrong error")
+        };
+        assert_eq!(
+            detail.text(),
+            "control document contains duplicate JSON members"
+        );
+    }
+    assert!(
+        binding
+            .invoke_json(&clean, CancellationToken::new())
+            .await
+            .is_ok()
+    );
+    let execution = r#"{"schema_version":1,"operation":"test","connection":{"url":"http://127.0.0.1/"},"input":{"params":{"secret":1,"secret":2}}}"#;
+    let error = engine.execute_json(execution).await.unwrap_err();
+    let EngineError::InvalidInput(detail) = error else {
+        panic!("wrong error")
+    };
+    assert_eq!(
+        detail.text(),
+        "control document contains duplicate JSON members"
+    );
+}

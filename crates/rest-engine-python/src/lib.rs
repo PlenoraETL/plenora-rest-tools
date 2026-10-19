@@ -46,14 +46,7 @@ impl NativeEngine {
     #[new]
     #[pyo3(signature = (config_json=None))]
     fn new(config_json: Option<&str>) -> PyResult<Self> {
-        let config = match config_json {
-            Some(value) => serde_json::from_str::<EngineConfig>(value).map_err(|_| {
-                to_python_error(EngineError::InvalidInput(
-                    "engine configuration is not valid".into(),
-                ))
-            })?,
-            None => EngineConfig::default(),
-        };
+        let config = parse_config(config_json).map_err(to_python_error)?;
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
@@ -147,4 +140,32 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("SCHEMA_VERSION", plenora_rest_core::SCHEMA_VERSION)?;
     module.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
+}
+
+fn parse_config(config_json: Option<&str>) -> Result<EngineConfig, EngineError> {
+    let Some(value) = config_json else {
+        return Ok(EngineConfig::default());
+    };
+    plenora_rest_core::control_json::validate(value.as_bytes())
+        .map_err(|error| EngineError::InvalidInput(error.message.into()))?;
+    serde_json::from_str(value)
+        .map_err(|_| EngineError::InvalidInput("engine configuration is not valid".into()))
+}
+
+#[cfg(test)]
+mod duplicate_tests {
+    #[test]
+    fn native_config_rejects_duplicates() {
+        let result = super::parse_config(Some(
+            r#"{"allow_private_networks":false,"allow_private_networks":true}"#,
+        ));
+        let super::EngineError::InvalidInput(detail) = result.unwrap_err() else {
+            panic!("wrong error");
+        };
+        assert_eq!(
+            detail.text(),
+            "control document contains duplicate JSON members"
+        );
+        assert!(super::parse_config(Some("{}")).is_ok());
+    }
 }

@@ -179,12 +179,10 @@ where
         request_json: &str,
         cancellation: CancellationToken,
     ) -> Result<String, EngineError> {
-        // The envelope is read as a typed message first, so a duplicate
-        // member or an unknown one is refused exactly as before. Only a
-        // document that fails that because some metadata value is not a
-        // string is read again, with metadata of any JSON type, to answer it
-        // with a protocol refusal (RT-017): the metadata of the binding are
-        // strings, and a `null` or a number is neither absent nor valid.
+        // Check before either typed parsing or the metadata fallback can lose keys.
+        crate::control_json::validate(request_json.as_bytes()).map_err(|error| {
+            EngineError::InvalidInput(ErrorDetail::at(error.message, error.line, error.column))
+        })?;
         let typed = serde_json::from_str::<RuntimeMessage>(request_json);
         let response = match typed {
             Ok(request) => self.invoke(request, cancellation).await,

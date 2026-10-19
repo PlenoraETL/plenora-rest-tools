@@ -216,13 +216,10 @@ fn main() -> ExitCode {
     };
 
     if let Some(path) = &arguments.verify_only {
-        let report: Report = match std::fs::read_to_string(path)
-            .ok()
-            .and_then(|text| serde_json::from_str(&text).ok())
-        {
-            Some(report) => report,
-            None => {
-                eprintln!("errore: report non leggibile o non conforme");
+        let report: Report = match read_control_report(path) {
+            Ok(report) => report,
+            Err(message) => {
+                eprintln!("errore: {message}");
                 return ExitCode::from(2);
             }
         };
@@ -294,5 +291,29 @@ fn main() -> ExitCode {
             eprintln!("errore: {error}");
             ExitCode::from(3)
         }
+    }
+}
+
+fn read_control_report(path: &std::path::Path) -> Result<Report, &'static str> {
+    let text = std::fs::read_to_string(path).map_err(|_| "report non leggibile")?;
+    plenora_rest_core::control_json::validate(text.as_bytes()).map_err(|error| error.message)?;
+    serde_json::from_str(&text).map_err(|_| "report non conforme")
+}
+
+#[cfg(test)]
+mod duplicate_tests {
+    #[test]
+    fn report_rejects_duplicate_members() {
+        let path = std::env::temp_dir().join(format!(
+            "rest-report-duplicates-{}.json",
+            std::process::id()
+        ));
+        std::fs::write(&path, br#"{"nested":[{"secret":1,"secret":2}]}"#).unwrap();
+        let result = super::read_control_report(&path);
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(
+            result.unwrap_err(),
+            "control document contains duplicate JSON members"
+        );
     }
 }

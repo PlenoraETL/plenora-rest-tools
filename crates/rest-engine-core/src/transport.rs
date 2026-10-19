@@ -1533,6 +1533,9 @@ impl Transport {
             )));
         }
 
+        crate::control_json::validate(&response.body).map_err(|error| {
+            EngineError::Authentication(ErrorDetail::at(error.message, error.line, error.column))
+        })?;
         let payload: Value = serde_json::from_slice(&response.body).map_err(|_| {
             EngineError::Authentication(ErrorDetail::from("token endpoint returned invalid JSON"))
         })?;

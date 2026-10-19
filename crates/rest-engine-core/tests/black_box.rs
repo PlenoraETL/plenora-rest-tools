@@ -6171,3 +6171,32 @@ async fn a_first_page_served_from_the_cache_keeps_no_remote_effect() {
     assert_eq!(error["category"], "authorization", "{result}");
     assert_nothing_sent(error, "UNSAFE_ADDRESS", "read", &result);
 }
+
+#[tokio::test]
+async fn token_control_document_rejects_duplicate_members() {
+    for body in [
+        r#"{"access_token":"secret","access_token":"last","token_type":"Bearer"}"#,
+        r#"{"access_token":"last","extra":[{"secret":1,"secret":2}]}"#,
+    ] {
+        let (base_url, server, _) = recorded_server(vec![(200, body, vec![])]).await;
+        let result = execute(
+            &local_engine(),
+            json!({
+                "schema_version":1, "operation":"test",
+                "connection":{"url":format!("{base_url}resource"), "auth":{
+                    "type":"oauth2_client_credentials", "token_url":format!("{base_url}token"),
+                    "client_id":"client", "client_secret":"secret"
+                }}
+            }),
+        )
+        .await;
+        server.await.unwrap();
+        assert_eq!(result["status"], "failed");
+        assert!(
+            result
+                .to_string()
+                .contains("control document contains duplicate JSON members")
+        );
+        assert!(!result.to_string().contains("secret"));
+    }
+}

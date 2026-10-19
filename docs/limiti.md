@@ -170,3 +170,14 @@ deviazioni dai contratti comuni:
 - [Contratti](../contracts/README.md)
 - [Sviluppo e gate](development.md)
 - [Roadmap](roadmap.md)
+
+## Membri JSON duplicati nei documenti di controllo
+
+Gli ingressi JSON runtime, richieste e configurazioni CLI/Python, risposte di
+autenticazione e file di controllo della campagna rifiutano le chiavi duplicate
+ricorsivamente, anche dentro array, prima della deserializzazione in mappe.
+Lo SDK Python applica lo stesso controllo a capability, risultati e buste
+d'errore native. Il rifiuto usa testo statico senza chiavi o valori del documento.
+Le risposte dati REST mantengono il parser del formato selezionato.
+Il preflight Rust conserva il limite di ricorsione di serde_json e richiede
+un unico documento completo, senza costruire una seconda copia del payload.

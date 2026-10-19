@@ -695,3 +695,45 @@ fn an_interrupt_cancels_the_operation_with_exit_130() {
     assert_eq!(cancelled.document["error"]["remote_effect"], "unknown");
     std::fs::remove_dir_all(directory).unwrap();
 }
+
+#[test]
+fn control_inputs_reject_duplicate_members() {
+    let request = br#"{"schema_version":1,"operation":"test","connection":{"url":"http://127.0.0.1/"},"input":{"params":{"secret":1,"secret":2}}}"#;
+    let output = run(&["test", "--input", "-", "--format", "json"], Some(request));
+    let machine = machine_output(&output);
+    assert_eq!(machine.exit, 2);
+    assert!(
+        machine
+            .document
+            .to_string()
+            .contains("control document contains duplicate JSON members")
+    );
+    let path =
+        std::env::temp_dir().join(format!("rest-duplicate-config-{}.json", std::process::id()));
+    std::fs::write(
+        &path,
+        br#"{"allow_private_networks":false,"allow_private_networks":true}"#,
+    )
+    .unwrap();
+    let output = run(
+        &[
+            "test",
+            "--input",
+            "-",
+            "--config",
+            path.to_str().unwrap(),
+            "--format",
+            "json",
+        ],
+        Some(b"{}"),
+    );
+    std::fs::remove_file(path).unwrap();
+    let machine = machine_output(&output);
+    assert_eq!(machine.exit, 2);
+    assert!(
+        machine
+            .document
+            .to_string()
+            .contains("control document contains duplicate JSON members")
+    );
+}
