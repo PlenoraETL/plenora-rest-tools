@@ -37,7 +37,9 @@ RUN test -f /tmp/msrv-ok \
         scripts/validate_contracts.py \
     && /opt/verify/bin/python scripts/release.py current-version \
     && /opt/verify/bin/python scripts/validate_contracts.py \
-    && /opt/verify/bin/python -m unittest discover -s scripts -p test_validate_contracts.py
+    && /opt/verify/bin/python -m unittest discover -s scripts \
+    && /opt/verify/bin/python scripts/check_comments.py \
+    && /opt/verify/bin/python scripts/check_docs.py
 RUN cargo fmt --all -- --check
 RUN cargo clippy --workspace --all-targets --locked -- -D warnings
 # Library and binary code must not be able to panic: no unwrap, expect or panic, no

@@ -167,7 +167,7 @@ message e details non sensibili. Un job asincrono interrotto puÃ² restituire u
 recovery handle contenente il solo identificativo pubblico necessario al
 resume.
 
-## CompatibilitÃ 
+## Compatibilità
 
 La politica v1 Ã¨ intenzionalmente rigida:
 

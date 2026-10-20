@@ -161,7 +161,7 @@ deviazioni dai contratti comuni:
 
 | Regola | Ambito | Rischio | Rientro |
 | --- | --- | --- | --- |
-| superficie Rust v1 congelata (`contracts/compatibility-v1.json`) | 0.3.0: EngineError con campi testuali opachi; sessioni cookie (`CookieSession`, `open_cookie_session`, `close_cookie_session`) | un consumatore Rust 0.2.x non compila senza modifiche | cambio unico deciso per la 0.3.0, vedi [contratti](../contracts/README.md#compatibilitÃ ); le prossime modifiche incompatibili richiedono contratti v2 |
+| superficie Rust v1 congelata (`contracts/compatibility-v1.json`) | 0.3.0: EngineError con campi testuali opachi; sessioni cookie (`CookieSession`, `open_cookie_session`, `close_cookie_session`) | un consumatore Rust 0.2.x non compila senza modifiche | cambio unico deciso per la 0.3.0, vedi [contratti](../contracts/README.md#compatibilità); le prossime modifiche incompatibili richiedono contratti v2 |
 | null e valori assenti | fino a 0.2.2 un parametro fixed con value null veniva omesso | un consumatore che contava sull'omissione invia ora null | chiuso in 0.3.0, vedi [architettura](architecture.md#null-e-valori-assenti) |
 
 ## Riferimenti

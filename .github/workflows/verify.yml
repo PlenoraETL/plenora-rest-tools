@@ -70,6 +70,15 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Comment quality
+        run: python scripts/check_comments.py
+
+      - name: Documentation quality
+        run: python scripts/check_docs.py
+
+      - name: Comment and documentation gate tests
+        run: python -m unittest discover -s scripts -p "test_check_*.py"
+
       - name: Build the abi3 wheel
         shell: pwsh
         run: |
