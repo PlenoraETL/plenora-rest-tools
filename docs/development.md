@@ -92,7 +92,7 @@ sulle parole chiave e sui pattern che conosce, invece di una dipendenza
 jsonschema che porterebbe decine di crate in Cargo.lock per tre schemi di
 test.
 
-## Fuzz e test di proprietÃ 
+## Fuzz e test di proprietà
 
 I parser dell'input remoto non fidato (corpo della risposta JSON, NDJSON,
 CSV, XML, testo e binario; percorsi JSON; header Link, Retry-After,
@@ -371,6 +371,25 @@ Ogni modifica documentale deve mantenere:
 - link relativi risolvibili;
 - esempi coerenti con l'API pubblica;
 - nessun riferimento a file o comandi rimossi.
+
+I gate oggettivi dei commenti e della documentazione girano nel gate Docker
+e nel job Windows di Verify. Si possono eseguire anche senza Rust o la wheel:
+
+~~~powershell
+python scripts/check_comments.py
+python scripts/check_docs.py
+python -m unittest discover -s scripts
+~~~
+
+Il gate commenti rifiuta i marker di debito anonimo e la cronaca di sviluppo
+nei sorgenti Rust/Python, negli script e nelle configurazioni CI. Mantiene
+fuori dal perimetro dipendenze vendorizzate, contratti e artefatti generati.
+Il gate documentazione controlla i Markdown del repository (incluse eventuali
+guide sotto `python/`), link e ancore locali, script Python citati, sintassi
+degli esempi Python e nomi SDK rispetto a `python/plenora_rest/__init__.py`.
+Le copie sotto `contracts/upstream/` restano al validatore dei contratti.
+La suite completa degli script richiede jsonschema nella versione fissata in
+`Dockerfile.verify`.
 
 ## Riferimenti
 

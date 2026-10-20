@@ -3,8 +3,8 @@
 //! Ogni scenario costruisce una richiesta del contratto v1, la esegue con
 //! l'API pubblica del motore e confronta il risultato con l'esito atteso e con
 //! i contatori del server. Ogni scostamento è una [`Violation`] con un
-//! criterio della roadmap; un'osservazione senza violazioni è un esito
-//! atteso, anche quando l'esito atteso è un errore (i guasti iniettati).
+//! criterio di accettazione della campagna; un'osservazione senza violazioni
+//! è un esito atteso, anche quando l'esito atteso è un errore (i guasti iniettati).
 //!
 //! I dettagli delle violazioni sono testi statici: nessun valore di risposta,
 //! percorso o segreto finisce nel report.
@@ -105,7 +105,7 @@ scenarios! {
     EngineChurn => "engine_churn",
 }
 
-/// Criteri della roadmap a cui si riferisce una violazione.
+/// Criteri di accettazione della campagna a cui si riferisce una violazione.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum Criterion {
