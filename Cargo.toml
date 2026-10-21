@@ -34,7 +34,7 @@ unsafe_code = "forbid"
 # workflow sees the same graph the tests ran on. Transitive dependencies are
 # fixed by Cargo.lock, which every gate uses with --locked.
 #
-base64 = "=0.22.1"
+base64 = "=0.23.1"
 csv = "=1.4.0"
 futures-util = "=0.3.34"
 # 128-bit random values for cookie session handles straight from the system
@@ -58,7 +58,7 @@ serde = { version = "=1.0.229", features = ["derive"] }
 # from a remote response could change value without an error. Exact numeric
 # conversion is a policy, not an option; the cost is slower float parsing.
 serde_json = { version = "=1.0.151", features = ["float_roundtrip"] }
-sha2 = "=0.10.9"
+sha2 = "=0.11.0"
 # RFC 3339 deadlines. 0.3.55 is the current release; every release from
 # 0.3.47 fixes RUSTSEC-2026-0009 (stack exhaustion in the RFC 2822 parser),
 # which 0.3.45 forced deny.toml to exempt while the MSRV was 1.85.1. Its
@@ -67,4 +67,4 @@ time = { version = "=0.3.55", features = ["parsing"] }
 tokio = { version = "=1.53.1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 tokio-util = { version = "=0.7.19", features = ["io", "rt"] }
 url = "=2.5.8"
-uuid = { version = "=1.24.1", features = ["v4"] }
+uuid = { version = "=1.26.1", features = ["v4"] }

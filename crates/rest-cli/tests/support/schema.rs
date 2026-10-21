@@ -54,7 +54,10 @@ impl Registry {
         for (name, source, expected) in SCHEMAS {
             let document: Value = serde_json::from_str(source).unwrap();
             let canonical = serde_json::to_string(&document).unwrap();
-            let digest = format!("{:x}", Sha256::digest(canonical.as_bytes()));
+            let digest = Sha256::digest(canonical.as_bytes())
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
             assert_eq!(
                 digest, expected,
                 "{name} differs from plenora-contracts v1.1.0"

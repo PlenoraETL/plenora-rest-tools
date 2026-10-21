@@ -2435,7 +2435,11 @@ async fn hash_file(path: &Path, limit: u64) -> Result<String, EngineError> {
         digest.update(chunk);
         total = total.saturating_add(read);
     }
-    Ok(format!("{:x}", digest.finalize()))
+    Ok(digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>())
 }
 
 fn validate_multipart_name(value: &str) -> Result<(), EngineError> {
@@ -4773,7 +4777,10 @@ fn execution_fingerprint(request: &ExecutionRequest) -> Result<String, EngineErr
             "request could not be serialized for its fingerprint",
         ))
     })?;
-    Ok(format!("{:x}", Sha256::digest(bytes)))
+    Ok(Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>())
 }
 
 fn scoped_execution_options(
@@ -4787,7 +4794,14 @@ fn scoped_execution_options(
         digest.update(key.as_bytes());
         digest.update(b"\0");
         digest.update(index.to_string().as_bytes());
-        format!("plenora-{:x}", digest.finalize())
+        format!(
+            "plenora-{}",
+            digest
+                .finalize()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        )
     });
     scoped
 }
@@ -4864,6 +4878,22 @@ mod tests {
         resolve_parameters, selected_response_headers,
     };
     use crate::{ConnectionConfig, OutputMapping, ParameterLocation, ParameterMode, ParameterSpec};
+
+    #[test]
+    fn scoped_idempotency_digest_keeps_its_lowercase_zero_padded_encoding() {
+        let options = crate::ExecutionOptions {
+            idempotency_key: Some("key".to_owned()),
+            ..Default::default()
+        };
+        // Independent SHA-256 vector for the domain, key and index, including
+        // both NUL separators. The expected bytes are not computed by sha2.
+        assert_eq!(
+            super::scoped_execution_options(&options, 7)
+                .idempotency_key
+                .as_deref(),
+            Some("plenora-df7c0788629c00c65922b16471036a7697997de97e79e1193460292603959a7b")
+        );
+    }
 
     #[test]
     fn renders_url_parameters_and_tracks_consumed_keys() {
