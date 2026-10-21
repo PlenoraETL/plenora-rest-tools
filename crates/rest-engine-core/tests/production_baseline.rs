@@ -290,7 +290,10 @@ fn transfer_directory(label: &str) -> PathBuf {
 }
 
 fn sha256(value: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(value))
+    Sha256::digest(value)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>()
 }
 
 async fn assert_no_partial_files(directory: &Path) {

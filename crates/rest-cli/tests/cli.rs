@@ -358,7 +358,10 @@ fn download_writes_inside_the_configured_file_root() {
     let root = directory.join("root");
     std::fs::create_dir_all(&root).unwrap();
     let body = b"downloaded bytes".to_vec();
-    let digest = format!("{:x}", Sha256::digest(&body));
+    let digest = Sha256::digest(&body)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
     let (url, server) = serve_once(200, body.clone());
     let request = write_json(
         &directory,

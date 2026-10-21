@@ -1919,7 +1919,13 @@ impl Transport {
         file.sync_all().await.map_err(download_write_io)?;
         drop(state.file.take());
 
-        let sha256 = format!("{:x}", state.digest.clone().finalize());
+        let sha256 = state
+            .digest
+            .clone()
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
         if let Some(expected) = &target.expected_sha256
             && !sha256.eq_ignore_ascii_case(expected)
         {
