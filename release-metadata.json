@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "version": "0.3.0",
+  "version": "0.3.1",
   "source_date_epoch": 1791158400,
   "builders": {
     "manylinux": "ghcr.io/pyo3/maturin@sha256:2665227312dd1eab1c29c70a001dc8aac53155a2d048bede3b2df7f1691c8e38",

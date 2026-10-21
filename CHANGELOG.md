@@ -4,7 +4,13 @@ Le modifiche che cambiano il comportamento osservabile, l'API pubblica o la
 politica delle dipendenze. La versione dei manifest resta quella dell'ultima
 release finché una release non viene preparata.
 
-## Unreleased
+## 0.3.1 — non pubblicata
+
+Patch: correzioni di conformità ai contratti, adozione di Public Catalogs
+2.0 con catalogo e profilo REST v1 invariati, dipendenze allineate alla
+famiglia. Nessun cambiamento delle operazioni pubbliche né del wire (v1).
+
+### Contratti: Public Catalogs 2.0 (#38)
 
 - Adozione locale di plenora-contracts 3aec9f7: Public Catalogs 2.0 sul
   catalogo/profilo REST v1 invariato, Runtime Binding 2.0 in discovery con wire
@@ -15,6 +21,20 @@ release finché una release non viene preparata.
 - Gate contratti: diagnostica statica senza dati, regressioni con sentinella,
   controllo del registro e jsonschema 4.26.0 nel gate Docker.
 
+### Dipendenze
+
+- Pin di famiglia (#41): `base64` 0.23.1, `uuid` 1.26.1, `sha2` 0.11.0
+  con 12 casi differenziali contro la 0.10 sulle impronte prodotte;
+  `reqwest` e `quick-xml` restano alla serie attuale come divergenza
+  dichiarata (l'aggiornamento cambia comportamento osservabile e si fa
+  da solo, non in un allineamento).
+- Advisory webpki (#40): `rustls-webpki` 0.103.16 (RUSTSEC-2026-0382) e
+  `webpki-roots` 1.0.10 (RUSTSEC-2026-0381), lock del fuzz compreso.
+- `rustls` 0.23.46 (#37).
+
+### Qualità
+
+- Gate dei commenti e dei documenti allineati alla famiglia (#39).
 
 ### Contratti: plenora-contracts v1.1.0
 
