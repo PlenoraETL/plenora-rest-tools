@@ -4,7 +4,7 @@ Le modifiche che cambiano il comportamento osservabile, l'API pubblica o la
 politica delle dipendenze. La versione dei manifest resta quella dell'ultima
 release finché una release non viene preparata.
 
-## 0.3.1 — non pubblicata
+## 0.3.1 (2026-10-22)
 
 Patch: correzioni di conformità ai contratti, adozione di Public Catalogs
 2.0 con catalogo e profilo REST v1 invariati, dipendenze allineate alla
