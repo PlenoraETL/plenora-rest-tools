@@ -64,7 +64,7 @@ sha2 = "=0.11.0"
 # which 0.3.45 forced deny.toml to exempt while the MSRV was 1.85.1. Its
 # rust-version, 1.88.0, is within the MSRV 1.98.
 time = { version = "=0.3.55", features = ["parsing"] }
-tokio = { version = "=1.53.1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "=1.53.3", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 tokio-util = { version = "=0.7.19", features = ["io", "rt"] }
 url = "=2.5.8"
 uuid = { version = "=1.26.1", features = ["v4"] }
