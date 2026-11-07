@@ -285,6 +285,14 @@ forme vietate lascerebbe passare.
 
 ## Sicurezza
 
+Il client HTTPS usa una configurazione rustls propria con provider ring
+esplicito, indipendente dal provider globale dell'host. Le radici sono quelle
+Mozilla di webpki-roots, integrate dalle CA della richiesta; non viene
+consultato il trust store di sistema. La dipendenza transitiva
+rustls-platform-verifier non è usata da questo percorso. TLS 1.2 e 1.3,
+ALPN HTTP/2 e HTTP/1.1, identità client PEM e disabilitazione esplicita della
+verifica mantengono la policy del trasporto.
+
 EngineConfig blocca per default reti private, file transfer, proxy, cookie
 persistenti e opzioni di trasporto pericolose. I metodi custom richiedono una
 allowlist.

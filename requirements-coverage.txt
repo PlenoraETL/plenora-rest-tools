@@ -2,4 +2,4 @@
 # strumento dei gate. cargo-llvm-cov e llvm-tools-preview sono fissati nel
 # workflow stesso.
 coverage==7.16.1
-maturin==1.14.1
+maturin==1.16.0

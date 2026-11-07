@@ -12,7 +12,7 @@ use std::{
 use crate::error::ErrorDetail;
 use futures_util::StreamExt;
 use reqwest::{
-    Body, Certificate, Client, Identity, Method, Proxy, Url,
+    Body, Client, Method, Proxy, Url,
     cookie::{CookieStore, Jar},
     header::{
         ACCEPT_ENCODING, CACHE_CONTROL, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, ETAG,
@@ -2032,6 +2032,7 @@ impl Transport {
         }
 
         let mut builder = Client::builder()
+            .tls_backend_preconfigured(crate::tls::client_config(tls)?)
             .connect_timeout(Duration::from_millis(self.config.connect_timeout_ms))
             .pool_idle_timeout(Duration::from_millis(self.config.pool_idle_timeout_ms))
             .pool_max_idle_per_host(self.config.pool_max_idle_per_host)
@@ -2043,21 +2044,6 @@ impl Transport {
         }
         if !self.config.automatic_decompression {
             builder = builder.no_brotli().no_deflate().no_gzip().no_zstd();
-        }
-        if !tls.verify {
-            builder = builder.danger_accept_invalid_certs(true);
-        }
-        if let Some(pem) = &tls.ca_bundle_pem {
-            let certificate = Certificate::from_pem(pem.as_bytes()).map_err(|_| {
-                EngineError::InvalidInput(ErrorDetail::from("invalid TLS CA bundle PEM"))
-            })?;
-            builder = builder.add_root_certificate(certificate);
-        }
-        if let Some(pem) = &tls.client_identity_pem {
-            let identity = Identity::from_pem(pem.as_bytes()).map_err(|_| {
-                EngineError::InvalidInput(ErrorDetail::from("invalid TLS client identity PEM"))
-            })?;
-            builder = builder.identity(identity);
         }
         if should_pin {
             builder = builder.resolve(&host, SocketAddr::new(address, port));

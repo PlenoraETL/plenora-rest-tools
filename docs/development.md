@@ -156,7 +156,7 @@ la campagna finale di staging descritta nella roadmap.
 Il workflow Verify esegue lo stesso script su pull request, push a main e
 avvio manuale. Nello stesso workflow il job Windows esegue rustfmt, Clippy con
 `-D warnings`, il Clippy anti-panic, `cargo test --workspace --locked` e
-rustdoc con il compilatore di rust-toolchain.toml, costruisce la wheel abi3 win_amd64 con maturin 1.14.1 e la
+rustdoc con il compilatore di rust-toolchain.toml, costruisce la wheel abi3 win_amd64 con maturin 1.16.0 e la
 prova installata su CPython 3.10-3.14 con scripts/test_wheel.ps1, che esegue
 python/tests da fuori del checkout.
 

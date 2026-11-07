@@ -28,6 +28,7 @@ mod json_path;
 mod property_tests;
 mod response_body;
 mod runtime;
+mod tls;
 mod transport;
 
 pub use capability::{

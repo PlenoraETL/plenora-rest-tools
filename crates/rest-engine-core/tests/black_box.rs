@@ -18,6 +18,63 @@ use tokio::{
 };
 
 #[tokio::test]
+async fn explicit_proxy_preserves_form_encoding_and_proxy_authentication() {
+    let (proxy, server, observed) = recorded_server(vec![(200, r#"{"ok":true}"#, vec![])]).await;
+    let engine = Engine::new(EngineConfig {
+        allow_private_networks: true,
+        allow_proxies: true,
+        ..EngineConfig::default()
+    });
+    let result = execute(&engine, json!({
+        "schema_version": 1,
+        "operation": "test",
+        "connection": {
+            "url": "http://127.0.0.1:9/form",
+            "method": "POST",
+            "proxy": {"url": proxy, "username": "test", "password": "test"},
+            "request": {"body_type": "form_urlencoded"},
+            "parameters": [{"name": "value", "mode": "fixed", "value": "a b&c", "location": "body"}]
+        }
+    })).await;
+    assert_eq!(result["status"], "success", "{result}");
+    server.await.unwrap();
+    let observed = observed.lock().unwrap();
+    let request = &observed[0];
+    assert!(request.starts_with("POST http://127.0.0.1:9/form HTTP/1.1"));
+    assert!(request.contains("proxy-authorization: Basic dGVzdDp0ZXN0"));
+    assert!(
+        request
+            .to_ascii_lowercase()
+            .contains("content-type: application/x-www-form-urlencoded")
+    );
+    assert!(request.ends_with("value=a+b%26c"));
+}
+
+#[tokio::test]
+async fn response_timeout_remains_a_static_engine_error() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/PRIVATE_CANARY", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        read_request(&mut stream).await;
+        tokio::time::sleep(Duration::from_secs(10)).await;
+    });
+    let result = execute(
+        &local_engine(),
+        json!({
+            "schema_version": 1,
+            "operation": "test",
+            "connection": {"url": url, "method": "GET", "request": {"timeout_ms": 100}}
+        }),
+    )
+    .await;
+    server.abort();
+    assert_eq!(result["status"], "failed");
+    assert_eq!(result["errors"][0]["code"], "TIMEOUT");
+    assert!(!result["errors"].to_string().contains("PRIVATE_CANARY"));
+}
+
+#[tokio::test]
 async fn blocks_loopback_by_default() {
     let request = json!({
         "schema_version": 1,

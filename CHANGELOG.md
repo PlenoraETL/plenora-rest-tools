@@ -4,6 +4,26 @@ Le modifiche che cambiano il comportamento osservabile, l'API pubblica o la
 politica delle dipendenze. La versione dei manifest resta quella dell'ultima
 release finché una release non viene preparata.
 
+## 0.3.2 (non rilasciata)
+
+### Dipendenze e trasporto TLS
+
+- Allineamento di famiglia: reqwest 0.13.5, serde_json 1.0.154 con
+  `float_roundtrip`, thiserror/thiserror-impl 2.0.21, tokio-rustls 0.26.5,
+  hyper 1.11.1 e h2 0.4.19 nei lock del workspace e del fuzz. Tokio resta
+  1.53.3, PyO3 0.29.2 e la toolchain Rust 1.98.1.
+- Maturin 1.16.0 nei gate, nel build system e nell'immagine di packaging
+  fissata per digest. La versione dei manifest resta 0.3.1 fino alla release.
+- TLS configurato per client con rustls e ring espliciti; rest conserva le
+  radici Mozilla di webpki-roots 1.0.10, le CA aggiuntive, le identità client
+  e la policy `verify=false`. Il provider globale eventualmente installato
+  dall'host non cambia più quello usato da rest. Il platform verifier,
+  transitivo di reqwest, non viene usato dal client del motore.
+- Feature `query` e `form` esplicite. Restano invariati redirect gestiti dal
+  motore, cookie, proxy espliciti, decompressione e limiti di timeout.
+  La classificazione upstream riconosce anche timeout reqwest annidati:
+  questi diventano `TIMEOUT`, senza esporre messaggi o dati remoti.
+
 ## 0.3.1 (2026-10-22)
 
 Patch: correzioni di conformità ai contratti, adozione di Public Catalogs

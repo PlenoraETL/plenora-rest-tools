@@ -51,7 +51,7 @@ jobs:
         shell: pwsh
         run: |
           $env:SOURCE_DATE_EPOCH = (python scripts/release.py source-date-epoch).Trim()
-          python -m pip install --disable-pip-version-check --no-cache-dir "maturin==1.14.1"
+          python -m pip install --disable-pip-version-check --no-cache-dir "maturin==1.16.0"
           python -m maturin build --release --locked --strip --out windows-wheel
           if ($LASTEXITCODE -ne 0) { throw "maturin build failed" }
 
