@@ -145,6 +145,35 @@ impl ServerCertVerifier for NoVerification {
 mod tests {
     use super::*;
 
+    // Certificato pubblico della CA di prova (nessuna chiave): resta nel
+    // pacchetto perche' il test sotto verifica che una CA si aggiunga alle radici.
+    const CA_PUBBLICA: &str = "-----BEGIN CERTIFICATE-----
+MIIBMTCB2KADAgECAgEBMAoGCCqGSM49BAMCMBcxFTATBgNVBAMMDFJFU1QgdGVz
+dCBDQTAgFw0yMDAxMDEwMDAwMDBaGA8yMTIwMDEwMTAwMDAwMFowFzEVMBMGA1UE
+AwwMUkVTVCB0ZXN0IENBMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAETmwNCgAY
+9LU7Cn75T7zqEA55Sc59nbnlnXAspSY059CmfxCLr3uBw0+ivtcP/KchXg7b4pCh
+Un8PhJHQ5gUwx6MTMBEwDwYDVR0TAQH/BAUwAwEB/zAKBggqhkjOPQQDAgNIADBF
+AiEAnzfH9rZ74LXFrDcI3gPTCUCMuIfuzn6rbFW4ZMFhjo8CIEbDyi5aXybhpRzf
+88CblJcjrvKCRN9ImUHCczf5lQzF
+-----END CERTIFICATE-----
+";
+
+    #[test]
+    fn una_ca_personalizzata_si_aggiunge_alle_radici_mozilla() {
+        let trusted = TlsConfig {
+            ca_bundle_pem: Some(CA_PUBBLICA.into()),
+            ..TlsConfig::default()
+        };
+        assert_eq!(
+            roots(&trusted).unwrap().len(),
+            webpki_roots::TLS_SERVER_ROOTS.len() + 1
+        );
+        assert_eq!(
+            roots(&TlsConfig::default()).unwrap().len(),
+            webpki_roots::TLS_SERVER_ROOTS.len()
+        );
+    }
+
     #[test]
     fn provider_roots_and_protocols_are_explicit() {
         let policy = TlsConfig::default();
