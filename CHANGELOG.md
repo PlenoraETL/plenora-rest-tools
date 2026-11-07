@@ -21,8 +21,13 @@ release finché una release non viene preparata.
   transitivo di reqwest, non viene usato dal client del motore.
 - Feature `query` e `form` esplicite. Restano invariati redirect gestiti dal
   motore, cookie, proxy espliciti, decompressione e limiti di timeout.
-  La classificazione upstream riconosce anche timeout reqwest annidati:
-  questi diventano `TIMEOUT`, senza esporre messaggi o dati remoti.
+  Verificato anche il timeout durante la decodifica di un corpo gzip
+  incompleto, dopo la ricezione degli header: `TIMEOUT`, categoria `timeout`,
+  fase `read`, con messaggio statico. Lo stesso caso passa con reqwest
+  0.12.28: non costituisce un cambiamento osservabile introdotto da 0.13.5.
+- I pacchetti Cargo escludono sorgenti e fixture di test. Un gate verifica
+  tutti i crate del workspace e blocca fixture o chiavi private PEM nei
+  contenuti elencati da Cargo, anche durante la build di release.
 
 ## 0.3.1 (2026-10-22)
 

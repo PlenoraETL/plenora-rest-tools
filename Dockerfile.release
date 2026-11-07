@@ -37,6 +37,7 @@ RUN find . -type d -exec chmod 0755 {} + \
 
 RUN test -n "${SOURCE_DATE_EPOCH}" \
     && case "${SOURCE_DATE_EPOCH}" in *[!0-9]*) exit 1 ;; esac \
+    && python3 scripts/check_packages.py \
     && cargo package --package plenora-rest-core --locked --allow-dirty --no-verify \
     && mkdir -p /tmp/release-artifacts /tmp/wheels \
     && cp /tmp/cargo-target/package/plenora-rest-core-*.crate /tmp/release-artifacts/ \

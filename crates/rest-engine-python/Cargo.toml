@@ -1,4 +1,6 @@
 [package]
+# Test sources and fixtures are repository-only, never release contents.
+exclude = ["/tests/**"]
 name = "plenora-rest-python"
 version.workspace = true
 edition.workspace = true

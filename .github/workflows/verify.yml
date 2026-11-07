@@ -73,6 +73,9 @@ jobs:
       - name: Comment quality
         run: python scripts/check_comments.py
 
+      - name: Cargo package contents
+        run: python scripts/check_packages.py
+
       - name: Documentation quality
         run: python scripts/check_docs.py
 

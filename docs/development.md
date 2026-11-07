@@ -378,6 +378,7 @@ e nel job Windows di Verify. Si possono eseguire anche senza Rust o la wheel:
 ~~~powershell
 python scripts/check_comments.py
 python scripts/check_docs.py
+python scripts/check_packages.py
 python -m unittest discover -s scripts
 ~~~
 
