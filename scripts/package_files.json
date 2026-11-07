@@ -1,0 +1,80 @@
+{
+  "plenora-rest-core": {
+    "files": [
+      "Cargo.lock",
+      "Cargo.toml",
+      "Cargo.toml.orig",
+      "LICENSE",
+      "src/capability.rs",
+      "src/contract.rs",
+      "src/control.rs",
+      "src/control_json.rs",
+      "src/engine.rs",
+      "src/error.rs",
+      "src/exact.rs",
+      "src/fuzzing.rs",
+      "src/json_path.rs",
+      "src/lib.rs",
+      "src/property_tests.rs",
+      "src/response_body.rs",
+      "src/runtime.rs",
+      "src/tls.rs",
+      "src/transport.rs"
+    ],
+    "vcs_files": [
+      ".cargo_vcs_info.json"
+    ]
+  },
+  "plenora-rest-cli": {
+    "files": [
+      "Cargo.lock",
+      "Cargo.toml",
+      "Cargo.toml.orig",
+      "LICENSE",
+      "src/args.rs",
+      "src/commands.rs",
+      "src/envelope.rs",
+      "src/main.rs",
+      "src/signal.rs"
+    ],
+    "vcs_files": [
+      ".cargo_vcs_info.json"
+    ]
+  },
+  "plenora-rest-python": {
+    "files": [
+      "Cargo.lock",
+      "Cargo.toml",
+      "Cargo.toml.orig",
+      "LICENSE",
+      "src/lib.rs"
+    ],
+    "vcs_files": [
+      ".cargo_vcs_info.json"
+    ]
+  },
+  "plenora-rest-campaign": {
+    "files": [
+      "Cargo.lock",
+      "Cargo.toml",
+      "Cargo.toml.orig",
+      "LICENSE",
+      "src/config.rs",
+      "src/driver.rs",
+      "src/http.rs",
+      "src/lib.rs",
+      "src/main.rs",
+      "src/report.rs",
+      "src/resources.rs",
+      "src/rng.rs",
+      "src/scenarios.rs",
+      "src/server.rs",
+      "src/stats.rs",
+      "src/timefmt.rs",
+      "src/verify.rs"
+    ],
+    "vcs_files": [
+      ".cargo_vcs_info.json"
+    ]
+  }
+}

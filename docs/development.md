@@ -408,3 +408,19 @@ ed è inclusa nel gate Docker. I test `runtime_binding`, `runtime_vectors`,
 `public_surface` e quelli CLI verificano discovery e comportamento pubblico.
 Il repository non dichiara un budget di dimensione del codice; il budget di
 coverage è distinto e resta invariato.
+
+### Contenuto dei pacchetti Cargo
+
+`scripts/package_files.json` dichiara i singoli file ammessi per ogni crate
+del workspace, inclusi manifest, lockfile e metadati generati da Cargo.
+`scripts/check_packages.py` confronta `cargo package --list` con questo insieme:
+qualsiasi file aggiunto o mancante richiede un aggiornamento esplicito del registro.
+Il campo `vcs_files` dichiara separatamente i metadati presenti solo nei checkout
+Git; il contesto Docker esclude `.git` e usa esattamente il solo insieme `files`.
+I pacchetti ammettono solo testo UTF-8 senza controlli binari (eccetto tab e fine
+riga): anche contenitori PKCS#12 e chiavi DER rinominati vengono rifiutati.
+I marcatori PEM di chiavi private sono vietati anche nei file autorizzati.
+Il core, unico artifact `.crate` della release, viene inoltre impacchettato e
+controllato sui byte effettivi dell'archivio, inclusi i file generati da Cargo.
+Le prove TLS con fixture restano in `crates/rest-engine-core/tests/tls.rs`;
+i test unitari del core distribuito non richiedono le fixture del repository.
