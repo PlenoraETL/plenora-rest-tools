@@ -18,6 +18,133 @@ use tokio::{
 };
 
 #[tokio::test]
+async fn explicit_proxy_preserves_form_encoding_and_proxy_authentication() {
+    let (proxy, server, observed) = recorded_server(vec![(200, r#"{"ok":true}"#, vec![])]).await;
+    let engine = Engine::new(EngineConfig {
+        allow_private_networks: true,
+        allow_proxies: true,
+        ..EngineConfig::default()
+    });
+    let result = execute(&engine, json!({
+        "schema_version": 1,
+        "operation": "test",
+        "connection": {
+            "url": "http://127.0.0.1:9/form",
+            "method": "POST",
+            "proxy": {"url": proxy, "username": "test", "password": "test"},
+            "request": {"body_type": "form_urlencoded"},
+            "parameters": [{"name": "value", "mode": "fixed", "value": "a b&c", "location": "body"}]
+        }
+    })).await;
+    assert_eq!(result["status"], "success", "{result}");
+    server.await.unwrap();
+    let observed = observed.lock().unwrap();
+    let request = &observed[0];
+    assert!(request.starts_with("POST http://127.0.0.1:9/form HTTP/1.1"));
+    assert!(request.contains("proxy-authorization: Basic dGVzdDp0ZXN0"));
+    assert!(
+        request
+            .to_ascii_lowercase()
+            .contains("content-type: application/x-www-form-urlencoded")
+    );
+    assert!(request.ends_with("value=a+b%26c"));
+}
+
+#[tokio::test]
+async fn response_timeout_remains_a_static_engine_error() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/PRIVATE_CANARY", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        read_request(&mut stream).await;
+        tokio::time::sleep(Duration::from_secs(10)).await;
+    });
+    let result = execute(
+        &local_engine(),
+        json!({
+            "schema_version": 1,
+            "operation": "test",
+            "connection": {"url": url, "method": "GET", "request": {"timeout_ms": 100}}
+        }),
+    )
+    .await;
+    server.abort();
+    assert_eq!(result["status"], "failed");
+    assert_eq!(result["errors"][0]["code"], "TIMEOUT");
+    assert!(!result["errors"].to_string().contains("PRIVATE_CANARY"));
+}
+
+#[tokio::test]
+async fn gzip_body_timeout_is_classified_after_headers() {
+    let (url, server) = stalled_gzip_server().await;
+    let result = execute(
+        &local_engine(),
+        json!({
+            "schema_version": 1,
+            "operation": "test",
+            "connection": {"url": url, "method": "GET", "request": {"timeout_ms": 500}}
+        }),
+    )
+    .await;
+    server.abort();
+    assert_eq!(result["status"], "failed", "{result}");
+    let error = &result["errors"][0];
+    assert_eq!(error["code"], "TIMEOUT", "{result}");
+    assert_eq!(error["category"], "timeout", "{result}");
+    assert_eq!(error["phase"], "read", "{result}");
+    assert_eq!(error["message"], "REST execution timed out", "{result}");
+    assert!(!error.to_string().contains("PRIVATE_CANARY"));
+}
+
+#[tokio::test]
+async fn gzip_body_timeout_reaches_reqwest_decode_after_send_succeeds() {
+    let (url, server) = stalled_gzip_server().await;
+    let tls = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .unwrap()
+    .with_root_certificates(rustls::RootCertStore::empty())
+    .with_no_client_auth();
+    let response = reqwest::Client::builder()
+        .tls_backend_preconfigured(tls)
+        .no_proxy()
+        .timeout(Duration::from_millis(500))
+        .build()
+        .unwrap()
+        .get(url)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let error = response.bytes().await.unwrap_err();
+    server.abort();
+    assert!(error.is_decode(), "{error:?}");
+    assert!(error.is_timeout(), "{error:?}");
+}
+
+async fn stalled_gzip_server() -> (String, JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/PRIVATE_CANARY", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        read_request(&mut stream).await;
+        stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Encoding: gzip\r\nContent-Length: 31\r\nConnection: close\r\n\r\n").await.unwrap();
+        // Valid gzip header and a partial deflate block: decoding must wait
+        // for the remaining compressed bytes, not fail on malformed input.
+        stream
+            .write_all(&[31, 139, 8, 0, 0, 0, 0, 0, 2, 255, 171, 86])
+            .await
+            .unwrap();
+        stream.flush().await.unwrap();
+        // Keep the connection open until the client times out and drops it.
+        let mut end = [0; 1];
+        let _ = stream.read(&mut end).await;
+    });
+    (url, server)
+}
+
+#[tokio::test]
 async fn blocks_loopback_by_default() {
     let request = json!({
         "schema_version": 1,

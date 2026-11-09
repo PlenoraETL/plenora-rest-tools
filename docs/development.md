@@ -156,7 +156,7 @@ la campagna finale di staging descritta nella roadmap.
 Il workflow Verify esegue lo stesso script su pull request, push a main e
 avvio manuale. Nello stesso workflow il job Windows esegue rustfmt, Clippy con
 `-D warnings`, il Clippy anti-panic, `cargo test --workspace --locked` e
-rustdoc con il compilatore di rust-toolchain.toml, costruisce la wheel abi3 win_amd64 con maturin 1.14.1 e la
+rustdoc con il compilatore di rust-toolchain.toml, costruisce la wheel abi3 win_amd64 con maturin 1.16.0 e la
 prova installata su CPython 3.10-3.14 con scripts/test_wheel.ps1, che esegue
 python/tests da fuori del checkout.
 
@@ -378,6 +378,7 @@ e nel job Windows di Verify. Si possono eseguire anche senza Rust o la wheel:
 ~~~powershell
 python scripts/check_comments.py
 python scripts/check_docs.py
+python scripts/check_packages.py
 python -m unittest discover -s scripts
 ~~~
 
@@ -407,3 +408,19 @@ ed è inclusa nel gate Docker. I test `runtime_binding`, `runtime_vectors`,
 `public_surface` e quelli CLI verificano discovery e comportamento pubblico.
 Il repository non dichiara un budget di dimensione del codice; il budget di
 coverage è distinto e resta invariato.
+
+### Contenuto dei pacchetti Cargo
+
+`scripts/package_files.json` dichiara i singoli file ammessi per ogni crate
+del workspace, inclusi manifest, lockfile e metadati generati da Cargo.
+`scripts/check_packages.py` confronta `cargo package --list` con questo insieme:
+qualsiasi file aggiunto o mancante richiede un aggiornamento esplicito del registro.
+Il campo `vcs_files` dichiara separatamente i metadati presenti solo nei checkout
+Git; il contesto Docker esclude `.git` e usa esattamente il solo insieme `files`.
+I pacchetti ammettono solo testo UTF-8 senza controlli binari (eccetto tab e fine
+riga): anche contenitori PKCS#12 e chiavi DER rinominati vengono rifiutati.
+I marcatori PEM di chiavi private sono vietati anche nei file autorizzati.
+Il core, unico artifact `.crate` della release, viene inoltre impacchettato e
+controllato sui byte effettivi dell'archivio, inclusi i file generati da Cargo.
+Le prove TLS con fixture restano in `crates/rest-engine-core/tests/tls.rs`;
+i test unitari del core distribuito non richiedono le fixture del repository.

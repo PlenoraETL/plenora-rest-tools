@@ -50,5 +50,5 @@ jobs:
           python3 -m venv /tmp/audit
           /tmp/audit/bin/pip install --disable-pip-version-check --no-cache-dir \
             "pip-audit==2.9.0"
-          printf 'maturin==1.14.1\njsonschema==4.25.1\n' > /tmp/audit/requirements.txt
+          printf 'maturin==1.16.0\njsonschema==4.25.1\n' > /tmp/audit/requirements.txt
           /tmp/audit/bin/pip-audit --strict --requirement /tmp/audit/requirements.txt

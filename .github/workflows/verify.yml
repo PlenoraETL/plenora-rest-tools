@@ -73,6 +73,9 @@ jobs:
       - name: Comment quality
         run: python scripts/check_comments.py
 
+      - name: Cargo package contents
+        run: python scripts/check_packages.py
+
       - name: Documentation quality
         run: python scripts/check_docs.py
 
@@ -82,7 +85,7 @@ jobs:
       - name: Build the abi3 wheel
         shell: pwsh
         run: |
-          python -m pip install --disable-pip-version-check --no-cache-dir "maturin==1.14.1"
+          python -m pip install --disable-pip-version-check --no-cache-dir "maturin==1.16.0"
           python -m maturin build --release --locked --out dist
           if ($LASTEXITCODE -ne 0) { throw "maturin build failed" }
           $wheels = @(Get-ChildItem dist -Filter "plenora_rest-*-cp310-abi3-win_amd64.whl")

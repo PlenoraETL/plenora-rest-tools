@@ -3,7 +3,7 @@
   "version": "0.3.1",
   "source_date_epoch": 1791158400,
   "builders": {
-    "manylinux": "ghcr.io/pyo3/maturin@sha256:2665227312dd1eab1c29c70a001dc8aac53155a2d048bede3b2df7f1691c8e38",
+    "manylinux": "ghcr.io/pyo3/maturin@sha256:50bf2ff99eeff7b09332bad9baf4a5e925e2502304ae2f88f48ce8c06fd9957c",
     "sbom": "anchore/syft@sha256:678bfa565b60f747aac0f8e964fe5588a24445b8d0a480e91f6efd70020dfbb0"
   }
 }

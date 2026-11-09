@@ -25,7 +25,7 @@ RUN rustup component add rustfmt clippy \
     && python3 -m venv /opt/verify \
     && /opt/verify/bin/pip install \
         "jsonschema==4.26.0" \
-        "maturin==1.14.1"
+        "maturin==1.16.0"
 
 WORKDIR /workspace
 COPY . .
@@ -50,6 +50,7 @@ RUN cargo clippy --workspace --exclude plenora-rest-campaign --lib --bins --lock
     -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic \
     -D clippy::indexing_slicing -D clippy::unreachable \
     -D clippy::todo -D clippy::unimplemented
+RUN /opt/verify/bin/python scripts/check_packages.py
 RUN cargo test --workspace --locked
 RUN RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
 RUN /opt/verify/bin/maturin build --release --locked --out /tmp/wheels

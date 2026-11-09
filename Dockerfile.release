@@ -1,4 +1,4 @@
-FROM ghcr.io/pyo3/maturin:v1.14.1@sha256:2665227312dd1eab1c29c70a001dc8aac53155a2d048bede3b2df7f1691c8e38 AS build
+FROM ghcr.io/pyo3/maturin:v1.16.0@sha256:50bf2ff99eeff7b09332bad9baf4a5e925e2502304ae2f88f48ce8c06fd9957c AS build
 
 ARG SOURCE_DATE_EPOCH
 
@@ -37,6 +37,7 @@ RUN find . -type d -exec chmod 0755 {} + \
 
 RUN test -n "${SOURCE_DATE_EPOCH}" \
     && case "${SOURCE_DATE_EPOCH}" in *[!0-9]*) exit 1 ;; esac \
+    && python3 scripts/check_packages.py \
     && cargo package --package plenora-rest-core --locked --allow-dirty --no-verify \
     && mkdir -p /tmp/release-artifacts /tmp/wheels \
     && cp /tmp/cargo-target/package/plenora-rest-core-*.crate /tmp/release-artifacts/ \

@@ -1,7 +1,7 @@
 [build-system]
 # Exact pin, the same maturin every gate builds with: a range would let an
 # sdist build pick a release the gates never qualified.
-requires = ["maturin==1.14.1"]
+requires = ["maturin==1.16.0"]
 build-backend = "maturin"
 
 [project]
