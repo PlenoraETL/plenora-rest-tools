@@ -4,7 +4,7 @@ Le modifiche che cambiano il comportamento osservabile, l'API pubblica o la
 politica delle dipendenze. La versione dei manifest resta quella dell'ultima
 release finché una release non viene preparata.
 
-## 0.3.2 (non rilasciata)
+## 0.3.2 (2026-11-09)
 
 ### Dipendenze e trasporto TLS
 
@@ -13,7 +13,7 @@ release finché una release non viene preparata.
   hyper 1.11.1 e h2 0.4.19 nei lock del workspace e del fuzz. Tokio resta
   1.53.3, PyO3 0.29.2 e la toolchain Rust 1.98.1.
 - Maturin 1.16.0 nei gate, nel build system e nell'immagine di packaging
-  fissata per digest. La versione dei manifest resta 0.3.1 fino alla release.
+  fissata per digest.
 - TLS configurato per client con rustls e ring espliciti; rest conserva le
   radici Mozilla di webpki-roots 1.0.10, le CA aggiuntive, le identità client
   e la policy `verify=false`. Il provider globale eventualmente installato
