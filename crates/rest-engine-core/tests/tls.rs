@@ -1,4 +1,4 @@
-//! Fixture-backed handshake checks against the production TLS implementation.
+//! Ephemeral-identity handshake checks against the production TLS implementation.
 // Compile the private implementation here without widening the public API.
 #[path = "../src/tls.rs"]
 mod tls;
@@ -29,11 +29,12 @@ fn server_identity(policy: &TlsConfig) -> (Vec<CertificateDer<'static>>, Private
     )
 }
 
-const CA: &str = include_str!("fixtures/tls/ca.pem");
-// Public test-only identity, never a credential for a deployed service.
-const IDENTITY: &str = include_str!("fixtures/tls/identity.pem");
+#[path = "support/tls_identity.rs"]
+mod tls_identity;
+use tls_identity::Identity;
 
 fn handshake(
+    identity: &Identity,
     policy: &TlsConfig,
     hostname: &'static str,
     mutual: bool,
@@ -44,7 +45,7 @@ fn handshake(
         .unwrap();
     let builder = if mutual {
         let trust = server_roots(&TlsConfig {
-            ca_bundle_pem: Some(CA.into()),
+            ca_bundle_pem: Some(identity.ca.clone()),
             ..TlsConfig::default()
         })
         .unwrap();
@@ -57,7 +58,7 @@ fn handshake(
         builder.with_no_client_auth()
     };
     let (certs, key) = server_identity(&TlsConfig {
-        client_identity_pem: Some(IDENTITY.into()),
+        client_identity_pem: Some(identity.pem.clone()),
         ..TlsConfig::default()
     });
     let mut server_config = builder.with_single_cert(certs, key).unwrap();
@@ -94,14 +95,16 @@ fn handshake(
 
 #[test]
 fn local_tls_preserves_trust_hostname_bypass_and_mutual_authentication() {
-    assert!(handshake(&TlsConfig::default(), "localhost", false).is_err());
+    let identity = Identity::generate();
+    assert!(handshake(&identity, &TlsConfig::default(), "localhost", false).is_err());
     let trusted = TlsConfig {
-        ca_bundle_pem: Some(CA.into()),
+        ca_bundle_pem: Some(identity.ca.clone()),
         ..TlsConfig::default()
     };
-    handshake(&trusted, "localhost", false).unwrap();
-    assert!(handshake(&trusted, "wrong.example", false).is_err());
+    handshake(&identity, &trusted, "localhost", false).unwrap();
+    assert!(handshake(&identity, &trusted, "wrong.example", false).is_err());
     handshake(
+        &identity,
         &TlsConfig {
             verify: false,
             ..TlsConfig::default()
@@ -110,10 +113,11 @@ fn local_tls_preserves_trust_hostname_bypass_and_mutual_authentication() {
         false,
     )
     .unwrap();
-    assert!(handshake(&trusted, "localhost", true).is_err());
+    assert!(handshake(&identity, &trusted, "localhost", true).is_err());
     handshake(
+        &identity,
         &TlsConfig {
-            client_identity_pem: Some(IDENTITY.into()),
+            client_identity_pem: Some(identity.pem.clone()),
             ..trusted
         },
         "localhost",

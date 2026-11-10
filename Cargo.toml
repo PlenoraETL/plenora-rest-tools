@@ -49,6 +49,9 @@ percent-encoding = "=2.3.2"
 # for process isolation the tests do not use. 1.11.0 declares rust-version
 # 1.85, within the published MSRV; licence MIT OR Apache-2.0.
 proptest = { version = "=1.11.0", default-features = false, features = ["std"] }
+# Test-only ephemeral ECDSA identities; existing rustls dependency, no new crate.
+# ring 0.17.14: Apache-2.0 AND ISC; certificate encoding stays in tests.
+ring = "=0.17.14"
 quick-xml = "=0.41.0"
 pyo3 = "=0.29.2"
 # HTTP transport; TLS is configured per client with ring and Mozilla roots.

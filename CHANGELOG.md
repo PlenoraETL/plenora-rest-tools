@@ -4,6 +4,19 @@ Le modifiche che cambiano il comportamento osservabile, l'API pubblica o la
 politica delle dipendenze. La versione dei manifest resta quella dell'ultima
 release finché una release non viene preparata.
 
+## 0.3.3 (non rilasciata)
+
+### Sorgenti e prove TLS
+
+- CA, certificato e chiave delle prove TLS sono generati in memoria a ogni
+  esecuzione. La chiave privata di prova non viene più distribuita nei sorgenti,
+  compresi gli archivi automatici GitHub; fino alla 0.3.2 era un dato di prova
+  non segreto, non una credenziale di servizio.
+- La guardia controlla anche tutti i file tracciati da Git contro PEM privati
+  e contenitori binari ASN.1 (incluse chiavi DER e PKCS#12), oltre ai pacchetti.
+- `ring`, già transitiva di rustls, diventa dipendenza diretta solo di sviluppo
+  per generare le identità senza aggiungere crate al grafo.
+
 ## 0.3.2 (2026-11-09)
 
 ### Dipendenze e trasporto TLS

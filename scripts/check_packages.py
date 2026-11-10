@@ -45,6 +45,43 @@ def check_content(data):
         raise ValueError("binary content in Cargo package")
 
 
+def check_source_content(data):
+    """Reject private PEM and binary ASN.1 containers, regardless of filename.
+
+    Binary fuzz inputs are allowed; DER SEQUENCE containers are not. This
+    deliberately also rejects public DER certificates: use public PEM instead.
+    """
+    if PRIVATE_KEY.search(data):
+        raise ValueError("private key in source tree")
+    if data.startswith(b"0") and any(byte < 32 and byte not in (9, 10, 13) for byte in data):
+        raise ValueError("binary ASN.1 container in source tree")
+
+
+def check_sources(root):
+    """Inspect tracked working-tree files; unstaged deletions are absent sources.
+
+    Without Git (Docker/source archive), inspect the source tree itself. Build
+    output is excluded only in that mode, never from the tracked-file check.
+    """
+    if (root / ".git").exists():
+        result = subprocess.run(["git", "ls-files", "-z", "--cached"], cwd=root,
+                                check=True, capture_output=True)
+        names = inventory(name.decode("utf-8") for name in result.stdout.split(b"\0") if name)
+        deleted = subprocess.run(["git", "ls-files", "-z", "--deleted"], cwd=root,
+                                 check=True, capture_output=True)
+        names -= {name.decode("utf-8") for name in deleted.stdout.split(b"\0") if name}
+        paths = [root / name for name in sorted(names)]
+    else:
+        excluded = {"target", "dist", ".venv", "__pycache__", ".git"}
+        paths = sorted(p for p in root.rglob("*") if p.is_file()
+                       and not excluded.intersection(p.relative_to(root).parts))
+    for path in paths:
+        if path.is_symlink():
+            raise ValueError("symlink in source tree")
+        check_source_content(path.read_bytes())
+    print(f"source tree: contents OK ({len(paths)} files)")
+
+
 def check_files(directory, listing, expected, license_file=None):
     """Compare both directions, then inspect source files without leaking data."""
     names = inventory(name.replace("\\", "/") for name in listing.splitlines())
@@ -84,6 +121,7 @@ def cargo(*args):
 
 
 def main():
+    check_sources(ROOT)
     registry = json.loads(REGISTRY.read_text(encoding="utf-8"))
     metadata = json.loads(cargo("metadata", "--no-deps", "--locked", "--format-version", "1"))
     members = set(metadata["workspace_members"])

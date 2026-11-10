@@ -181,3 +181,14 @@ d'errore native. Il rifiuto usa testo statico senza chiavi o valori del document
 Le risposte dati REST mantengono il parser del formato selezionato.
 Il preflight Rust conserva il limite di ricorsione di serde_json e richiede
 un unico documento completo, senza costruire una seconda copia del payload.
+
+
+## Materiale crittografico nei sorgenti
+
+La guardia dei pacchetti rifiuta anche nei file tracciati PEM privati e
+contenitori binari ASN.1 SEQUENCE, indipendentemente dal nome. Il controllo
+conservativo rifiuta pure certificati pubblici DER: usare PEM pubblico.
+I corpus binari non ASN.1 restano ammessi. Non decodifica archivi annidati,
+stringhe codificate o formati proprietari. Senza Git controlla l'albero
+sorgente escludendo output di build e cache; le cancellazioni locali devono
+essere incluse nel commit di release.
