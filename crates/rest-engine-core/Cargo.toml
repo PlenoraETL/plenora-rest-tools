@@ -37,6 +37,7 @@ uuid.workspace = true
 fuzzing = []
 
 [dev-dependencies]
+ring.workspace = true
 proptest.workspace = true
 tokio = { workspace = true, features = ["macros"] }
 

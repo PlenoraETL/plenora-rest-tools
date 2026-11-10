@@ -422,5 +422,38 @@ riga): anche contenitori PKCS#12 e chiavi DER rinominati vengono rifiutati.
 I marcatori PEM di chiavi private sono vietati anche nei file autorizzati.
 Il core, unico artifact `.crate` della release, viene inoltre impacchettato e
 controllato sui byte effettivi dell'archivio, inclusi i file generati da Cargo.
-Le prove TLS con fixture restano in `crates/rest-engine-core/tests/tls.rs`;
-i test unitari del core distribuito non richiedono le fixture del repository.
+Le prove TLS in `crates/rest-engine-core/tests/tls.rs` generano CA e identità
+in memoria con `ring`, già presente attraverso rustls: il pin esatto è nel
+manifest del workspace, la licenza è Apache-2.0 AND ISC. La dipendenza
+è solo di sviluppo; non aggiunge crate al grafo e passa dalla policy di
+`cargo deny`. Il piccolo writer X.509 in `tests/support/tls_identity.rs`
+costruisce solo CA e foglia P-256 per localhost, senza parser né input esterno;
+rustls verifica le firme negli handshake. Le chiavi usano casualità di sistema;
+gli esiti delle prove restano deterministici. Nessuna chiave viene salvata.
+
+La guardia esamina anche i byte dei file tracciati (`git ls-files -z`), inclusi
+quelli fuori dai pacchetti. Le cancellazioni locali sono escluse; prima di
+pubblicare occorre includerle nel commit. Nel contesto Docker senza `.git`
+controlla l'albero dei sorgenti, esclusi output di build e cache. Rifiuta PEM
+privati e contenitori binari ASN.1 SEQUENCE indipendentemente dall'estensione:
+per prudenza anche i certificati pubblici DER sono esclusi (usare PEM pubblico).
+I corpus binari di fuzz non ASN.1 restano ammessi. Non è una ricerca di segreti
+codificati dentro sorgenti, archivi annidati o formati proprietari.
+
+Copertura TLS prima e dopo la generazione in memoria:
+
+| Asserzione | Prima | Dopo |
+| --- | --- | --- |
+| CA privata assente dalle radici: rifiuto | sì | sì |
+| CA privata configurata: handshake valido | sì | sì |
+| Hostname diverso: rifiuto | sì | sì |
+| `verify=false`: bypass esplicito | sì | sì |
+| mTLS senza identità client: rifiuto | sì | sì |
+| mTLS con identità firmata dalla CA: successo | sì | sì |
+| ALPN negoziato `h2` in ogni successo | sì | sì |
+| Certificato peer client presente in mTLS | sì | sì |
+
+Restano invariati i test unitari inclusi dal modulo TLS: CA aggiunta alle
+radici Mozilla (certificato pubblico senza chiave), provider ring esplicito,
+protocolli ALPN e compatibilità reqwest, errori statici per CA/identità malformate
+anche con verifica disabilitata.

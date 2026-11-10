@@ -925,6 +925,7 @@ dependencies = [
  "proptest",
  "quick-xml",
  "reqwest",
+ "ring",
  "rustls",
  "serde",
  "serde_json",

@@ -4,9 +4,10 @@ import io
 from pathlib import Path
 import tarfile
 import tempfile
+import subprocess
 import unittest
 
-from check_packages import check_archive, check_files, expected_files, ROOT
+from check_packages import check_archive, check_files, expected_files, check_source_content, check_sources, ROOT
 
 
 class PackageTests(unittest.TestCase):
@@ -15,6 +16,49 @@ class PackageTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory(dir=ROOT / "target")
         self.addCleanup(self.temporary.cleanup)
         self.directory = Path(self.temporary.name)
+
+    def test_sources_private_formats_and_public_text(self):
+        for label in ("PRIVATE KEY", "RSA PRIVATE KEY", "EC PRIVATE KEY",
+                      "ENCRYPTED PRIVATE KEY", "OPENSSH PRIVATE KEY", "DSA PRIVATE KEY"):
+            with self.subTest(label=label), self.assertRaisesRegex(ValueError, "private key"):
+                check_source_content(f"-----BEGIN {label}-----\nsecret".encode())
+        for data in (b"0\x06\x02\x01\x00\x02\x01\x01", b"0\x06\x02\x01\x01\x04\x01x",
+                     b"0\x08\x02\x01\x000\x00\x04\x01x", b"0\x050\x00\x04\x01x",
+                     b"0\x07\x02\x01\x030\x02\x06\x00"):
+            with self.assertRaisesRegex(ValueError, "ASN.1"):
+                check_source_content(data)
+        for data in (b"source text", b"-----BEGIN CERTIFICATE-----\npublic", b"\x00fuzz", b"0 text\n"):
+            check_source_content(data)
+
+    def test_git_tracked_sources_outside_packages_and_without_git(self):
+        def git(*args):
+            subprocess.run(["git", *args], cwd=self.directory, check=True, capture_output=True)
+        git("init")
+        source = self.directory / "outside.txt"
+        source.write_text("public text")
+        git("add", "outside.txt")
+        check_sources(self.directory)
+        for data in (f"-----BEGIN {'PRIVATE KEY'}-----".encode(), b"0\x03\x02\x01\x03"):
+            source.write_bytes(data)
+            with self.assertRaises(ValueError):
+                check_sources(self.directory)
+        source.unlink()
+        check_sources(self.directory)
+        # Tracked build-looking paths are not exempt from the Git scan.
+        build = self.directory / "target"
+        build.mkdir()
+        nested = build / "renamed key.rs"
+        nested.write_bytes(b"0\x03\x02\x01\x03")
+        git("add", "target/renamed key.rs")
+        with self.assertRaisesRegex(ValueError, "ASN.1"):
+            check_sources(self.directory)
+        archive = self.directory / "archive"
+        archive.mkdir()
+        (archive / "source").write_text("public source")
+        check_sources(archive)
+        (archive / "source").write_bytes(b"0\x03\x02\x01\x03")
+        with self.assertRaises(ValueError):
+            check_sources(archive)
 
     def test_exact_inventory_with_and_without_git(self):
         entry = {"files": ["Cargo.toml"], "vcs_files": [".cargo_vcs_info.json"]}
@@ -71,7 +115,7 @@ class PackageTests(unittest.TestCase):
         license_file = self.directory / "LICENSE"
         license_file.write_text("license text")
         check_files(crate, "LICENSE", ["LICENSE"], "../LICENSE")
-        license_file.write_text("-----BEGIN PRIVATE KEY-----")
+        license_file.write_text("-----BEGIN " + "PRIVATE KEY-----")
         with self.assertRaisesRegex(ValueError, "private key"):
             check_files(crate, "LICENSE", ["LICENSE"], "../LICENSE")
 
@@ -85,7 +129,7 @@ class PackageTests(unittest.TestCase):
                 check_files(self.directory, listing, listing.splitlines())
 
     def test_actual_archive_generated_files_are_inspected(self):
-        for data in (b"version = 4\n", b"-----BEGIN PRIVATE KEY-----", b"0\x03\x02\x01\x03"):
+        for data in (b"version = 4\n", b"-----BEGIN " + b"PRIVATE KEY-----", b"0\x03\x02\x01\x03"):
             archive = self.directory / "test.crate"
             with tarfile.open(archive, "w:gz") as package:
                 entry = tarfile.TarInfo("test-1/Cargo.lock")
