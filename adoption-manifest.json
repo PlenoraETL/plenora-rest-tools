@@ -10,8 +10,8 @@
     {
       "name": "plenora-rest-core",
       "surface": "rust",
-      "version": "0.3.2",
-      "digest": "sha256:18971297d0ab71b06c54d76f47a65afbceca965d97c7284a0a09a323290962d8",
+      "version": "0.3.3",
+      "digest": "sha256:af2034e4e0d3c26fd5056ad3ecc9d6f662d6a5b71aae5433a9a7fe3518fda8e2",
       "verification": [
         "powershell -File scripts/release.ps1",
         "cargo test -p plenora-rest-core --test public_surface",
@@ -21,8 +21,8 @@
     {
       "name": "plenora-rest",
       "surface": "python_sdk",
-      "version": "0.3.2",
-      "digest": "sha256:45926d4221227943ec4715d098908827dfdce5303dc9ea5da255c0d8bb7dedd7",
+      "version": "0.3.3",
+      "digest": "sha256:e76b196ca736918bc0dd1c11fb0e0542724a2a45aa1c09e64a25bbd1b557af14",
       "api_modes": [
         "sync"
       ],
@@ -34,8 +34,8 @@
     {
       "name": "plenora-rest-linux-x86_64",
       "surface": "cli",
-      "version": "0.3.2",
-      "digest": "sha256:970ba68ca7cc5ba6f097b6edd8d76b2069676d02ada5245b3244e3faacb9654d",
+      "version": "0.3.3",
+      "digest": "sha256:9fc43790693f549c09b4e2a6752029333d3b7aa080a8631763b7764760e855d0",
       "verification": [
         "powershell -File scripts/release.ps1",
         "cargo test -p plenora-rest-cli --test cli"
@@ -44,8 +44,8 @@
     {
       "name": "plenora.rest-tools",
       "surface": "runtime",
-      "version": "0.3.2",
-      "digest": "sha256:18971297d0ab71b06c54d76f47a65afbceca965d97c7284a0a09a323290962d8",
+      "version": "0.3.3",
+      "digest": "sha256:af2034e4e0d3c26fd5056ad3ecc9d6f662d6a5b71aae5433a9a7fe3518fda8e2",
       "verification": [
         "powershell -File scripts/release.ps1",
         "cargo test -p plenora-rest-core --test runtime_binding",
