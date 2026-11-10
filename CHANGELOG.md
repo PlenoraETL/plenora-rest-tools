@@ -4,7 +4,7 @@ Le modifiche che cambiano il comportamento osservabile, l'API pubblica o la
 politica delle dipendenze. La versione dei manifest resta quella dell'ultima
 release finché una release non viene preparata.
 
-## 0.3.3 (non rilasciata)
+## 0.3.3 (2026-11-10)
 
 ### Sorgenti e prove TLS
 
