@@ -4,6 +4,18 @@ Le modifiche che cambiano il comportamento osservabile, l'API pubblica o la
 politica delle dipendenze. La versione dei manifest resta quella dell'ultima
 release finché una release non viene preparata.
 
+## 0.4.0 (non rilasciata)
+
+- Cambio incompatibile nella serie 0.x, deciso dal titolare: Python minimo
+  3.14 e wheel ABI3 cp314. Python precedenti non sono più supportati.
+  `.python-version` è la fonte verificata dai gate per CI e rilascio.
+- SDK asincrono pubblico `AsyncEngine`, derivato da `Engine`: stesse operazioni,
+  sessioni persistenti, cancellazione cooperativa e attesa della fine del worker.
+  Decisione esplicita sul contratto: aggiunta di `AsyncEngine` agli export Python
+  della baseline v1; gli export esistenti, schemi e binding Rust restano invariati.
+- Prima ondata di allineamento alla politica comune delle dipendenze Plenora,
+  con snapshot verificato in CI e parser aggiornato a quick-xml 0.42.
+
 ## 0.3.3 (2026-11-10)
 
 ### Sorgenti e prove TLS

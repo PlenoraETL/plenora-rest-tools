@@ -19,7 +19,7 @@ in Plenora.
 | Core provider-neutral | completato | nessun adapter specifico; configurazione tramite contratti |
 | Operazioni v1 | completato | test, generate, enrich, download e upload |
 | Rust | completato | crate pubblico e runtime binding |
-| Python | completato | SDK sincrono e wheel ABI3 py310 |
+| Python | completato | SDK sincrono e asincrono e wheel ABI3 py314 |
 | Runtime Plenora | completato | envelope, capability, lifecycle e risorse autorizzate |
 | Contratti | completato | sei schemi Draft 2020-12 e baseline v1 |
 | Sicurezza | completato | default fail-closed e redazione pubblica |
@@ -28,7 +28,7 @@ in Plenora.
 | Artifact | completato | upload/download streaming, resume e SHA-256 |
 | Gate CI | completato | MSRV, format, Clippy, test, wheel e matrice Python |
 | Release | completato | build riproducibile, checksum, SBOM e attestazioni |
-| Support matrix | definita | Linux manylinux2014 x86_64 e Windows x86_64, CPython 3.10-3.14 |
+| Support matrix | definita | Linux manylinux2014 x86_64 e Windows x86_64, CPython 3.14 |
 
 Il gate breve include già test deterministici per concorrenza limitata, retry
 su fault transitori e streaming multi-megabyte. Questi test impediscono
@@ -330,7 +330,6 @@ Dopo il go-live iniziale possono essere valutati:
 - supporto Linux ARM;
 - wheel per macOS;
 - target musl;
-- SDK Python asincrono;
 - ulteriori formati o strategie di paginazione generiche;
 - pubblicazione su crates.io e PyPI.
 

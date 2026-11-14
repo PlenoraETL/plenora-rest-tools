@@ -190,17 +190,21 @@ def check_workflows(root):
     if "python scripts/run_assurance.py" not in runs:
         raise ValueError("PR assurance runner is not connected")
     project = tomllib.loads(read(root, "pyproject.toml"))["project"]
-    bounds = re.fullmatch(r">=3\.(\d+),<3\.(\d+)", project["requires-python"])
-    if bounds is None:
-        raise ValueError("unsupported Python support range syntax")
-    supported = [f"3.{minor}" for minor in range(int(bounds[1]), int(bounds[2]))]
-    if not supported:
-        raise ValueError("empty Python support range")
+    supported = [read(root, ".python-version").strip()]
+    if project["requires-python"] != ">=" + supported[0]:
+        raise ValueError("Python support differs from source")
     same(re.findall(r'Programming Language :: Python :: (3\.\d+)"', read(root, "pyproject.toml")),
          supported, "Python classifiers")
     for name, flow in flows.items():
         for job in flow["jobs"].values():
+            python_ready = False
             for step in job["steps"]:
+                if step.get("uses", "").startswith("actions/setup-python@"):
+                    if step.get("with", {}).get("python-version-file") != ".python-version":
+                        raise ValueError("Python setup must read the version source")
+                    python_ready = True
+                if re.search(r"\bpython3?\b", step.get("run", "")) and not python_ready:
+                    raise ValueError("Python command precedes setup from version source")
                 if "unittest discover -s scripts" in step.get("run", "") and "test_check_" in step["run"]:
                     raise ValueError("workflow self-test discovery omits contract tests")
             strategy = job.get("strategy", {})
@@ -265,7 +269,7 @@ def scan(root=ROOT):
 
 
 def inventory(root=ROOT):
-    patterns = ("scripts/*.py", "scripts/*.ps1", "scripts/*.sh", ".github/workflows/*.y*ml",
+    patterns = (".python-version", "pyproject.toml", "Cargo.toml", "scripts/*.py", "scripts/*.ps1", "scripts/*.sh", ".github/workflows/*.y*ml",
                 "fuzz/fuzz_targets/*.rs", "fuzz/corpus/**/*", "contracts/upstream/**/*.json",
                 "crates/**/*.rs", "python/tests/*.py", "campaign/reports/*",
                 "contracts/*.json", "contracts/schemas/*.json", "scripts/*.json",

@@ -192,3 +192,17 @@ I corpus binari non ASN.1 restano ammessi. Non decodifica archivi annidati,
 stringhe codificate o formati proprietari. Senza Git controlla l'albero
 sorgente escludendo output di build e cache; le cancellazioni locali devono
 essere incluse nel commit di release.
+
+## Python e cancellazione asincrona
+
+La release 0.4.0 richiede Python minimo 3.14, cambio incompatibile nella serie
+0.x deciso dal titolare. La fonte è `.python-version`, verificata da
+`scripts/check_python_version.py`. L'aggiunta pubblica di `AsyncEngine` alla
+baseline degli export Python v1 è la decisione esplicita di questa release;
+nessun export precedente è rimosso, nessuno schema è modificato.
+
+La cancellazione di un task segnala il token cooperativo e attende il worker:
+non è una scadenza rigida e non annulla effetti remoti già completati. Per le
+operazioni senza token (sessioni, discovery, chiusura) attende la conclusione.
+`close` chiude l'ammissione; le altre operazioni già ammesse continuano. Un
+ingresso nel context manager cancellato chiude il motore appena costruito.

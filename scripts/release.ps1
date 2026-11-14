@@ -83,10 +83,10 @@ if ($LASTEXITCODE -ne 0) {
 
 if (-not [string]::IsNullOrWhiteSpace($ExtraArtifacts)) {
     $extra = @(Get-ChildItem -LiteralPath $ExtraArtifacts -Force)
-    $windowsWheels = @($extra | Where-Object { -not $_.PSIsContainer -and $_.Name -ceq "plenora_rest-$version-cp310-abi3-win_amd64.whl" })
+    $windowsWheels = @($extra | Where-Object { -not $_.PSIsContainer -and $_.Name -ceq "plenora_rest-$version-cp314-abi3-win_amd64.whl" })
     $windowsCli = @($extra | Where-Object { -not $_.PSIsContainer -and $_.Name -ceq "plenora-rest-windows-x86_64.exe" })
     if ($extra.Count -ne 2 -or $windowsWheels.Count -ne 1 -or $windowsCli.Count -ne 1) {
-        throw "ExtraArtifacts must contain exactly the plenora_rest $version cp310-abi3-win_amd64 wheel and plenora-rest-windows-x86_64.exe."
+        throw "ExtraArtifacts must contain exactly the plenora_rest $version cp314-abi3-win_amd64 wheel and plenora-rest-windows-x86_64.exe."
     }
     Copy-Item -LiteralPath $windowsWheels[0].FullName -Destination $distribution.FullName
     Copy-Item -LiteralPath $windowsCli[0].FullName -Destination $distribution.FullName

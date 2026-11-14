@@ -10,7 +10,7 @@ def commands():
     return [
         [sys.executable, "-m", "unittest", "discover", "-s", "scripts", "-p", "test_*.py", "-v"],
         *[[sys.executable, f"scripts/{name}.py"] for name in (
-            "check_assurance", "check_comments", "check_docs", "check_advisory_exemptions", "validate_contracts")],
+            "check_python_version", "check_assurance", "check_comments", "check_docs", "check_advisory_exemptions", "validate_contracts")],
         [sys.executable, "scripts/release.py", "current-version"],
     ]
 
