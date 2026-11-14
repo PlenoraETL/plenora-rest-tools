@@ -4,7 +4,7 @@ Le modifiche che cambiano il comportamento osservabile, l'API pubblica o la
 politica delle dipendenze. La versione dei manifest resta quella dell'ultima
 release finché una release non viene preparata.
 
-## 0.4.0 (non rilasciata)
+## 0.4.0 (2026-11-14)
 
 - Cambio incompatibile nella serie 0.x, deciso dal titolare: Python minimo
   3.14 e wheel ABI3 cp314. Python precedenti non sono più supportati.
