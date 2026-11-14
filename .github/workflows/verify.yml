@@ -15,6 +15,32 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  assurance:
+    name: Offline assurance inventories and self-tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Install pinned assurance tools
+        run: python -m pip install -r scripts/assurance-requirements.txt
+      - name: Collect all offline gate results
+        run: python scripts/run_assurance.py
+      - name: Generate the source inventory
+        if: always()
+        run: |
+          mkdir -p target
+          python scripts/check_assurance.py --inventory > target/assurance-inventory.json
+      - name: Keep the source inventory
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: assurance-inventory
+          path: target/assurance-inventory.json
+          if-no-files-found: error
+
   docker:
     name: Docker verification gate
     runs-on: ubuntu-latest
@@ -79,8 +105,11 @@ jobs:
       - name: Documentation quality
         run: python scripts/check_docs.py
 
-      - name: Comment and documentation gate tests
-        run: python -m unittest discover -s scripts -p "test_check_*.py"
+      - name: Install pinned assurance tools
+        run: python -m pip install -r scripts/assurance-requirements.txt
+
+      - name: All script self-tests
+        run: python -m unittest discover -s scripts -p "test_*.py"
 
       - name: Build the abi3 wheel
         shell: pwsh

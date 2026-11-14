@@ -389,8 +389,34 @@ Il gate documentazione controlla i Markdown del repository (incluse eventuali
 guide sotto `python/`), link e ancore locali, script Python citati, sintassi
 degli esempi Python e nomi SDK rispetto a `python/plenora_rest/__init__.py`.
 Le copie sotto `contracts/upstream/` restano al validatore dei contratti.
-La suite completa degli script richiede jsonschema nella versione fissata in
-`Dockerfile.verify`.
+La suite completa degli script usa i pin in
+`scripts/assurance-requirements.txt`.
+
+## Inventari delle prove su ogni PR
+
+Il job `assurance` di Verify non ha filtri di percorso n? dipendenze da build.
+Esegue tutti i self-test `scripts/test_*.py` e i controlli statici indipendenti,
+proseguendo dopo ciascun fallimento e restituendo un esito rosso finale:
+
+~~~powershell
+python -m pip install -r scripts/assurance-requirements.txt
+python scripts/run_assurance.py
+python scripts/check_assurance.py --inventory
+~~~
+
+`check_assurance.py` confronta i target fuzz con manifest, matrice, guida e
+corpus generato in memoria (anche file extra); gli scenari Rust con i mix dei
+profili, le soglie e le fasi selezionabili; i conteggi delle sonde Rust con le
+fixture adottate; i registri dei pacchetti e delle superfici di coverage con i
+sorgenti; le evidenze di adozione con file e funzioni esistenti; le matrici
+Python con `pyproject.toml`. Controlla anche pin degli strumenti e collegamento
+del proprio runner al job PR. Gli estrattori Rust sono statici e limitati alle
+forme dichiarative correnti: una forma assente o ambigua ? un errore.
+
+I report conservati in `campaign/reports` descrivono il commit della loro
+esecuzione: il loro elenco ? scoperto dai file, non ? una qualifica del codice
+corrente. La qualifica comportamentale resta nei test Rust, SDK e nelle
+campagne. Il controllo offline non compila Rust e non sostituisce quei gate.
 
 ## Riferimenti
 
