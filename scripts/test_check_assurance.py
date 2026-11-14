@@ -21,7 +21,7 @@ class AssuranceTests(unittest.TestCase):
         for directory in ("fuzz", "campaign", "contracts", "crates", ".github", "scripts", "docs", "python"):
             shutil.copytree(gate.ROOT / directory, self.root / directory,
                             ignore=shutil.ignore_patterns("__pycache__"))
-        for name in ("Cargo.toml", "pyproject.toml", "Dockerfile.release", "Dockerfile.verify", ".dockerignore"):
+        for name in (".python-version", "Cargo.toml", "pyproject.toml", "Dockerfile.release", "Dockerfile.verify", ".dockerignore"):
             shutil.copyfile(gate.ROOT / name, self.root / name)
 
     def mutate(self, name, before, after):
@@ -138,12 +138,17 @@ class AssuranceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "not connected"):
             gate.check_workflows(self.root)
 
+    def test_python_requires_setup_before_use(self):
+        self.mutate(".github/workflows/audit.yml", "actions/setup-python@", "actions/removed-setup@")
+        with self.assertRaisesRegex(ValueError, "precedes setup"):
+            gate.check_workflows(self.root)
+
     def test_release_matrix_drift_and_fail_fast_are_rejected(self):
         self.mutate(".github/workflows/release.yml", "fail-fast: false", "fail-fast: true")
         with self.assertRaisesRegex(ValueError, "collect all"):
             gate.check_workflows(self.root)
         self.mutate(".github/workflows/release.yml", "fail-fast: true", "fail-fast: false")
-        self.mutate(".github/workflows/release.yml", ", '3.14'", "")
+        self.mutate(".github/workflows/release.yml", "['3.14']", "[]")
         with self.assertRaisesRegex(ValueError, "Python support"):
             gate.check_workflows(self.root)
 

@@ -34,7 +34,7 @@ Runtime -> envelope + risorse --> | Engine persistente    | -> servizio REST
 | crates/rest-engine-core | contratti Rust, Engine, trasporto, runtime binding ed errori |
 | crates/rest-cli | binario plenora-rest: parser chiuso, envelope CLI 2.0, exit code, Ctrl-C |
 | crates/rest-engine-python | estensione nativa PyO3 ABI3 |
-| python/plenora_rest | facciata Python sincrona e tipi pubblici |
+| python/plenora_rest | facciate Python sincrona e asincrona e tipi pubblici |
 | contracts | schemi component-owned, binding e baseline compatibile |
 | scripts | verifica, validazione e release riproducibile |
 
@@ -78,8 +78,11 @@ close è idempotente. Dopo la chiusura, nuove esecuzioni falliscono localmente.
 La cancellazione è cooperativa e può essere condivisa in modo thread-safe.
 L'SDK Python implementa un context manager che richiama close in uscita.
 
-L'API Python è sincrona; il binding nativo esegue il motore asincrono Rust senza
-esporre un event loop al chiamante.
+`Engine` offre l'API sincrona; `AsyncEngine` ne richiama le operazioni in
+worker, con istanza persistente e context manager asincrono. Il binding nativo
+esegue il motore Rust. La cancellazione del task segnala il token cooperativo
+e attende il worker; la chiusura impedisce nuove chiamate, senza annullare
+le operazioni ammesse prima della chiusura.
 
 ## Pipeline di esecuzione
 
@@ -559,7 +562,6 @@ Non fanno parte dell'architettura attuale:
 - adapter o preset incorporati per singoli provider;
 - amministrazione diretta di message broker;
 - persistenza applicativa dei job remoti;
-- API Python asincrona;
 - scambio Arrow;
 - supporto dichiarato fuori dalla matrice Linux x86_64.
 

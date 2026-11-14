@@ -8,7 +8,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.3.3"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.98"
 # Proprietary, like every Plenora library: no SPDX identifier applies, so
@@ -46,13 +46,15 @@ percent-encoding = "=2.3.2"
 # Dev-dependency only: property tests of the parsers of remote input
 # (src/property_tests.rs), each checked against an oracle written in the test.
 # Default features off: `fork` and `timeout` would pull rusty-fork and tempfile
-# for process isolation the tests do not use. 1.11.0 declares rust-version
-# 1.85, within the published MSRV; licence MIT OR Apache-2.0.
-proptest = { version = "=1.11.0", default-features = false, features = ["std"] }
+# for process isolation the tests do not use. Aligned with the common
+# dependency policy; MSRV 1.88, licence MIT OR Apache-2.0.
+proptest = { version = "=1.12.0", default-features = false, features = ["std"] }
 # Test-only ephemeral ECDSA identities; existing rustls dependency, no new crate.
 # ring 0.17.14: Apache-2.0 AND ISC; certificate encoding stays in tests.
 ring = "=0.17.14"
-quick-xml = "=0.41.0"
+# XML response parsing; UTF-8 events and XML attribute normalization.
+# Aligned with the common dependency policy, retaining strict input refusals.
+quick-xml = "=0.42.0"
 pyo3 = "=0.29.2"
 # HTTP transport; TLS is configured per client with ring and Mozilla roots.
 reqwest = { version = "=0.13.5", default-features = false, features = ["brotli", "charset", "cookies", "deflate", "gzip", "http2", "json", "multipart", "rustls-no-provider", "form", "query", "stream", "zstd"] }

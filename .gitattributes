@@ -2,3 +2,6 @@
 
 # Semi del fuzz: byte esatti, CRLF compresi.
 fuzz/corpus/** -text
+
+# Common policy snapshot: preserve the centrally verified bytes.
+.ci/plenora-dependencies/* text eol=lf

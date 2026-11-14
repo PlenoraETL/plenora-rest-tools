@@ -36,7 +36,7 @@ jobs:
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: '3.12'
+          python-version-file: '.python-version'
 
       - name: Validate tag and component versions
         shell: bash
@@ -93,7 +93,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python: ['3.10', '3.11', '3.12', '3.13', '3.14']
+        python: ['3.14']
     steps:
       - name: Check out the tagged source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -107,7 +107,7 @@ jobs:
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: ${{ matrix.python }}
+          python-version-file: '.python-version'
 
       - name: Install the wheel in a clean environment and run the SDK suite
         shell: pwsh
@@ -125,6 +125,10 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version-file: '.python-version'
 
       - name: Validate tag and component versions
         id: version

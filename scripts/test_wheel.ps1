@@ -15,11 +15,13 @@ param(
 
 $ErrorActionPreference = "Stop"
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
+& $Python (Join-Path $PSScriptRoot "check_python_version.py") --runtime
+if ($LASTEXITCODE -ne 0) { throw "Python runtime differs from policy" }
 $tests = Join-Path $repositoryRoot "python\tests"
 
-$wheels = @(Get-ChildItem -LiteralPath $WheelDirectory -Filter "plenora_rest-*-cp310-abi3-win_amd64.whl")
+$wheels = @(Get-ChildItem -LiteralPath $WheelDirectory -Filter "plenora_rest-*-cp314-abi3-win_amd64.whl")
 if ($wheels.Count -ne 1) {
-    throw "expected exactly one cp310-abi3-win_amd64 wheel in $WheelDirectory, found $($wheels.Count)"
+    throw "expected exactly one cp314-abi3-win_amd64 wheel in $WheelDirectory, found $($wheels.Count)"
 }
 
 $workRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("plenora-rest-wheel-" + [guid]::NewGuid().ToString("N"))
@@ -32,6 +34,9 @@ try {
     & $venvPython -c "import sys; print(sys.version)"
     & $venvPython -m pip install --disable-pip-version-check --no-cache-dir --no-deps $wheels[0].FullName
     if ($LASTEXITCODE -ne 0) { throw "wheel installation failed" }
+
+    & $venvPython (Join-Path $PSScriptRoot "check_python_version.py") --wheel $wheels[0].FullName
+    if ($LASTEXITCODE -ne 0) { throw "wheel metadata differs from policy" }
 
     Push-Location $workRoot
     try {

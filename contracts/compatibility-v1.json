@@ -1,6 +1,7 @@
 {
   "policy": "Published v1 schemas and public bindings are immutable. Breaking changes require a new contract version.",
   "python_public_exports": [
+    "AsyncEngine",
     "CancellationToken",
     "CapabilityDocument",
     "ConnectionConfig",
