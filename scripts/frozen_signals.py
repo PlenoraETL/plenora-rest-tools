@@ -117,7 +117,7 @@ def main():
     if args.worker:
         worker(args.worker, args.binary, args.mode)
         return 0
-    with tempfile.TemporaryDirectory(dir=ROOT / "target", prefix="signals-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="signals-") as temporary:
         directory = Path(temporary)
         options = {}
         if os.name == "nt":

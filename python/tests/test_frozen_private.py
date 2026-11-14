@@ -22,6 +22,9 @@ def cases():
 class FrozenPrivateTests(unittest.IsolatedAsyncioTestCase):
     async def test_remote_bodies_headers_on_cli_sync_and_async(self):
         root = Path(__file__).resolve().parents[2]
+        binary = Path(os.environ.get("PLENORA_TEST_CLI",
+            str(root / "target/debug" / ("plenora-rest.exe" if os.name == "nt" else "plenora-rest")))).resolve()
+        self.assertTrue(binary.is_file(), "CLI fixture is missing; provide PLENORA_TEST_CLI")
         corpus = json.loads((root / "tests/frozen/0.4.0/remote-private.json").read_text())
         seen = []
         class Handler(BaseHTTPRequestHandler):
@@ -47,7 +50,7 @@ class FrozenPrivateTests(unittest.IsolatedAsyncioTestCase):
         config = {"allow_private_networks":True}
         options = {"capture_response_metadata":True,"response_headers":["*"]}
         try:
-            with tempfile.TemporaryDirectory(dir=root / "target",prefix="private-surfaces-") as directory:
+            with tempfile.TemporaryDirectory(prefix="private-surfaces-") as directory:
                 config_path = Path(directory) / "config.json"
                 config_path.write_text(json.dumps(config))
                 with Engine(config) as sync:
@@ -62,7 +65,6 @@ class FrozenPrivateTests(unittest.IsolatedAsyncioTestCase):
                                         connection["response"][field] = case[field]
                                 outcomes = [sync.test(connection,execution_options=options),
                                             await asynchronous.test(connection,execution_options=options)]
-                                binary = root / "target/debug" / ("plenora-rest.exe" if os.name == "nt" else "plenora-rest")
                                 cli = subprocess.run([str(binary),"test","--input","-","--config",str(config_path),"--format","json"],
                                     input=json.dumps({"schema_version":1,"operation":"test","connection":connection,"options":options}).encode(),
                                     capture_output=True,timeout=10)

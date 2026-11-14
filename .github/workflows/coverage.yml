@@ -120,6 +120,8 @@ jobs:
           source <(cargo llvm-cov show-env --sh)
           cargo llvm-cov clean --workspace
           python -m maturin build --locked --out coverage/python-binding/dist
+          cargo build --locked -p plenora-rest-cli --bin plenora-rest
+          export PLENORA_TEST_CLI="$(realpath "$CARGO_TARGET_DIR/debug/plenora-rest")"
           python -m venv "$RUNNER_TEMP/sdk"
           "$RUNNER_TEMP/sdk/bin/pip" install --disable-pip-version-check --no-cache-dir \
             --no-deps coverage/python-binding/dist/*.whl

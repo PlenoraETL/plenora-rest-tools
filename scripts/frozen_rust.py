@@ -8,7 +8,8 @@ import subprocess
 import sys
 import tempfile
 
-from frozen_proofs import ROOT, digest
+from frozen_proofs import ROOT
+from source_identity import source_digests
 
 TARGETS = [("plenora-rest-core", "--lib", None),
            ("plenora-rest-core", "--test", "black_box"),
@@ -66,7 +67,7 @@ def run_target(binary, env, directory, selection="frozen_", retained=()):
             continue
         log = result.stdout + result.stderr
         name = identity.replace("::", "-")
-        (directory / f"{name}.log").write_text(log, encoding="utf-8")
+        (directory / f"{name}.log").write_text(log, encoding="utf-8", newline="\n")
         passed = rust_passed(result.returncode, log)
         receipts.append({"id": identity, "status": "current-pass" if passed else "current-fail", "exit":result.returncode})
         print(f"{identity}: {receipts[-1]['status']}", flush=True)
@@ -121,7 +122,7 @@ def main():
         try:
             sdk = subprocess.run([str(sdk_program("python")), str(ROOT / "scripts/frozen_sdk.py")], cwd=ROOT, env=env, capture_output=True, text=True, encoding="utf-8", timeout=60)
             print(sdk.stdout + sdk.stderr, flush=True)
-            (directory / "sdk-process.log").write_text(sdk.stdout + sdk.stderr, encoding="utf-8")
+            (directory / "sdk-process.log").write_text(sdk.stdout + sdk.stderr, encoding="utf-8", newline="\n")
             results.append({"id":"native-sdk", "status":"current-pass" if sdk.returncode == 0 else "current-fail"})
         except (OSError, subprocess.SubprocessError) as error:
             results.append({"id":"native-sdk", "status":"blocked", "reason":str(error)})
@@ -136,14 +137,15 @@ def main():
         paths = sorted((ROOT / "crates").rglob("*.rs")) + sorted((ROOT / "tests/frozen/0.4.0").glob("*.json"))
         paths += [ROOT / "scripts/frozen_signals.py", ROOT / "python/tests/test_frozen_private.py"]
         receipt = {"commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
-                   "tests": results, "passed": passed, "files": {p.relative_to(ROOT).as_posix(): digest(p) for p in paths},
-                   "mode": "record" if args.record else "check"}
-        (directory / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
+                   "tests": results, "passed": passed, "files": {p.relative_to(ROOT).as_posix(): value for p, value in source_digests(paths).items()},
+                   "mode": "record" if args.record else "check", "source_identity":"sha256-git-clean"}
+        (directory / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8", newline="\n")
         if args.record and passed:
             if not cases:
                 raise ValueError("no observations captured")
             BASELINE.write_text(json.dumps({"version":"0.4.0", "source_commit":receipt["commit"],
-                "source_files":{p.relative_to(ROOT).as_posix():digest(p) for p in sorted((ROOT / "crates").glob("*/src/*.rs"))},
+                "source_identity":"sha256-git-clean",
+                "source_files":{p.relative_to(ROOT).as_posix(): value for p, value in source_digests(sorted((ROOT / "crates").glob("*/src/*.rs"))).items()},
                 "normalization":["execution metrics.elapsed_ms at explicit core/CLI/SDK/runtime payload paths", "runtime response plenora.message.id", "remote fixture loopback origin (asserted before replacement)"],
                 "contract_checked_cases":sorted(key for key,value in cases.items() if key.startswith("control-artifacts-") and "rule" in value),
                 "artifact_observations":"Raw files/bytes/results are retained in target/frozen/control-artifacts/<os>; contract_checked_cases freeze invariants, not scheduler outcomes.",

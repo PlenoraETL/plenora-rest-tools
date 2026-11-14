@@ -1,6 +1,5 @@
 """Versioned fixture identities and per-test receipts; never infer a pass from discovery."""
 import argparse
-import hashlib
 import io
 import json
 from pathlib import Path
@@ -8,26 +7,24 @@ import subprocess
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
+from source_identity import byte_digest, source_digests
+
 INDEX = ROOT / "tests/frozen/0.4.0/sources.json"
-
-
-def digest(path):
-    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def source_index():
     upstream = ROOT / "contracts/upstream"
     source = json.loads((upstream / "source.json").read_text(encoding="utf-8"))
-    entries = {}
+    # Upstream pins authenticate adopted bytes, not a local source receipt.
     for name, entry in sorted(source["files"].items()):
-        actual = digest(upstream / name)
-        if actual != entry["sha256"]:
+        if byte_digest(upstream / name) != entry["sha256"]:
             raise ValueError("adopted fixture differs from its pinned source")
-        entries[f"contracts/upstream/{name}"] = actual
-    entries["contracts/upstream/source.json"] = digest(upstream / "source.json")
-    for path in sorted(INDEX.parent.glob("*.json")):
-        if path.name not in {"sources.json", "observed.json"}:
-            entries[path.relative_to(ROOT).as_posix()] = digest(path)
+    paths = [upstream / name for name in sorted(source["files"])]
+    paths.append(upstream / "source.json")
+    paths += [path for path in sorted(INDEX.parent.glob("*.json"))
+              if path.name not in {"sources.json", "observed.json"}]
+    entries = {path.relative_to(ROOT).as_posix(): digest
+               for path, digest in source_digests(paths, root=ROOT).items()}
     return {"version": "0.4.0", "upstream_revision": source["revision"],
             "kind": "fixture-identities-not-observed-product-results", "files": entries}
 
@@ -108,12 +105,14 @@ def main():
         receipt["worktree"] = "modified; see file digests"
         paths = [ROOT / "python/plenora_rest/_async_engine.py", ROOT / "scripts/check_packages.py", ROOT / "scripts/release.py"]
         paths += sorted((ROOT / "scripts").glob("*frozen*.py"))
-        receipt["files"] = {path.relative_to(ROOT).as_posix(): digest(path) for path in paths}
+        paths.append(ROOT / "scripts/source_identity.py")
+        receipt["source_identity"] = "sha256-git-clean"
+        receipt["files"] = {path.relative_to(ROOT).as_posix(): value for path, value in source_digests(paths, root=ROOT).items()}
         receipt["scope"] = "Python assurance and async facade with controlled worker; excludes native SDK and Rust"
         output = ROOT / "target/frozen"
         output.mkdir(parents=True, exist_ok=True)
-        (output / "python.json").write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
-        (output / "python.log").write_text(log, encoding="utf-8")
+        (output / "python.json").write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8", newline="\n")
+        (output / "python.log").write_text(log, encoding="utf-8", newline="\n")
         print(log)
         return 0 if receipt["passed"] else 1
     return 0

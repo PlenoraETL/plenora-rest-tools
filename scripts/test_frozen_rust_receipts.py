@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from frozen_rust import ROOT, run_target, rust_passed
+from frozen_rust import run_target, rust_passed
 
 
 class RustReceiptTests(unittest.TestCase):
@@ -19,7 +19,7 @@ class RustReceiptTests(unittest.TestCase):
             self.assertFalse(rust_passed(code, text))
 
     def test_discovery_executes_later_tests_after_failure_and_timeout(self):
-        with tempfile.TemporaryDirectory(dir=ROOT / "target") as directory:
+        with tempfile.TemporaryDirectory() as directory:
             listing = subprocess.CompletedProcess([], 0, "a: test\nb: test\nc: test\n", "")
             failed = subprocess.CompletedProcess([], 1, "test result: FAILED. 0 passed; 1 failed; 0 ignored;", "")
             passed = subprocess.CompletedProcess([], 0, "test result: ok. 1 passed; 0 failed; 0 ignored;", "")

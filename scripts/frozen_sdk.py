@@ -4,7 +4,8 @@ from pathlib import Path
 import sys
 import unittest
 
-from frozen_proofs import ROOT, digest, run_suite
+from frozen_proofs import ROOT, run_suite
+from source_identity import byte_digest, source_digests
 
 
 def main():
@@ -18,12 +19,13 @@ def main():
         suite.addTests(unittest.defaultTestLoader.discover(str(tests), pattern=pattern))
     result, log = run_suite(suite)
     result["python"] = sys.version
-    result["native_sha256"] = digest(Path(_native.__file__))
-    result["files"] = {p.relative_to(ROOT).as_posix():digest(p) for p in sorted((ROOT / "python").rglob("*.py"))}
+    result["native_sha256"] = byte_digest(Path(_native.__file__))
+    result["source_identity"] = "sha256-git-clean"
+    result["files"] = {p.relative_to(ROOT).as_posix(): value for p, value in source_digests(sorted((ROOT / "python").rglob("*.py"))).items()}
     directory = ROOT / "target/frozen"
     directory.mkdir(parents=True, exist_ok=True)
-    (directory / "sdk.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
-    (directory / "sdk.log").write_text(log, encoding="utf-8")
+    (directory / "sdk.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8", newline="\n")
+    (directory / "sdk.log").write_text(log, encoding="utf-8", newline="\n")
     print(log)
     return 0 if result["passed"] else 1
 

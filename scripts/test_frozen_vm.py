@@ -6,12 +6,12 @@ import unittest
 from pathlib import Path
 
 from frozen_vm import Collection
-from frozen_rust import ROOT, environment
+from frozen_rust import environment
 
 
 class CollectionTests(unittest.TestCase):
     def test_failure_and_skip_do_not_stop_collection_or_become_green(self):
-        with tempfile.TemporaryDirectory(dir=ROOT / "target") as directory:
+        with tempfile.TemporaryDirectory() as directory:
             collector = Collection(Path(directory),environment())
             for label,code in (("failed",1),("skipped",77),("later",0)):
                 collector.run(label,[sys.executable,"-c",f"raise SystemExit({code})"])
