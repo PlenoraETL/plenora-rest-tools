@@ -2996,6 +2996,7 @@ fn is_public_ipv6(address: Ipv6Addr) -> bool {
 
 #[cfg(test)]
 mod tests {
+    include!("../tests/support/frozen_retry.rs");
     use std::{
         net::{IpAddr, Ipv4Addr, Ipv6Addr},
         time::{Duration, UNIX_EPOCH},

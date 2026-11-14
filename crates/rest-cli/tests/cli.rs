@@ -6,6 +6,9 @@
 
 mod support;
 
+#[path = "../../rest-engine-core/tests/support/snapshot.rs"]
+mod frozen_snapshot;
+
 use std::{
     io::{Read, Write},
     net::{TcpListener, TcpStream},
@@ -26,6 +29,33 @@ const OPERATIONS: [&str; 5] = ["test", "generate", "enrich", "download", "upload
 
 fn binary() -> Command {
     Command::new(env!("CARGO_BIN_EXE_plenora-rest"))
+}
+
+#[test]
+fn frozen_private_admission_stdout_and_stderr() {
+    let sentinel = format!("private_cli_{:010}", std::process::id());
+    let corpus: Value = serde_json::from_str(
+        &include_str!("../../../tests/frozen/0.4.0/private-inputs.json")
+            .replace("__CANARY__", &sentinel),
+    )
+    .unwrap();
+    for case in corpus["cases"].as_array().unwrap() {
+        let request =
+            json!({"schema_version":1,"operation":"test","connection":case["connection"]});
+        let output = run(
+            &["test", "--input", "-", "--format", "json"],
+            Some(&serde_json::to_vec(&request).unwrap()),
+        );
+        assert!(!output.status.success());
+        assert!(!String::from_utf8_lossy(&output.stdout).contains(&sentinel));
+        assert!(!String::from_utf8_lossy(&output.stderr).contains(&sentinel));
+        let machine = machine_output(&output);
+        assert_eq!(machine.document["status"], "error");
+        frozen_snapshot::observe(
+            &format!("private-cli-{}", case["id"].as_str().unwrap()),
+            json!({"exit":machine.exit,"document":machine.document,"stderr":String::from_utf8(output.stderr).unwrap()}),
+        );
+    }
 }
 
 fn run(arguments: &[&str], stdin: Option<&[u8]>) -> Output {

@@ -1,0 +1,7 @@
+{
+  "scope": "Admission failures only; does not qualify remote response or filesystem failure paths",
+  "cases": [
+    {"id":"unknown-connection-member","connection":{"url":"http://127.0.0.1/__CANARY__","__CANARY__":"__CANARY__","headers":{"Authorization":"Bearer __CANARY__"}}},
+    {"id":"invalid-method","connection":{"url":"http://127.0.0.1/__CANARY__","method":"__CANARY__","headers":{"Authorization":"Bearer __CANARY__"}}}
+  ]
+}

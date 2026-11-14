@@ -20,6 +20,50 @@ use tokio::{
 const MESSAGE_ID: &str = "11111111-1111-4111-8111-111111111111";
 const CORRELATION_ID: &str = "22222222-2222-4222-8222-222222222222";
 
+#[path = "support/snapshot.rs"]
+mod frozen_snapshot;
+
+#[tokio::test]
+async fn frozen_private_runtime_admission() {
+    let sentinel = format!("private_runtime_{:010}", std::process::id());
+    let corpus: Value = serde_json::from_str(
+        &include_str!("../../../tests/frozen/0.4.0/private-inputs.json")
+            .replace("__CANARY__", &sentinel),
+    )
+    .unwrap();
+    let engine = local_engine();
+    let binding = RuntimeBinding::new(&engine, &EmptyResources);
+    for case in corpus["cases"].as_array().unwrap() {
+        let mut request = runtime_request("http://127.0.0.1/");
+        request.payload["connection"] = case["connection"].clone();
+        let response = binding
+            .invoke_json(
+                &serde_json::to_string(&request).unwrap(),
+                CancellationToken::new(),
+            )
+            .await;
+        let public = match response {
+            Ok(message) => {
+                let parsed: Value = serde_json::from_str(&message).unwrap();
+                assert_eq!(parsed["kind"], "error");
+                message
+            }
+            Err(error) => serde_json::to_string(&error.payload()).unwrap(),
+        };
+        assert!(!public.contains(&sentinel));
+        let mut observed: Value = serde_json::from_str(&public).unwrap();
+        if let Some(metadata) = observed.get_mut("metadata").and_then(Value::as_object_mut) {
+            // Response identity is fresh; keep the stable trace/causation fields.
+            let identity = metadata.remove("plenora.message.id").unwrap();
+            assert!(identity.as_str().is_some_and(|value| value.len() == 36));
+        }
+        frozen_snapshot::observe(
+            &format!("private-runtime-{}", case["id"].as_str().unwrap()),
+            observed,
+        );
+    }
+}
+
 struct EmptyResources;
 
 impl RuntimeResources for EmptyResources {

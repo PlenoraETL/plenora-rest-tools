@@ -2,6 +2,9 @@ use plenora_rest_core::{
     CancellationToken, CookieSession, Engine, EngineConfig, EngineError, ExecutionControl,
     ExecutionRequest,
 };
+
+#[path = "support/frozen.rs"]
+mod frozen;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
