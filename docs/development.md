@@ -17,7 +17,7 @@ Per lavorare senza Docker sono utili:
 - rustup: rust-toolchain.toml fissa il compilatore dei gate (1.98.1, con
   rustfmt e Clippy) e rustup lo installa al primo comando cargo;
 - la toolchain 1.98.0 per controllare in locale la MSRV pubblicata;
-- CPython da 3.10 a 3.14;
+- CPython 3.14 o successivo;
 - Maturin compatibile con pyproject.toml.
 
 La CI usa Linux (gate Docker) e Windows (job nativo). macOS puÃ² essere un
@@ -148,7 +148,7 @@ Il gate costruisce ambienti self-contained e verifica:
    documentazione ferma giÃ  la compilazione;
 9. build release della wheel;
 10. installazione e test dello SDK in un ambiente Python pulito;
-11. installazione della stessa wheel ABI3 su CPython 3.10-3.14.
+11. installazione della stessa wheel ABI3 su CPython 3.14.
 
 La baseline breve usa server locali e carichi deterministici. Non sostituisce
 la campagna finale di staging descritta nella roadmap.
@@ -157,7 +157,7 @@ Il workflow Verify esegue lo stesso script su pull request, push a main e
 avvio manuale. Nello stesso workflow il job Windows esegue rustfmt, Clippy con
 `-D warnings`, il Clippy anti-panic, `cargo test --workspace --locked` e
 rustdoc con il compilatore di rust-toolchain.toml, costruisce la wheel abi3 win_amd64 con maturin 1.16.0 e la
-prova installata su CPython 3.10-3.14 con scripts/test_wheel.ps1, che esegue
+prova installata su CPython 3.14 con scripts/test_wheel.ps1, che esegue
 python/tests da fuori del checkout.
 
 ## Campagna operativa
@@ -298,7 +298,7 @@ Gli artefatti prodotti sono:
 - plenora-rest-core versione corrente in formato crate;
 - wheel plenora-rest ABI3 manylinux2014 x86_64;
 - wheel plenora-rest ABI3 win_amd64, costruita dal workflow Release su
-  Windows e provata su CPython 3.10-3.14 prima di entrare nel pacchetto;
+  Windows e provata su CPython 3.14 prima di entrare nel pacchetto;
 - binario CLI plenora-rest-linux-x86_64 (manylinux2014, glibc 2.17 o
   successiva);
 - binario CLI plenora-rest-windows-x86_64.exe, costruito dallo stesso job
@@ -411,10 +411,10 @@ fixture adottate; i registri dei pacchetti e delle superfici di coverage con i
 sorgenti; le evidenze di adozione con file e funzioni esistenti; le matrici
 Python con `pyproject.toml`. Controlla anche pin degli strumenti e collegamento
 del proprio runner al job PR. Gli estrattori Rust sono statici e limitati alle
-forme dichiarative correnti: una forma assente o ambigua ? un errore.
+forme dichiarative correnti: una forma assente o ambigua è un errore.
 
 I report conservati in `campaign/reports` descrivono il commit della loro
-esecuzione: il loro elenco ? scoperto dai file, non ? una qualifica del codice
+esecuzione: il loro elenco è scoperto dai file, non è una qualifica del codice
 corrente. La qualifica comportamentale resta nei test Rust, SDK e nelle
 campagne. Il controllo offline non compila Rust e non sostituisce quei gate.
 
@@ -483,3 +483,22 @@ Restano invariati i test unitari inclusi dal modulo TLS: CA aggiunta alle
 radici Mozilla (certificato pubblico senza chiave), provider ring esplicito,
 protocolli ALPN e compatibilità reqwest, errori statici per CA/identità malformate
 anche con verifica disabilitata.
+
+## Fonte Python e politica comune
+
+`.python-version` è la fonte normativa del minor Python. I metadata e i tag
+ABI3 sono copie verificate da `python scripts/check_python_version.py`;
+`--runtime` controlla anche l'interprete, `--wheel` i metadata dell'artefatto.
+Il test di mutazione è `scripts/test_python_version.py`. I workflow leggono
+la fonte tramite `python-version-file`; gli installer container sono fissati
+per versione e SHA256 e verificati dalla stessa guardia.
+
+`.ci/plenora-dependencies/` contiene lo snapshot comune immutato, incluso il
+checker. Il job Linux assurance ne verifica i digest ed esegue:
+
+```sh
+python .ci/plenora-dependencies/controlla_dipendenze.py --repo . --nome plenora-rest-tools --json target/dependencies.json
+```
+
+Le sole eccezioni ammesse sono quelle del manifesto comune; una nuova
+risoluzione non autorizza a modificare lo snapshot per far passare il gate.

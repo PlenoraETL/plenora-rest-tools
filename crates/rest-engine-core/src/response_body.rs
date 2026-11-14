@@ -119,7 +119,10 @@ fn parse_xml(body: &[u8]) -> Result<Value, EngineError> {
     // event of its own, so trimming each piece dropped the spaces around a
     // reference (`Fish &amp; Chips` read as `Fish&Chips`). The text of an
     // element is trimmed once, whole, when the element is attached.
-    let mut reader = Reader::from_reader(body);
+    let body = std::str::from_utf8(body).map_err(|_| {
+        EngineError::InvalidResponse(ErrorDetail::from("XML response is not UTF-8"))
+    })?;
+    let mut reader = Reader::from_str(body);
     let mut stack: Vec<XmlNode> = Vec::new();
     let mut root: Option<(String, Value)> = None;
 
@@ -131,18 +134,16 @@ fn parse_xml(body: &[u8]) -> Result<Value, EngineError> {
                         "XML nesting exceeds the supported limit",
                     )));
                 }
-                stack.push(xml_node(&reader, &event)?);
+                stack.push(xml_node(&event)?);
             }
             Ok(Event::Empty(event)) => {
-                let node = xml_node(&reader, &event)?;
+                let node = xml_node(&event)?;
                 attach_xml_node(&mut stack, &mut root, node)?;
             }
             Ok(Event::Text(event)) => {
-                let text = event.decode().map_err(|_| {
-                    EngineError::InvalidResponse(ErrorDetail::from("XML contains invalid text"))
-                })?;
+                let text = event.as_ref();
                 match stack.last_mut() {
-                    Some(node) => node.text.push_str(&text),
+                    Some(node) => node.text.push_str(text),
                     // Only the whitespace XML allows around the root element.
                     None if text
                         .chars()
@@ -151,13 +152,11 @@ fn parse_xml(body: &[u8]) -> Result<Value, EngineError> {
                 }
             }
             Ok(Event::CData(event)) => {
-                let text = event.decode().map_err(|_| {
-                    EngineError::InvalidResponse(ErrorDetail::from("XML contains invalid CDATA"))
-                })?;
+                let text = event.as_ref();
                 let Some(node) = stack.last_mut() else {
                     return Err(xml_content_outside_root());
                 };
-                node.text.push_str(&text);
+                node.text.push_str(text);
             }
             Ok(Event::End(event)) => {
                 let node = stack.pop().ok_or_else(|| {
@@ -181,12 +180,8 @@ fn parse_xml(body: &[u8]) -> Result<Value, EngineError> {
                 let resolved = match event.resolve_char_ref() {
                     Ok(Some(character)) => String::from(character),
                     Ok(None) => {
-                        let name = event.decode().map_err(|_| {
-                            EngineError::InvalidResponse(ErrorDetail::from(
-                                "XML contains an invalid entity reference",
-                            ))
-                        })?;
-                        resolve_predefined_entity(&name)
+                        let name = event.as_ref();
+                        resolve_predefined_entity(name)
                             .ok_or_else(|| {
                                 EngineError::InvalidResponse(ErrorDetail::from(
                                     "XML DTDs and entity references are not allowed",
@@ -239,10 +234,7 @@ fn xml_content_outside_root() -> EngineError {
     ))
 }
 
-fn xml_node(
-    reader: &Reader<&[u8]>,
-    event: &quick_xml::events::BytesStart<'_>,
-) -> Result<XmlNode, EngineError> {
+fn xml_node(event: &quick_xml::events::BytesStart<'_>) -> Result<XmlNode, EngineError> {
     let mut content = Map::new();
     for attribute in event.attributes().with_checks(true) {
         let attribute = attribute.map_err(|_| {
@@ -253,7 +245,7 @@ fn xml_node(
         // declaration the specification assumes 1.0, and the 1.1 specific
         // newline forms are deliberately not honoured for remote payloads.
         let value = attribute
-            .decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
+            .normalized_value(XmlVersion::Implicit1_0)
             .map_err(|_| {
                 EngineError::InvalidResponse(ErrorDetail::from(
                     "XML contains an invalid attribute value",
@@ -322,10 +314,7 @@ fn attach_xml_node(
 /// joined by one `:`. The reader accepts any bytes as a name, and the JSON
 /// shape reserves `@` for attributes and `#text` for text: `<@id>`,
 /// `<x:#text>`, `<a:>` or `<1:a>` would read as something they are not.
-fn xml_name(raw: &[u8]) -> Result<String, EngineError> {
-    let name = std::str::from_utf8(raw).map_err(|_| {
-        EngineError::InvalidResponse(ErrorDetail::from("XML contains a name that is not UTF-8"))
-    })?;
+fn xml_name(name: &str) -> Result<String, EngineError> {
     let (prefix, local) = match name.split_once(':') {
         Some((prefix, local)) => (Some(prefix), local),
         None => (None, name),
@@ -437,6 +426,22 @@ mod tests {
     }
 
     #[test]
+    fn xml_rejects_invalid_utf8_in_every_event() {
+        for body in [
+            &b"<a>\xff</a>"[..],
+            b"<a><![CDATA[\xff]]></a>",
+            b"<a id=\"\xff\"/>",
+            b"<!--\xff--><a/>",
+            b"<?probe \xff?><a/>",
+        ] {
+            let Err(crate::EngineError::InvalidResponse(detail)) = parse_xml(body) else {
+                panic!("invalid UTF-8 must be refused");
+            };
+            assert_eq!(detail.text(), "XML response is not UTF-8");
+        }
+    }
+
+    #[test]
     fn xml_names_are_never_altered_or_merged_silently() {
         // Found while writing the properties of the response_body fuzz
         // target: a name that was not UTF-8 was read with replacement
@@ -446,7 +451,7 @@ mod tests {
         else {
             panic!("a name that is not UTF-8 must be refused");
         };
-        assert_eq!(detail.text(), "XML contains a name that is not UTF-8");
+        assert_eq!(detail.text(), "XML response is not UTF-8");
         let Err(crate::EngineError::InvalidResponse(detail)) =
             parse_xml(b"<a x:id=\"1\" y:id=\"2\"/>")
         else {

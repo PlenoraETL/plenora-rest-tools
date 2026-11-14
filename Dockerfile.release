@@ -37,7 +37,8 @@ RUN find . -type d -exec chmod 0755 {} + \
 
 RUN test -n "${SOURCE_DATE_EPOCH}" \
     && case "${SOURCE_DATE_EPOCH}" in *[!0-9]*) exit 1 ;; esac \
-    && python3 scripts/check_packages.py \
+    && /opt/python/cp314-cp314/bin/python scripts/check_python_version.py --runtime \
+    && /opt/python/cp314-cp314/bin/python scripts/check_packages.py \
     && cargo package --package plenora-rest-core --locked --allow-dirty --no-verify \
     && mkdir -p /tmp/release-artifacts /tmp/wheels \
     && cp /tmp/cargo-target/package/plenora-rest-core-*.crate /tmp/release-artifacts/ \
@@ -46,7 +47,7 @@ RUN test -n "${SOURCE_DATE_EPOCH}" \
         --locked \
         --strip \
         --compatibility manylinux2014 \
-        --interpreter /opt/python/cp310-cp310/bin/python \
+        --interpreter /opt/python/cp314-cp314/bin/python \
         --out /tmp/wheels \
     && cp /tmp/wheels/*.whl /tmp/release-artifacts/ \
     && cargo build \
@@ -61,7 +62,7 @@ RUN test -n "${SOURCE_DATE_EPOCH}" \
 FROM build AS python-abi3
 
 RUN set -eux; \
-    for tag in cp310-cp310 cp311-cp311 cp312-cp312 cp313-cp313 cp314-cp314; do \
+    for tag in cp314-cp314; do \
         interpreter="/opt/python/${tag}/bin/python"; \
         target="/tmp/abi3-${tag}"; \
         "${interpreter}" -m pip install \

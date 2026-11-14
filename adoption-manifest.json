@@ -10,7 +10,7 @@
     {
       "name": "plenora-rest-core",
       "surface": "rust",
-      "version": "0.3.3",
+      "version": "0.4.0",
       "digest": "sha256:af2034e4e0d3c26fd5056ad3ecc9d6f662d6a5b71aae5433a9a7fe3518fda8e2",
       "verification": [
         "powershell -File scripts/release.ps1",
@@ -21,20 +21,21 @@
     {
       "name": "plenora-rest",
       "surface": "python_sdk",
-      "version": "0.3.3",
+      "version": "0.4.0",
       "digest": "sha256:e76b196ca736918bc0dd1c11fb0e0542724a2a45aa1c09e64a25bbd1b557af14",
       "api_modes": [
-        "sync"
+        "sync",
+        "async"
       ],
       "verification": [
         "powershell -File scripts/release.ps1",
-        "install wheel in a clean virtualenv and run python/tests/test_smoke.py"
+        "install wheel in a clean virtualenv and run all python/tests including test_async.py"
       ]
     },
     {
       "name": "plenora-rest-linux-x86_64",
       "surface": "cli",
-      "version": "0.3.3",
+      "version": "0.4.0",
       "digest": "sha256:9fc43790693f549c09b4e2a6752029333d3b7aa080a8631763b7764760e855d0",
       "verification": [
         "powershell -File scripts/release.ps1",
@@ -44,7 +45,7 @@
     {
       "name": "plenora.rest-tools",
       "surface": "runtime",
-      "version": "0.3.3",
+      "version": "0.4.0",
       "digest": "sha256:af2034e4e0d3c26fd5056ad3ecc9d6f662d6a5b71aae5433a9a7fe3518fda8e2",
       "verification": [
         "powershell -File scripts/release.ps1",
