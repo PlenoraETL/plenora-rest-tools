@@ -1,3 +1,4 @@
+use crate::error::{ExecutionEvent, FailureContext};
 use std::{
     collections::{BTreeMap, HashMap},
     hash::{Hash, Hasher},
@@ -57,11 +58,11 @@ static DOWNLOAD_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 /// The same count says whether a failure may have had a remote effect
 /// (Typed Errors 1.0, ERR-014): once a request of the operation went out,
 /// whatever its method or its answer, an error cannot claim that nothing
-/// happened remotely. `records` keeps that count per input record, for the
-/// operations whose errors belong to one record (enrich): a request counts
+/// happened remotely. The event reducer retains that fact per input record, for the
+/// operations whose errors belong to one record (enrich): a send is observed
 /// for every record of the [`RECORD_SCOPE`] it was sent in.
 ///
-/// `phases` is the public phase the transport last entered (prepare,
+/// `phases` holds the reduced events and the last public phase (prepare,
 /// connect, read, write; ERR-003), for the execution and for each record of
 /// the scope. It gives the phase of an error whose variant says `validate`,
 /// "before any network activity", but that is raised after a request was
@@ -77,37 +78,46 @@ static DOWNLOAD_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 pub(crate) struct ExecutionTally {
     pub(crate) requests: AtomicU64,
     pub(crate) retries: AtomicU64,
-    pub(crate) records: std::sync::Mutex<BTreeMap<usize, u64>>,
     phases: std::sync::Mutex<PhaseTrack>,
 }
 
 #[derive(Default)]
 struct PhaseTrack {
-    operation: Option<ErrorPhase>,
-    records: BTreeMap<usize, ErrorPhase>,
+    operation: FailureContext,
+    records: BTreeMap<usize, FailureContext>,
 }
 
 impl ExecutionTally {
-    /// Requests sent on behalf of input record `index`.
-    pub(crate) fn record_requests(&self, index: usize) -> u64 {
-        self.records
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(&index)
-            .copied()
-            .unwrap_or(0)
-    }
-
-    /// The public phase last entered by the execution, or by input record
-    /// `index`.
-    pub(crate) fn phase(&self, index: Option<usize>) -> Option<ErrorPhase> {
+    pub(crate) fn failure_context(&self, index: Option<usize>) -> FailureContext {
         let track = self
             .phases
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         match index {
             None => track.operation,
-            Some(index) => track.records.get(&index).copied(),
+            Some(index) => track.records.get(&index).copied().unwrap_or_default(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn phase(&self, index: Option<usize>) -> Option<ErrorPhase> {
+        self.failure_context(index).entered
+    }
+
+    fn observe(&self, event: ExecutionEvent) {
+        let mut track = self
+            .phases
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let in_records = RECORD_SCOPE.try_with(|indices| {
+            for index in indices.iter() {
+                track.records.entry(*index).or_default().observe(event);
+            }
+        });
+        // Sends count for the whole operation even inside a record; phases
+        // stay local to their scope, independent of record scheduling.
+        if in_records.is_err() || matches!(event, ExecutionEvent::RequestSent) {
+            track.operation.observe(event);
         }
     }
 }
@@ -115,20 +125,7 @@ impl ExecutionTally {
 /// Records that the transport enters the public `phase`: for every record of
 /// the current [`RECORD_SCOPE`], or for the execution outside any record.
 pub(crate) fn enter_phase(phase: ErrorPhase) {
-    tally(|tally| {
-        let mut track = tally
-            .phases
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let in_records = RECORD_SCOPE.try_with(|indices| {
-            for index in indices.iter() {
-                track.records.insert(*index, phase);
-            }
-        });
-        if in_records.is_err() {
-            track.operation = Some(phase);
-        }
-    });
+    tally(|tally| tally.observe(ExecutionEvent::Entered(phase)));
 }
 
 tokio::task_local! {
@@ -1705,16 +1702,7 @@ impl Transport {
                 if retry && redirects == 0 {
                     tally.retries.fetch_add(1, Ordering::Relaxed);
                 }
-                let _ = RECORD_SCOPE.try_with(|indices| {
-                    let mut records = tally
-                        .records
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    for index in indices.iter() {
-                        let count = records.entry(*index).or_insert(0);
-                        *count = count.saturating_add(1);
-                    }
-                });
+                tally.observe(ExecutionEvent::RequestSent);
             });
             rate_limit_wait_ms = rate_limit_wait_ms.saturating_add(waited_ms);
             let response = builder.send().await.map_err(map_reqwest_error)?;

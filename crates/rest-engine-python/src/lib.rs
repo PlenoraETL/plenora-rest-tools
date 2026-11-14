@@ -122,11 +122,13 @@ impl NativeEngine {
 }
 
 fn to_python_error(error: EngineError) -> PyErr {
-    let payload = serde_json::to_string(&error.payload()).unwrap_or_else(|_| {
-        r#"{"category":"internal","phase":"cleanup","remote_effect":"none","retry":{"kind":"never"},"code":"RUNTIME_ERROR","message":"REST engine failed internally","details":{}}"#
-            .to_owned()
-    });
-    NativePlenoraError::new_err(payload)
+    match serde_json::to_string(&error.payload()).or_else(|_| {
+        serde_json::to_string(&EngineError::Runtime("error serialization failed".into()).payload())
+    }) {
+        Ok(payload) => NativePlenoraError::new_err(payload),
+        // Even a failure to serialize the fallback is explicit; no copied tuple.
+        Err(_) => NativePlenoraError::new_err("REST error could not be serialized"),
+    }
 }
 
 #[pymodule]
@@ -137,6 +139,19 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
         "NativePlenoraError",
         module.py().get_type::<NativePlenoraError>(),
     )?;
+    // Private SDK inputs: both payloads are projections of the core catalog.
+    // Strings prevent callers from mutating the template shared by instances.
+    for (name, error) in [
+        (
+            "_INTERNAL_ERROR_JSON",
+            EngineError::Runtime("SDK boundary failure".into()),
+        ),
+        ("_CLOSED_ERROR_JSON", EngineError::EngineClosed),
+    ] {
+        let payload = serde_json::to_string(&error.payload())
+            .map_err(|_| PyException::new_err("REST error catalog could not be serialized"))?;
+        module.add(name, payload)?;
+    }
     module.add("SCHEMA_VERSION", plenora_rest_core::SCHEMA_VERSION)?;
     module.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())

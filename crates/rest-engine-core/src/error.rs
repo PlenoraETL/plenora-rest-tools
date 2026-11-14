@@ -394,50 +394,58 @@ impl RetryAdvice {
     };
 }
 
-/// The phase of an error whose variant says `validate`, "before any network
-/// activity", but that was raised after the transport entered a public phase
-/// (ERR-003, the last phase known to have started): `entered`, the phase
-/// recorded by the execution context. The cookie session, the circuit breaker
-/// or the cache refusing a request give `connect`; a body that cannot be built
-/// gives `prepare`; a redirect, a polling URL or a pagination link refused
-/// while a response is interpreted give `read`, also when that response came
-/// from the cache and nothing was sent. Other phases are the variant's own and
-/// are kept. This says when the error happened, not what it did remotely:
-/// [`after_sent_request`] decides that, from the requests actually sent.
-pub(crate) fn normalize_phase(error: &mut ExecutionError, entered: Option<ErrorPhase>) {
-    if error.phase == ErrorPhase::Validate
-        && let Some(entered) = entered
-    {
-        error.phase = entered;
+/// Events retained independently for the operation and each input record.
+#[derive(Clone, Copy)]
+pub(crate) enum ExecutionEvent {
+    Entered(ErrorPhase),
+    RequestSent,
+}
+
+/// Reduction of execution events, independent of their count and scheduling.
+/// A cached response can enter a phase without ever sending a request.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct FailureContext {
+    pub(crate) entered: Option<ErrorPhase>,
+    sent: bool,
+}
+
+impl FailureContext {
+    pub(crate) fn observe(&mut self, event: ExecutionEvent) {
+        match event {
+            ExecutionEvent::Entered(phase) => self.entered = Some(phase),
+            ExecutionEvent::RequestSent => self.sent = true,
+        }
+    }
+
+    /// ERR-003 and ERR-014 are applied together, once the execution has ended.
+    /// Existing unknown/committed/partial effects and their retry advice stay
+    /// intact. A record's events never determine the operation's phase.
+    pub(crate) fn apply(self, error: &mut ExecutionError) {
+        if error.phase == ErrorPhase::Validate
+            && let Some(entered) = self.entered
+        {
+            error.phase = entered;
+        }
+        if self.sent && error.remote_effect == RemoteEffect::None {
+            error.remote_effect = RemoteEffect::Unknown;
+            error.retry = RetryAdvice::REQUIRES_RECOVERY;
+            if error.phase == ErrorPhase::Validate {
+                error.phase = ErrorPhase::Read;
+            }
+        }
     }
 }
 
-/// Corrects the effect of an error raised after a request of the operation
-/// (or of its input record) was sent (Typed Errors 1.0, ERR-014).
-///
-/// The axes of a variant describe where it is normally raised: before the
-/// network, for most of those that report `remote_effect: none`. Raised once a
-/// request has gone out, whatever its method and its answer (a redirect, an
-/// OAuth token request included), the same failure cannot prove that the
-/// remote side did nothing: a cross-origin redirect after a POST, a polling
-/// URL refused after the job was accepted, a source file that cannot be
-/// reopened for a second attempt. Such an error reports `unknown` and
-/// `requires_recovery`. Category, code, message and details are kept: they
-/// still say what failed. Called only when a request was sent: without one
-/// the error keeps `none` and `never`, whatever its phase.
-///
-/// The phase was set by [`normalize_phase`]. An error still in `validate`
-/// here had no recorded phase; once a request was sent that cannot hold, and
-/// it becomes `read`, the phase every sent request starts. An error that
-/// already reports an effect (`unknown`, `committed`, `partial`) keeps all its
-/// axes.
-pub(crate) fn after_sent_request(error: &mut ExecutionError) {
-    if error.remote_effect == RemoteEffect::None {
-        error.remote_effect = RemoteEffect::Unknown;
-        error.retry = RetryAdvice::REQUIRES_RECOVERY;
-        if error.phase == ErrorPhase::Validate {
-            error.phase = ErrorPhase::Read;
-        }
+/// Preserve the already resolved tuple when crossing the runtime boundary.
+pub(crate) fn execution_error_payload(error: &ExecutionError) -> ErrorPayload {
+    ErrorPayload {
+        category: error.category,
+        phase: error.phase,
+        remote_effect: error.remote_effect,
+        retry: error.retry,
+        code: error.code.clone(),
+        message: error.message.clone(),
+        details: error.details.clone(),
     }
 }
 
@@ -470,17 +478,29 @@ pub struct ErrorPayload {
     pub details: BTreeMap<String, Value>,
 }
 
+// Each variant has one complete static row. Dynamic numeric details and the
+// duplicate-member diagnostic do not change its classification.
+struct ErrorDescriptor {
+    code: &'static str,
+    message: &'static str,
+    category: ErrorCategory,
+    phase: ErrorPhase,
+    remote_effect: RemoteEffect,
+    retry: RetryAdvice,
+}
+
 impl EngineError {
     /// Builds the serializable error object for this failure: code, static
     /// message, category, phase, remote effect, retry advice and numeric
     /// details are all derived from the variant.
     pub fn payload(&self) -> ErrorPayload {
+        let descriptor = self.descriptor();
         ErrorPayload {
-            category: self.category(),
-            phase: self.phase(),
-            remote_effect: self.remote_effect(),
-            retry: self.retry(),
-            code: self.code().to_owned(),
+            category: descriptor.category,
+            phase: descriptor.phase,
+            remote_effect: descriptor.remote_effect,
+            retry: descriptor.retry,
+            code: descriptor.code.to_owned(),
             message: self.public_message().to_owned(),
             details: self.details(),
         }
@@ -500,38 +520,252 @@ impl EngineError {
         }
     }
 
-    fn code(&self) -> &'static str {
-        match self {
-            Self::InvalidInput(_) => "INVALID_INPUT",
-            Self::UnsupportedSchema { .. } => "UNSUPPORTED_SCHEMA",
-            Self::InvalidUrl(_) => "INVALID_URL",
-            Self::UnsafeAddress(_) => "UNSAFE_ADDRESS",
-            Self::PolicyViolation(_) => "POLICY_VIOLATION",
-            Self::DnsResolution(_) => "DNS_RESOLUTION_FAILED",
-            Self::InvalidHeader(_) => "INVALID_HEADER",
-            Self::Timeout => "TIMEOUT",
-            Self::Cancelled => "CANCELLED",
-            Self::EngineClosed => "ENGINE_CLOSED",
-            Self::CircuitOpen { .. } => "CIRCUIT_OPEN",
-            Self::Transport(_) => "TRANSPORT_ERROR",
-            Self::ResponseTooLarge { .. } => "RESPONSE_TOO_LARGE",
-            Self::RequestTooLarge { .. } => "REQUEST_TOO_LARGE",
-            Self::FileTooLarge { .. } => "FILE_TOO_LARGE",
-            Self::FileIo(_) => "FILE_IO",
-            Self::ChecksumMismatch { .. } => "CHECKSUM_MISMATCH",
-            Self::HttpStatus { .. } => "HTTP_STATUS",
-            Self::InvalidResponse(_) => "INVALID_RESPONSE",
-            Self::Application(_) => "APPLICATION_ERROR",
-            Self::MissingParameter(_) => "MISSING_PARAMETER",
-            Self::Authentication(_) => "AUTHENTICATION_FAILED",
-            Self::IdempotencyConflict => "IDEMPOTENCY_CONFLICT",
-            Self::PollingTimeout { .. } => "POLLING_TIMEOUT",
-            Self::PaginationLimit { .. } => "PAGINATION_LIMIT_REACHED",
-
-            Self::DeadlineExpired => "DEADLINE_EXPIRED",
-            Self::DownloadWrite(_) => "DOWNLOAD_WRITE_FAILED",
-            Self::CleanupAfterPublish(_) => "CLEANUP_AFTER_PUBLISH_FAILED",
-            Self::Runtime(_) => "RUNTIME_ERROR",
+    fn descriptor(&self) -> ErrorDescriptor {
+        use ErrorCategory as C;
+        use ErrorPhase as P;
+        use RemoteEffect as E;
+        use RetryAdvice as R;
+        let (code, message, category, phase, remote_effect, retry) = match self {
+            Self::InvalidInput(_) => (
+                "INVALID_INPUT",
+                "REST input is invalid",
+                C::InvalidConfiguration,
+                P::Validate,
+                E::None,
+                R::NEVER,
+            ),
+            Self::UnsupportedSchema { .. } => (
+                "UNSUPPORTED_SCHEMA",
+                "REST contract version is unsupported",
+                C::Unsupported,
+                P::Validate,
+                E::None,
+                R::NEVER,
+            ),
+            Self::InvalidUrl(_) => (
+                "INVALID_URL",
+                "REST URL is invalid",
+                C::InvalidConfiguration,
+                P::Validate,
+                E::None,
+                R::NEVER,
+            ),
+            Self::UnsafeAddress(_) => (
+                "UNSAFE_ADDRESS",
+                "Outbound address is not allowed",
+                C::Authorization,
+                P::Validate,
+                E::None,
+                R::NEVER,
+            ),
+            Self::PolicyViolation(_) => (
+                "POLICY_VIOLATION",
+                "Security policy denied the request",
+                C::Authorization,
+                P::Validate,
+                E::None,
+                R::NEVER,
+            ),
+            Self::DnsResolution(_) => (
+                "DNS_RESOLUTION_FAILED",
+                "DNS resolution failed",
+                C::Transient,
+                P::Connect,
+                E::None,
+                R::SAFE,
+            ),
+            Self::InvalidHeader(_) => (
+                "INVALID_HEADER",
+                "HTTP header is invalid",
+                C::InvalidConfiguration,
+                P::Prepare,
+                E::None,
+                R::NEVER,
+            ),
+            Self::Timeout => (
+                "TIMEOUT",
+                "REST execution timed out",
+                C::Timeout,
+                P::Read,
+                E::Unknown,
+                R::QUARANTINE,
+            ),
+            Self::Cancelled => (
+                "CANCELLED",
+                "REST execution was cancelled",
+                C::Cancelled,
+                P::Cleanup,
+                E::Unknown,
+                R::QUARANTINE,
+            ),
+            Self::EngineClosed => (
+                "ENGINE_CLOSED",
+                "REST engine is closed",
+                C::Execution,
+                P::Validate,
+                E::None,
+                R::NEVER,
+            ),
+            Self::CircuitOpen { .. } => (
+                "CIRCUIT_OPEN",
+                "Circuit breaker is open",
+                C::Transient,
+                P::Connect,
+                E::None,
+                R::SAFE,
+            ),
+            Self::Transport(_) => (
+                "TRANSPORT_ERROR",
+                "HTTP transport failed",
+                C::Transient,
+                P::Read,
+                E::Unknown,
+                R::QUARANTINE,
+            ),
+            Self::ResponseTooLarge { .. } => (
+                "RESPONSE_TOO_LARGE",
+                "Response exceeded its byte limit",
+                C::ResourceLimit,
+                P::Read,
+                E::Unknown,
+                R::NEVER,
+            ),
+            Self::RequestTooLarge { .. } => (
+                "REQUEST_TOO_LARGE",
+                "Request exceeded its byte limit",
+                C::ResourceLimit,
+                P::Prepare,
+                E::None,
+                R::NEVER,
+            ),
+            Self::FileTooLarge { .. } => (
+                "FILE_TOO_LARGE",
+                "File transfer exceeded its byte limit",
+                C::ResourceLimit,
+                P::Read,
+                E::Unknown,
+                R::NEVER,
+            ),
+            Self::FileIo(_) => (
+                "FILE_IO",
+                "File operation failed",
+                C::Io,
+                P::Write,
+                E::None,
+                R::NEVER,
+            ),
+            Self::ChecksumMismatch { .. } => (
+                "CHECKSUM_MISMATCH",
+                "SHA-256 checksum verification failed",
+                C::Protocol,
+                P::Finalize,
+                E::Unknown,
+                R::NEVER,
+            ),
+            Self::HttpStatus { .. } => (
+                "HTTP_STATUS",
+                "Remote service returned an unsuccessful status",
+                C::Execution,
+                P::Read,
+                E::Unknown,
+                R::NEVER,
+            ),
+            Self::InvalidResponse(_) => (
+                "INVALID_RESPONSE",
+                "Remote response is invalid",
+                C::Protocol,
+                P::Read,
+                E::Unknown,
+                R::NEVER,
+            ),
+            Self::Application(_) => (
+                "APPLICATION_ERROR",
+                "Remote application reported failure",
+                C::Execution,
+                P::Read,
+                E::Unknown,
+                R::NEVER,
+            ),
+            Self::MissingParameter(_) => (
+                "MISSING_PARAMETER",
+                "A required parameter is missing",
+                C::DataMapping,
+                P::Prepare,
+                E::None,
+                R::NEVER,
+            ),
+            Self::Authentication(_) => (
+                "AUTHENTICATION_FAILED",
+                "Authentication failed",
+                C::Authentication,
+                P::Connect,
+                E::None,
+                R::NEVER,
+            ),
+            Self::IdempotencyConflict => (
+                "IDEMPOTENCY_CONFLICT",
+                "Idempotency key conflicts with prior input",
+                C::InvalidConfiguration,
+                P::Validate,
+                E::None,
+                R::NEVER,
+            ),
+            Self::PollingTimeout { .. } => (
+                "POLLING_TIMEOUT",
+                "Asynchronous operation did not complete",
+                C::Timeout,
+                P::Read,
+                E::Unknown,
+                R::REQUIRES_RECOVERY,
+            ),
+            Self::PaginationLimit { .. } => (
+                "PAGINATION_LIMIT_REACHED",
+                "Pagination stopped at a configured limit with data remaining",
+                C::ResourceLimit,
+                P::Read,
+                E::None,
+                R::NEVER,
+            ),
+            Self::DeadlineExpired => (
+                "DEADLINE_EXPIRED",
+                "Execution deadline had already passed",
+                C::Timeout,
+                P::Validate,
+                E::None,
+                R::NEVER,
+            ),
+            Self::DownloadWrite(_) => (
+                "DOWNLOAD_WRITE_FAILED",
+                "Download could not be written after the request was sent",
+                C::Io,
+                P::Write,
+                E::Unknown,
+                R::REQUIRES_RECOVERY,
+            ),
+            Self::CleanupAfterPublish(_) => (
+                "CLEANUP_AFTER_PUBLISH_FAILED",
+                "Download was published but its staging file could not be removed",
+                C::Io,
+                P::Cleanup,
+                E::Committed,
+                R::NEVER,
+            ),
+            Self::Runtime(_) => (
+                "RUNTIME_ERROR",
+                "REST engine failed internally",
+                C::Internal,
+                P::Cleanup,
+                E::None,
+                R::NEVER,
+            ),
+        };
+        ErrorDescriptor {
+            code,
+            message,
+            category,
+            phase,
+            remote_effect,
+            retry,
         }
     }
 
@@ -542,132 +776,7 @@ impl EngineError {
             {
                 "control document contains duplicate JSON members"
             }
-
-            Self::InvalidInput(_) => "REST input is invalid",
-            Self::UnsupportedSchema { .. } => "REST contract version is unsupported",
-            Self::InvalidUrl(_) => "REST URL is invalid",
-            Self::UnsafeAddress(_) => "Outbound address is not allowed",
-            Self::PolicyViolation(_) => "Security policy denied the request",
-            Self::DnsResolution(_) => "DNS resolution failed",
-            Self::InvalidHeader(_) => "HTTP header is invalid",
-            Self::Timeout => "REST execution timed out",
-            Self::Cancelled => "REST execution was cancelled",
-            Self::EngineClosed => "REST engine is closed",
-            Self::CircuitOpen { .. } => "Circuit breaker is open",
-            Self::Transport(_) => "HTTP transport failed",
-            Self::ResponseTooLarge { .. } => "Response exceeded its byte limit",
-            Self::RequestTooLarge { .. } => "Request exceeded its byte limit",
-            Self::FileTooLarge { .. } => "File transfer exceeded its byte limit",
-            Self::FileIo(_) => "File operation failed",
-            Self::ChecksumMismatch { .. } => "SHA-256 checksum verification failed",
-            Self::HttpStatus { .. } => "Remote service returned an unsuccessful status",
-            Self::InvalidResponse(_) => "Remote response is invalid",
-            Self::Application(_) => "Remote application reported failure",
-            Self::MissingParameter(_) => "A required parameter is missing",
-            Self::Authentication(_) => "Authentication failed",
-            Self::IdempotencyConflict => "Idempotency key conflicts with prior input",
-            Self::PollingTimeout { .. } => "Asynchronous operation did not complete",
-            Self::PaginationLimit { .. } => {
-                "Pagination stopped at a configured limit with data remaining"
-            }
-            Self::DeadlineExpired => "Execution deadline had already passed",
-            Self::DownloadWrite(_) => "Download could not be written after the request was sent",
-            Self::CleanupAfterPublish(_) => {
-                "Download was published but its staging file could not be removed"
-            }
-            Self::Runtime(_) => "REST engine failed internally",
-        }
-    }
-
-    fn category(&self) -> ErrorCategory {
-        match self {
-            Self::InvalidInput(_)
-            | Self::InvalidUrl(_)
-            | Self::InvalidHeader(_)
-            | Self::IdempotencyConflict => ErrorCategory::InvalidConfiguration,
-            Self::UnsupportedSchema { .. } => ErrorCategory::Unsupported,
-            Self::UnsafeAddress(_) | Self::PolicyViolation(_) => ErrorCategory::Authorization,
-            Self::DnsResolution(_) | Self::Transport(_) | Self::CircuitOpen { .. } => {
-                ErrorCategory::Transient
-            }
-            Self::Timeout | Self::PollingTimeout { .. } | Self::DeadlineExpired => {
-                ErrorCategory::Timeout
-            }
-            Self::Cancelled => ErrorCategory::Cancelled,
-            Self::EngineClosed => ErrorCategory::Execution,
-            Self::ResponseTooLarge { .. }
-            | Self::RequestTooLarge { .. }
-            | Self::FileTooLarge { .. }
-            | Self::PaginationLimit { .. } => ErrorCategory::ResourceLimit,
-            Self::FileIo(_) | Self::DownloadWrite(_) | Self::CleanupAfterPublish(_) => {
-                ErrorCategory::Io
-            }
-            Self::ChecksumMismatch { .. } | Self::InvalidResponse(_) => ErrorCategory::Protocol,
-            Self::HttpStatus { .. } | Self::Application(_) => ErrorCategory::Execution,
-            Self::MissingParameter(_) => ErrorCategory::DataMapping,
-            Self::Authentication(_) => ErrorCategory::Authentication,
-            Self::Runtime(_) => ErrorCategory::Internal,
-        }
-    }
-
-    fn phase(&self) -> ErrorPhase {
-        match self {
-            Self::InvalidInput(_)
-            | Self::UnsupportedSchema { .. }
-            | Self::InvalidUrl(_)
-            | Self::UnsafeAddress(_)
-            | Self::PolicyViolation(_)
-            | Self::EngineClosed
-            | Self::IdempotencyConflict
-            | Self::DeadlineExpired => ErrorPhase::Validate,
-            Self::DnsResolution(_) | Self::CircuitOpen { .. } | Self::Authentication(_) => {
-                ErrorPhase::Connect
-            }
-            Self::InvalidHeader(_) | Self::RequestTooLarge { .. } | Self::MissingParameter(_) => {
-                ErrorPhase::Prepare
-            }
-            Self::FileIo(_) | Self::DownloadWrite(_) => ErrorPhase::Write,
-            Self::CleanupAfterPublish(_) => ErrorPhase::Cleanup,
-            Self::ChecksumMismatch { .. } => ErrorPhase::Finalize,
-            Self::Cancelled => ErrorPhase::Cleanup,
-            Self::Timeout
-            | Self::Transport(_)
-            | Self::ResponseTooLarge { .. }
-            | Self::FileTooLarge { .. }
-            | Self::HttpStatus { .. }
-            | Self::InvalidResponse(_)
-            | Self::Application(_)
-            | Self::PollingTimeout { .. }
-            | Self::PaginationLimit { .. } => ErrorPhase::Read,
-            Self::Runtime(_) => ErrorPhase::Cleanup,
-        }
-    }
-
-    fn remote_effect(&self) -> RemoteEffect {
-        match self {
-            Self::Timeout
-            | Self::Cancelled
-            | Self::Transport(_)
-            | Self::ResponseTooLarge { .. }
-            | Self::FileTooLarge { .. }
-            | Self::ChecksumMismatch { .. }
-            | Self::HttpStatus { .. }
-            | Self::InvalidResponse(_)
-            | Self::Application(_)
-            | Self::PollingTimeout { .. }
-            | Self::DownloadWrite(_) => RemoteEffect::Unknown,
-            // The publication happened; only local staging is left over.
-            Self::CleanupAfterPublish(_) => RemoteEffect::Committed,
-            _ => RemoteEffect::None,
-        }
-    }
-
-    fn retry(&self) -> RetryAdvice {
-        match self {
-            Self::Timeout | Self::Cancelled | Self::Transport(_) => RetryAdvice::QUARANTINE,
-            Self::PollingTimeout { .. } | Self::DownloadWrite(_) => RetryAdvice::REQUIRES_RECOVERY,
-            Self::DnsResolution(_) | Self::CircuitOpen { .. } => RetryAdvice::SAFE,
-            _ => RetryAdvice::NEVER,
+            _ => self.descriptor().message,
         }
     }
 
@@ -710,6 +819,106 @@ impl EngineError {
 #[cfg(test)]
 mod tests {
     use super::{EngineError, ErrorDetail};
+
+    #[test]
+    fn event_reduction_preserves_the_whole_tuple() {
+        use super::{
+            ErrorPhase as P, ExecutionEvent, FailureContext, RemoteEffect as E, RetryKind as R,
+        };
+        // Independent transition cases: cache-only, sent without a recorded
+        // phase, later local refusal, known unknown and committed effects.
+        let cases = [
+            (
+                EngineError::InvalidUrl("x".into()),
+                None,
+                false,
+                P::Validate,
+                E::None,
+                R::Never,
+            ),
+            (
+                EngineError::InvalidUrl("x".into()),
+                Some(P::Connect),
+                false,
+                P::Connect,
+                E::None,
+                R::Never,
+            ),
+            (
+                EngineError::InvalidUrl("x".into()),
+                None,
+                true,
+                P::Read,
+                E::Unknown,
+                R::RequiresRecovery,
+            ),
+            (
+                EngineError::InvalidUrl("x".into()),
+                Some(P::Prepare),
+                true,
+                P::Prepare,
+                E::Unknown,
+                R::RequiresRecovery,
+            ),
+            (
+                EngineError::CircuitOpen,
+                Some(P::Read),
+                false,
+                P::Connect,
+                E::None,
+                R::Safe,
+            ),
+            (
+                EngineError::CircuitOpen,
+                Some(P::Read),
+                true,
+                P::Connect,
+                E::Unknown,
+                R::RequiresRecovery,
+            ),
+            (
+                EngineError::Cancelled,
+                Some(P::Read),
+                true,
+                P::Cleanup,
+                E::Unknown,
+                R::Quarantine,
+            ),
+            (
+                EngineError::CleanupAfterPublish("x".into()),
+                Some(P::Read),
+                true,
+                P::Cleanup,
+                E::Committed,
+                R::Never,
+            ),
+        ];
+        for (variant, entered, sent, phase, effect, retry) in cases {
+            let mut context = FailureContext::default();
+            if sent {
+                context.observe(ExecutionEvent::RequestSent);
+            }
+            if let Some(entered) = entered {
+                context.observe(ExecutionEvent::Entered(entered));
+            }
+            let mut error = variant.execution_error(Some(7));
+            context.apply(&mut error);
+            assert_eq!(
+                (error.phase, error.remote_effect, error.retry.kind),
+                (phase, effect, retry)
+            );
+            let once = serde_json::to_value(&error).unwrap();
+            context.apply(&mut error);
+            assert_eq!(serde_json::to_value(&error).unwrap(), once);
+            let payload = super::execution_error_payload(&error);
+            assert_eq!(
+                (payload.phase, payload.remote_effect, payload.retry.kind),
+                (phase, effect, retry)
+            );
+            assert_eq!(payload.code, variant.payload().code);
+            assert_eq!(error.input_index, Some(7));
+        }
+    }
 
     #[test]
     fn local_failures_after_a_request_keep_the_remote_effect_honest() {

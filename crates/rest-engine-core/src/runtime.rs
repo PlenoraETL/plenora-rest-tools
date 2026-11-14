@@ -848,7 +848,7 @@ fn execution_message(
     if result.status == ExecutionStatus::Failed || limit_error.is_some() {
         let mut error = limit_error
             .or_else(|| result.errors.first())
-            .map(execution_error_payload)
+            .map(crate::error::execution_error_payload)
             .unwrap_or_else(|| {
                 EngineError::Runtime(ErrorDetail::from("execution failed without an error"))
                     .payload()
@@ -949,18 +949,6 @@ fn response_metadata(request: &RuntimeMessage, output_contract: &str) -> BTreeMa
         is_canonical_version,
     );
     metadata
-}
-
-fn execution_error_payload(error: &crate::ExecutionError) -> ErrorPayload {
-    ErrorPayload {
-        category: error.category,
-        phase: error.phase,
-        remote_effect: error.remote_effect,
-        retry: error.retry,
-        code: error.code.clone(),
-        message: error.message.clone(),
-        details: error.details.clone(),
-    }
 }
 
 #[cfg(test)]

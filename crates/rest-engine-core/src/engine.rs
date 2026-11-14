@@ -4503,16 +4503,8 @@ fn is_transferable_cross_origin_header(name: &str) -> bool {
 /// `read` explicitly when requests were sent, never a phase left by whichever
 /// record ran last.
 fn account_for_sent_requests(result: &mut ExecutionResult, tally: &ExecutionTally) {
-    let operation_sent = tally.requests.load(Ordering::Relaxed) > 0;
     for error in &mut result.errors {
-        crate::error::normalize_phase(error, tally.phase(error.input_index));
-        let sent = match error.input_index {
-            None => operation_sent,
-            Some(index) => tally.record_requests(index) > 0,
-        };
-        if sent {
-            crate::error::after_sent_request(error);
-        }
+        tally.failure_context(error.input_index).apply(error);
     }
 }
 

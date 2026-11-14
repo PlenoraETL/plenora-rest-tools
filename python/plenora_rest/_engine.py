@@ -7,6 +7,8 @@ from importlib.metadata import PackageNotFoundError, version as distribution_ver
 from typing import Any, Optional, Union, cast
 
 from ._native import (
+    _INTERNAL_ERROR_JSON,
+    _CLOSED_ERROR_JSON,
     NativeCancellationToken,
     NativeEngine,
     NativePlenoraError,
@@ -371,27 +373,11 @@ def _public_error(error: NativePlenoraError) -> PlenoraError:
 
 
 def _internal_payload() -> dict[str, Any]:
-    return {
-        "category": "internal",
-        "phase": "cleanup",
-        "remote_effect": "none",
-        "retry": {"kind": "never"},
-        "code": "RUNTIME_ERROR",
-        "message": "REST engine failed internally",
-        "details": {},
-    }
+    return cast(dict[str, Any], json.loads(_INTERNAL_ERROR_JSON))
 
 
 def _closed_payload() -> dict[str, Any]:
-    return {
-        "category": "execution",
-        "phase": "validate",
-        "remote_effect": "none",
-        "retry": {"kind": "never"},
-        "code": "ENGINE_CLOSED",
-        "message": "REST engine is closed",
-        "details": {},
-    }
+    return cast(dict[str, Any], json.loads(_CLOSED_ERROR_JSON))
 
 
 def _invalid_result_payload(name: str) -> dict[str, Any]:
