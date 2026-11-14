@@ -1,5 +1,5 @@
 .git
-.github
+# Workflow sources are inputs to check_assurance.py inside the image.
 .release
 .venv
 dist

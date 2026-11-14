@@ -1,5 +1,6 @@
 """Mutation proofs: stale inventories and disconnected gates must turn red."""
 import json
+from fnmatch import fnmatchcase
 from pathlib import Path
 import shutil
 import tempfile
@@ -20,7 +21,7 @@ class AssuranceTests(unittest.TestCase):
         for directory in ("fuzz", "campaign", "contracts", "crates", ".github", "scripts", "docs", "python"):
             shutil.copytree(gate.ROOT / directory, self.root / directory,
                             ignore=shutil.ignore_patterns("__pycache__"))
-        for name in ("Cargo.toml", "pyproject.toml", "Dockerfile.release", "Dockerfile.verify"):
+        for name in ("Cargo.toml", "pyproject.toml", "Dockerfile.release", "Dockerfile.verify", ".dockerignore"):
             shutil.copyfile(gate.ROOT / name, self.root / name)
 
     def mutate(self, name, before, after):
@@ -30,6 +31,29 @@ class AssuranceTests(unittest.TestCase):
         path.write_text(text.replace(before, after), encoding="utf-8")
 
     def test_current_sources(self):
+        self.assertEqual(gate.scan(self.root), [])
+
+    def test_docker_context_preserves_assurance_sources(self):
+        # The repository uses exclusion-only Docker patterns. Conservatively
+        # reject a rule matching an input or its ancestor; do not emulate
+        # Docker's reinclusion rules and accidentally approve an absent input.
+        rules = [line.strip().strip("/") for line in
+                 (self.root / ".dockerignore").read_text(encoding="utf-8").splitlines()
+                 if line.strip() and not line.lstrip().startswith("#")]
+        self.assertFalse(any(rule.startswith("!") for rule in rules),
+                         "reinclusion rules require a Docker context integration test")
+        inputs = gate.inventory(self.root) + ["Cargo.toml", "pyproject.toml",
+                                             "Dockerfile.verify", "Dockerfile.release"]
+        for name in inputs:
+            parts = name.split("/")
+            ancestors = ["/".join(parts[:end]) for end in range(1, len(parts) + 1)]
+            with self.subTest(source=name):
+                self.assertFalse([rule for rule in rules
+                                  if any(fnmatchcase(path, rule) for path in ancestors)],
+                                 "Docker context excludes an assurance input")
+        # A source archive has no checkout metadata or access to the original
+        # absolute path: the same gate must still execute every check.
+        self.assertFalse((self.root / ".git").exists())
         self.assertEqual(gate.scan(self.root), [])
 
     def test_duplicate_inventory_keys_are_rejected(self):
