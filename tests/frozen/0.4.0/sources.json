@@ -42,8 +42,10 @@
     "contracts/upstream/specs/surfaces/SURFACE-BINDINGS-1.0.md": "3d888a10f13f3b2ca41316f74cf94a1c52625565badd709ab353d19bd64c286f",
     "contracts/upstream/vectors/runtime-v2/database-query-result-limit-error.json": "c1130270b6af52f5118b938e773ed849cf8a15495eb68dd713a19810a2e186d8",
     "contracts/upstream/vectors/runtime-v2/database-query-transport-limit-error.json": "c34da6e468930ae7ebd19327618c36d3811c6388cd75450986a938c60c24c3a7",
+    "tests/frozen/0.4.0/io-branches.json": "2df4a3c54668ed0ebd471e3ddd980ca7471cc495f2fa3798dc419a5de45b78dd",
     "tests/frozen/0.4.0/mixed.json": "e26a8f16e15be8c24e6f5be0709c2df01d7b2d4ad5045e0e6492d7f75d271e20",
     "tests/frozen/0.4.0/private-inputs.json": "2eaf13fcbd81e28904864175eae52bda56dd89d42b0f4e33fdaeb949b7fd1a25",
+    "tests/frozen/0.4.0/remote-private.json": "2145178be3d0cbcd51a5d967ea398a38b7eaa0efe362f78b9075fc5925d4a6a2",
     "tests/frozen/0.4.0/retry.json": "2066288872253f2ef4cf0bd1042454effd999078715b11b04e87dc2759258f46",
     "tests/frozen/0.4.0/transitions.json": "b3cebfd000351624f6e0f0f8f6e466204a6365ebb8ab03e9debf818b6de892fb"
   },

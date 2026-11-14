@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 import tempfile
 
 from frozen_proofs import ROOT, digest
@@ -91,6 +92,7 @@ def main():
     env = environment()
     env.pop("SEMPL_CAPTURE_DIR", None)
     env.pop("SEMPL_CHECK_CAPTURE_DIR", None)
+    env.pop("SEMPL_CONTROL_CASE", None)
     results = []
     with tempfile.TemporaryDirectory(dir=ROOT / "target", prefix="frozen-observed-") as capture:
         if args.record:
@@ -111,6 +113,12 @@ def main():
             except (RuntimeError, ValueError, subprocess.SubprocessError) as error:
                 results.append({"id": f"{package}/{target or 'lib'}", "status": "blocked", "reason": str(error)})
         try:
+            signals = subprocess.run([sys.executable, str(ROOT / "scripts/frozen_signals.py")], cwd=ROOT, env=env, capture_output=True, text=True, encoding="utf-8", timeout=40)
+            print(signals.stdout + signals.stderr, flush=True)
+            results.append({"id":"cli-os-signals", "status":"current-pass" if signals.returncode == 0 else "current-fail"})
+        except (OSError, subprocess.SubprocessError) as error:
+            results.append({"id":"cli-os-signals", "status":"blocked", "reason":str(error)})
+        try:
             sdk = subprocess.run([str(sdk_program("python")), str(ROOT / "scripts/frozen_sdk.py")], cwd=ROOT, env=env, capture_output=True, text=True, encoding="utf-8", timeout=60)
             print(sdk.stdout + sdk.stderr, flush=True)
             (directory / "sdk-process.log").write_text(sdk.stdout + sdk.stderr, encoding="utf-8")
@@ -126,6 +134,7 @@ def main():
                                 "missing":sorted(set(expected)-set(cases)),"extra":sorted(set(cases)-set(expected))})
                 passed = False
         paths = sorted((ROOT / "crates").rglob("*.rs")) + sorted((ROOT / "tests/frozen/0.4.0").glob("*.json"))
+        paths += [ROOT / "scripts/frozen_signals.py", ROOT / "python/tests/test_frozen_private.py"]
         receipt = {"commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
                    "tests": results, "passed": passed, "files": {p.relative_to(ROOT).as_posix(): digest(p) for p in paths},
                    "mode": "record" if args.record else "check"}
@@ -135,7 +144,9 @@ def main():
                 raise ValueError("no observations captured")
             BASELINE.write_text(json.dumps({"version":"0.4.0", "source_commit":receipt["commit"],
                 "source_files":{p.relative_to(ROOT).as_posix():digest(p) for p in sorted((ROOT / "crates").glob("*/src/*.rs"))},
-                "normalization":["top-level execution metrics.elapsed_ms", "runtime response plenora.message.id"],
+                "normalization":["execution metrics.elapsed_ms at explicit core/CLI/SDK/runtime payload paths", "runtime response plenora.message.id", "remote fixture loopback origin (asserted before replacement)"],
+                "contract_checked_cases":sorted(key for key,value in cases.items() if key.startswith("control-artifacts-") and "rule" in value),
+                "artifact_observations":"Raw files/bytes/results are retained in target/frozen/control-artifacts/<os>; contract_checked_cases freeze invariants, not scheduler outcomes.",
                 "cases":cases}, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
     return 0 if passed else 1
 

@@ -1,6 +1,8 @@
 //! Independent, versioned transition oracle. No production reducer is imported.
 use super::*;
 
+#[path = "remote_private.rs"]
+mod remote_private;
 #[path = "snapshot.rs"]
 mod snapshot;
 

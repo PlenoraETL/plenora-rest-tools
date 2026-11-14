@@ -10,6 +10,8 @@ use std::{
 };
 
 use crate::error::ErrorDetail;
+#[cfg(test)]
+use crate::injection::sleep;
 use futures_util::StreamExt;
 use reqwest::{
     Body, Client, Method, Proxy, Url,
@@ -24,12 +26,13 @@ use reqwest::{
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+#[cfg(not(test))]
+use tokio::time::sleep;
 use tokio::{
     fs::{self, OpenOptions},
     io::AsyncWriteExt,
     net::lookup_host,
     sync::{Mutex, OwnedSemaphorePermit, Semaphore},
-    time::sleep,
 };
 use tokio_util::io::ReaderStream;
 use url::Host;
@@ -842,6 +845,8 @@ impl Transport {
         let Some(handle) = session else {
             return Ok(());
         };
+        #[cfg(test)]
+        crate::injection::visit(crate::injection::Point::Cookie);
         if !self.config.allow_cookie_store {
             return Err(EngineError::PolicyViolation(ErrorDetail::from(
                 "cookie storage is not enabled for this engine",
@@ -989,6 +994,10 @@ impl Transport {
     }
 
     async fn execute_cached(&self, request: &PreparedRequest) -> Result<ResponseData, EngineError> {
+        #[cfg(test)]
+        if request.cache.enabled {
+            crate::injection::visit(crate::injection::Point::Cache);
+        }
         if !request.cache.enabled {
             return self.execute_with_circuit(request).await;
         }
@@ -1045,6 +1054,8 @@ impl Transport {
                 && fresh_for_ms > 0
                 && cached.validated_at.elapsed() <= Duration::from_millis(fresh_for_ms);
             if fresh {
+                #[cfg(test)]
+                crate::injection::visit(crate::injection::Point::CacheHit);
                 // Interpreted from here on like a response that was read; it
                 // is not a request sent, so the tally does not count it.
                 enter_phase(ErrorPhase::Read);
@@ -1061,6 +1072,8 @@ impl Transport {
             let Some(mut cached) = cached else {
                 return Ok(response);
             };
+            #[cfg(test)]
+            crate::injection::visit(crate::injection::Point::CacheRevalidate);
             merge_headers(&mut cached.headers, &response.headers);
             cached.validated_at = Instant::now();
             cached.last_access = cached.validated_at;
@@ -1156,6 +1169,8 @@ impl Transport {
         if !policy.enabled {
             return Ok(None);
         }
+        #[cfg(test)]
+        crate::injection::visit(crate::injection::Point::Circuit);
         if policy.failure_threshold == 0 {
             return Err(EngineError::InvalidInput(ErrorDetail::from(
                 "circuit breaker failure_threshold must be greater than zero",
@@ -1224,8 +1239,12 @@ impl Transport {
                 .half_open_probe
                 .is_some_and(|(_, started)| started.elapsed() < probe_lease);
             if opened_at.elapsed() < recovery || probing {
+                #[cfg(test)]
+                crate::injection::visit(crate::injection::Point::CircuitReject);
                 return Err(EngineError::CircuitOpen);
             }
+            #[cfg(test)]
+            crate::injection::visit(crate::injection::Point::CircuitProbe);
             let generation = self.next_sequence();
             state.half_open_probe = Some((generation, Instant::now()));
             state.epoch = state.epoch.saturating_add(1);
@@ -1466,6 +1485,8 @@ impl Transport {
         &self,
         original: &PreparedRequest,
     ) -> Result<(String, RequestStats), EngineError> {
+        #[cfg(test)]
+        crate::injection::visit(crate::injection::Point::OAuth);
         let (token_url, form, request_auth, is_arcgis, fallback_ttl) =
             token_request_parts(&original.auth)?;
         let key = TokenKey {
@@ -1481,6 +1502,8 @@ impl Transport {
             .filter(|token| token.expires_at > Instant::now())
             .map(|token| token.token.clone())
         {
+            #[cfg(test)]
+            crate::injection::visit(crate::injection::Point::OAuthCached);
             return Ok((token, RequestStats::default()));
         }
         let _refresh = self.token_refresh.lock().await;
@@ -1522,6 +1545,8 @@ impl Transport {
             proxy: original.proxy.clone(),
         };
         let response = self.execute_authenticated(&token_request).await?;
+        #[cfg(test)]
+        crate::injection::visit(crate::injection::Point::OAuthRead);
         let stats = RequestStats {
             network_requests: response.network_requests,
             retries: u64::from(response.attempts.saturating_sub(1)),
@@ -1888,6 +1913,8 @@ impl Transport {
                     limit_bytes: target.max_bytes,
                 });
             }
+            #[cfg(test)]
+            crate::injection::fault(crate::injection::Point::Write).map_err(download_write_io)?;
             state
                 .file
                 .as_mut()
@@ -1915,10 +1942,14 @@ impl Transport {
         let file = state.file.as_mut().ok_or_else(|| {
             EngineError::Runtime(ErrorDetail::from("download staging file is closed"))
         })?;
+        #[cfg(test)]
+        crate::injection::fault(crate::injection::Point::Flush).map_err(download_write_io)?;
         file.flush().await.map_err(download_write_io)?;
         file.sync_all().await.map_err(download_write_io)?;
         drop(state.file.take());
 
+        #[cfg(test)]
+        crate::injection::fault(crate::injection::Point::Finalize).map_err(download_write_io)?;
         let sha256 = state
             .digest
             .clone()
@@ -2472,6 +2503,8 @@ async fn discard_download_state(state: &mut DownloadState) {
 /// single short system call, so it is done inline instead, and the caller arms
 /// the cleanup guard before yielding.
 fn create_download_file(target: &Path) -> Result<(PathBuf, fs::File), EngineError> {
+    #[cfg(test)]
+    crate::injection::fault(crate::injection::Point::Open).map_err(file_io)?;
     for _ in 0..16 {
         let temporary = download_temporary_path(target);
         match std::fs::OpenOptions::new()
@@ -2496,16 +2529,23 @@ async fn persist_download(
 ) -> Result<(), EngineError> {
     enter_phase(ErrorPhase::Write);
     if !overwrite {
+        #[cfg(test)]
+        crate::injection::fault(crate::injection::Point::Publish).map_err(download_write_io)?;
         fs::hard_link(temporary, target)
             .await
             .map_err(download_write_io)?;
         // The sink now holds the download: a failure from here on leaves the
         // publication in place and only the staging file behind.
+        #[cfg(test)]
+        crate::injection::fault(crate::injection::Point::Cleanup)
+            .map_err(|error| EngineError::CleanupAfterPublish(crate::error::io_detail(&error)))?;
         fs::remove_file(temporary)
             .await
             .map_err(|error| EngineError::CleanupAfterPublish(crate::error::io_detail(&error)))?;
         return Ok(());
     }
+    #[cfg(test)]
+    crate::injection::fault(crate::injection::Point::Rename).map_err(download_write_io)?;
     match fs::rename(temporary, target).await {
         Ok(()) => Ok(()),
         Err(error)
@@ -2996,6 +3036,7 @@ fn is_public_ipv6(address: Ipv6Addr) -> bool {
 
 #[cfg(test)]
 mod tests {
+    include!("../tests/support/injected_transport.rs");
     include!("../tests/support/frozen_retry.rs");
     use std::{
         net::{IpAddr, Ipv4Addr, Ipv6Addr},

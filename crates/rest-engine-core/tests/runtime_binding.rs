@@ -24,6 +24,90 @@ const CORRELATION_ID: &str = "22222222-2222-4222-8222-222222222222";
 mod frozen_snapshot;
 
 #[tokio::test]
+async fn frozen_private_remote_runtime() {
+    let corpus: Value = serde_json::from_str(include_str!(
+        "../../../tests/frozen/0.4.0/remote-private.json"
+    ))
+    .unwrap();
+    for case in corpus["bodies"].as_array().unwrap() {
+        for status in [200, 400] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let origin = format!("http://{}", listener.local_addr().unwrap());
+            let body = case["body"].as_str().unwrap().to_owned();
+            let headers = corpus["headers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|h| format!("{}: PRIVATE_HEADER_SENTINEL\r\n", h.as_str().unwrap()))
+                .collect::<String>();
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut byte = [0];
+                while !request.ends_with(b"\r\n\r\n") {
+                    assert_eq!(stream.read(&mut byte).await.unwrap(), 1);
+                    request.push(byte[0]);
+                }
+                stream.write_all(format!("HTTP/1.1 {status} Fixture\r\nContent-Length: {}\r\n{headers}Connection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
+                stream.shutdown().await.unwrap();
+            });
+            let engine = local_engine();
+            let binding = RuntimeBinding::new(&engine, &EmptyResources);
+            let mut request = runtime_request(&format!("{origin}/PRIVATE_URL_SENTINEL"));
+            request.payload["connection"]["response"] = json!({"format":case["format"],"delimiter":",","success_when":case["success_when"],"error_path":case["error_path"]});
+            request.payload["options"] =
+                json!({"capture_response_metadata":true,"response_headers":["*"]});
+            let result = invoke_serialized(&binding, request, CancellationToken::new()).await;
+            server.await.unwrap();
+            let mut observed = serde_json::to_value(result).unwrap();
+            assert!(
+                !observed.to_string().contains("PRIVATE_"),
+                "assertion failed: {observed}"
+            );
+            let success = case["id"] == "headers" && status == 200;
+            if !success {
+                assert_eq!(observed["kind"], "error");
+                assert_eq!(
+                    observed["payload"]["code"],
+                    if status == 400 {
+                        json!("HTTP_STATUS")
+                    } else {
+                        case["code"].clone()
+                    }
+                );
+            } else {
+                let payload = &mut observed["payload"];
+                assert_eq!(payload["status"], "success");
+                assert!(
+                    payload["metrics"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("elapsed_ms")
+                        .unwrap()
+                        .is_u64()
+                );
+                for metadata in payload["responses"].as_array_mut().unwrap() {
+                    assert_eq!(metadata["final_url"], origin);
+                    metadata["final_url"] = json!("<loopback-origin>");
+                }
+            }
+            assert!(
+                observed["metadata"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("plenora.message.id")
+                    .unwrap()
+                    .is_string()
+            );
+            frozen_snapshot::observe(
+                &format!("remote-runtime-{}-{status}", case["id"].as_str().unwrap()),
+                observed,
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn frozen_private_runtime_admission() {
     let sentinel = format!("private_runtime_{:010}", std::process::id());
     let corpus: Value = serde_json::from_str(

@@ -16,6 +16,9 @@ pub mod control_json;
 mod engine;
 mod error;
 mod exact;
+#[cfg(test)]
+#[path = "../tests/support/injection.rs"]
+mod injection;
 // Surface for the detached fuzz crate only: behind a non-default feature,
 // hidden from the documentation, and outside the frozen v1 contract (its
 // items are not re-exported, so contracts/compatibility-v1.json does not see

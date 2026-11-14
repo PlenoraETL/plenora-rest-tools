@@ -8,7 +8,22 @@ import subprocess
 from frozen_rust import ROOT, environment, executable, rust_passed
 
 CORE = "crates/rest-engine-core/src/"
+INJECTED = "transport::tests::injected_transport::"
+CONTROL = [("plenora-rest-core", "--lib", None, [INJECTED + "frozen_controls_visit_every_declared_branch"])]
 MUTATIONS = [
+    ("branches-artifact-bytes", CORE + "transport.rs", ".write_all(&chunk)", '.write_all(b"x")', CONTROL),
+    ("branches-cleanup", CORE + "transport.rs", "let _ = std::fs::remove_file(&self.temporary);", "let _ = &self.temporary;", CONTROL),
+    ("branches-cancel", CORE + "error.rs", "Self::Cancelled => ErrorPhase::Cleanup,", "Self::Cancelled => ErrorPhase::Read,", CONTROL),
+    ("branches-deadline", CORE + "error.rs", 'Self::Timeout => "TIMEOUT",', 'Self::Timeout => "WRONG_TIMEOUT",', CONTROL),
+    ("branches-io", CORE + "transport.rs", "EngineError::DownloadWrite(crate::error::io_detail(&error))", "EngineError::FileIo(crate::error::io_detail(&error))",
+     [("plenora-rest-core", "--lib", None, [INJECTED + "frozen_io_faults_preserve_publication_and_redaction"])]),
+    ("branches-wait", CORE + "transport.rs", "sleep(delay).await;\n                        continue;", "sleep(Duration::ZERO).await;\n                        continue;",
+     [("plenora-rest-core", "--lib", None, [INJECTED + "frozen_internal_transport_waits_use_injected_clock"])]),
+    ("branches-headers", CORE + "engine.rs", "!is_sensitive_header_name(name)\n                &&", "(!is_sensitive_header_name(name) || name == &\"authorization\")\n                &&",
+     [("plenora-rest-core", "--test", "black_box", ["frozen::remote_private::frozen_remote_body_and_sensitive_header_matrix"]),
+      ("plenora-rest-core", "--test", "runtime_binding", ["frozen_private_remote_runtime"])]),
+    ("branches-inventory", "crates/rest-engine-core/tests/support/injection.rs", "    Prepare,\n    OAuth,", "    Prepare,\n    UndeclaredInCorpus,\n    OAuth,",
+     [("plenora-rest-core", "--lib", None, [INJECTED + "frozen_io_branch_table_is_exhaustive_for_declared_ports"])]),
     ("T1-control-phase", CORE + "error.rs", "Self::Cancelled => ErrorPhase::Cleanup,", "Self::Cancelled => ErrorPhase::Read,",
      [("plenora-rest-core", "--test", "black_box", ["frozen::frozen_controls_before_send_and_after_headers"])]),
     ("T1-effect", CORE + "error.rs", "error.remote_effect = RemoteEffect::Unknown;", "error.remote_effect = RemoteEffect::None;",
@@ -50,8 +65,9 @@ def exercise(targets, env, output, label):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--only", help="one mutation ID, otherwise all")
+    parser.add_argument("--prefix", help="only mutation IDs with this prefix")
     args = parser.parse_args()
-    selected = [m for m in MUTATIONS if args.only is None or m[0] == args.only]
+    selected = [m for m in MUTATIONS if (args.only is None or m[0] == args.only) and (args.prefix is None or m[0].startswith(args.prefix))]
     if not selected:
         parser.error("unknown mutation ID")
     output = ROOT / "target/frozen/rust-mutations"
@@ -59,11 +75,14 @@ def main():
     env = environment()
     env.pop("SEMPL_CAPTURE_DIR", None)
     env.pop("SEMPL_CHECK_CAPTURE_DIR", None)
+    env.pop("SEMPL_CONTROL_CASE", None)
     receipts = []
     for identity, relative, before, after, targets in selected:
         print(f"{identity}: baseline", flush=True)
         path = ROOT / relative
         original = path.read_bytes()
+        before = before.replace("\n", "\r\n") if b"\r\n" in original else before
+        after = after.replace("\n", "\r\n") if b"\r\n" in original else after
         if original.count(before.encode()) != 1:
             raise ValueError(f"mutation anchor not unique: {identity}")
         baseline = exercise(targets, env, output, identity + "-baseline")
