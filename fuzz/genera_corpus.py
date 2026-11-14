@@ -219,8 +219,9 @@ def runtime_message() -> dict[str, bytes]:
     }
 
 
-def main() -> None:
-    targets = {
+def seed_inventory() -> dict[str, dict[str, bytes]]:
+    """Canonical seed bytes, also checked without modifying the checkout."""
+    return {
         "response_body": response_body(),
         "json_path": json_path(),
         "link_header": link_header(),
@@ -228,7 +229,10 @@ def main() -> None:
         "execution_request": execution_request(),
         "runtime_message": runtime_message(),
     }
-    for target, seeds in targets.items():
+
+
+def main() -> None:
+    for target, seeds in seed_inventory().items():
         directory = CORPUS / target
         if directory.exists():
             shutil.rmtree(directory)

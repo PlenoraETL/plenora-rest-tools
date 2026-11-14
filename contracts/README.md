@@ -66,7 +66,7 @@ restano v1, incluso il valore della costante pubblica
 `RUNTIME_INTERFACE_CONTRACT`, che identifica l'envelope.
 
 I file del repository dei contratti che il gate usa (i vettori runtime-v1 di
-REST, le 21 sonde di rifiuto runtime-probes-v1 di Runtime Binding 1.0
+REST, le sonde di rifiuto runtime-probes-v1 censite in `upstream/source.json` di Runtime Binding 1.0
 Â§11-13, gli schemi runtime-vector-v1, runtime-probe-v1, error-v1 e
 adoption-manifest-v4, la specifica dei vettori) sono copiati byte per byte in upstream/, con revisione e
 SHA-256 in upstream/source.json. La revisione deve coincidere con quella di

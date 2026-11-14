@@ -7,7 +7,7 @@
       "rule": "CAT-001",
       "status": "implemented",
       "reason": "Capabilities report actual Rust/Python/runtime surfaces; CLI adds its own surface. Existing catalog/profile v1 retained unchanged by upstream; v2 principles adopted explicitly without relabeling the v1 document.",
-      "evidence": "public_surface; runtime_binding; CLI tests"
+      "evidence": "crates/rest-engine-core/tests/public_surface.rs; crates/rest-engine-core/tests/runtime_binding.rs; crates/rest-cli/tests/cli.rs"
     },
     {
       "rule": "CAT-002",
@@ -25,13 +25,13 @@
       "rule": "RT-024",
       "status": "deviation",
       "reason": "Known response/file/pagination bounds return resource_limit, including partial results. No aggregate JSON materialization budget; allocation exhaustion may terminate the process. Re-entry: bounded serialization and host budget with boundary tests.",
-      "evidence": "docs/limiti.md; runtime_pagination_limit_is_an_error_not_a_truncated_success"
+      "evidence": "docs/limiti.md; crates/rest-engine-core/tests/runtime_binding.rs::runtime_pagination_limit_is_an_error_not_a_truncated_success"
     },
     {
       "rule": "RT-025",
       "status": "implemented",
       "reason": "Discovery advertises binding v2/version 2; envelope contract and capability/operation selectors remain v1. Exported RUNTIME_INTERFACE_CONTRACT retains its documented envelope meaning.",
-      "evidence": "runtime_v2_discovery_preserves_v1_wire_and_selectors; runtime_vectors"
+      "evidence": "crates/rest-engine-core/tests/runtime_binding.rs::runtime_v2_discovery_preserves_v1_wire_and_selectors; crates/rest-engine-core/tests/runtime_vectors.rs"
     },
     {
       "rule": "RT-026",
@@ -49,13 +49,13 @@
       "rule": "ERR-015",
       "status": "implemented",
       "reason": "Cleanup after proven download publication preserves committed effect and never retry.",
-      "evidence": "crates/rest-engine-core/src/error.rs; black_box"
+      "evidence": "crates/rest-engine-core/src/error.rs; crates/rest-engine-core/tests/black_box.rs"
     },
     {
       "rule": "ERR-016",
       "status": "implemented",
       "reason": "Transport failures retain io and deadlines timeout with unknown effect, never internal merely because the outcome is unknown; no database commit protocol exposed.",
-      "evidence": "crates/rest-engine-core/src/error.rs; runtime_vectors"
+      "evidence": "crates/rest-engine-core/src/error.rs; crates/rest-engine-core/tests/runtime_vectors.rs"
     },
     {
       "rule": "SB-001",
@@ -78,8 +78,13 @@
     {
       "rule": "RA-001..010",
       "status": "not_applicable",
-      "reason": "Decision 0017 REST-to-Arrow adapter is owned by the application; this component provides no such adapter and makes no Arrow conversion claim.",
-      "evidence": "C:/pg/contracts-main/decisions/0017-rest-arrow-adapter.md"
+      "reason": "Decision 0017 REST-to-Arrow adapter is owned by the application; this component provides no such adapter and makes no Arrow conversion claim. External upstream context only; the upstream_context field preserves the source at the adopted revision; it is not a locally executed proof.",
+      "evidence": "contracts/upstream/profiles/rest-tools.md; crates/rest-engine-core/src/capability.rs",
+      "upstream_context": {
+        "repository": "https://github.com/PlenoraETL/plenora-contracts.git",
+        "revision": "3aec9f724f5a0ad21366f293895b4d0dbcd0aad1",
+        "path": "decisions/0017-rest-arrow-adapter.md"
+      }
     },
     {
       "rule": "decision-0021",
@@ -90,8 +95,13 @@
     {
       "rule": "contracts-40",
       "status": "not_applicable",
-      "reason": "Upstream gate_fuzz verdict-cache registry fix only. This repository has cargo-fuzz and no verdict cache; no workflow cache to invalidate. Upstream oracle is tested offline separately.",
-      "evidence": "C:/pg/contracts-main/tools/gate_fuzz.py"
+      "reason": "Upstream gate_fuzz verdict-cache registry fix only. This repository has cargo-fuzz and no verdict cache; no workflow cache to invalidate. Upstream oracle is tested offline separately. External upstream context only; the upstream_context field preserves the source at the adopted revision; it is not a locally executed proof.",
+      "evidence": "fuzz/Cargo.toml",
+      "upstream_context": {
+        "repository": "https://github.com/PlenoraETL/plenora-contracts.git",
+        "revision": "3aec9f724f5a0ad21366f293895b4d0dbcd0aad1",
+        "path": "tools/gate_fuzz.py"
+      }
     }
   ]
 }

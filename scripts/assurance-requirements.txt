@@ -1,0 +1,4 @@
+# Schema oracle already used by Dockerfile.verify.
+jsonschema==4.26.0
+# Parse workflow structure, including jobs and triggers, rather than matching comments.
+PyYAML==6.0.3
