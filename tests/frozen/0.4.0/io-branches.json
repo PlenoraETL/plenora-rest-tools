@@ -1,0 +1,103 @@
+{
+  "scope": "Declared semantic and I/O injection points; not a census of uninstrumented Rust conditions.",
+  "branches": [
+    {
+      "point": "Prepare"
+    },
+    {
+      "point": "OAuth"
+    },
+    {
+      "point": "Polling"
+    },
+    {
+      "point": "Cache"
+    },
+    {
+      "point": "Circuit"
+    },
+    {
+      "point": "Cookie"
+    },
+    {
+      "point": "Open",
+      "code": "FILE_IO",
+      "requests": 0,
+      "published": false,
+      "overwrite": false
+    },
+    {
+      "point": "Write",
+      "code": "DOWNLOAD_WRITE_FAILED",
+      "requests": 1,
+      "published": false,
+      "overwrite": false
+    },
+    {
+      "point": "Flush",
+      "code": "DOWNLOAD_WRITE_FAILED",
+      "requests": 1,
+      "published": false,
+      "overwrite": false
+    },
+    {
+      "point": "Finalize",
+      "code": "DOWNLOAD_WRITE_FAILED",
+      "requests": 1,
+      "published": false,
+      "overwrite": false
+    },
+    {
+      "point": "Publish",
+      "code": "DOWNLOAD_WRITE_FAILED",
+      "requests": 1,
+      "published": false,
+      "overwrite": false
+    },
+    {
+      "point": "Rename",
+      "code": "DOWNLOAD_WRITE_FAILED",
+      "requests": 1,
+      "published": false,
+      "overwrite": true
+    },
+    {
+      "point": "Cleanup",
+      "code": "CLEANUP_AFTER_PUBLISH_FAILED",
+      "requests": 1,
+      "published": true,
+      "overwrite": false
+    },
+    {
+      "point": "CacheHit"
+    },
+    {
+      "point": "CacheRevalidate"
+    },
+    {
+      "point": "CircuitReject"
+    },
+    {
+      "point": "CircuitProbe"
+    },
+    {
+      "point": "OAuthRead"
+    },
+    {
+      "point": "OAuthCached"
+    }
+  ],
+  "waits_ms": [
+    250,
+    500
+  ],
+  "artifact": "PRIVATE_ARTIFACT_SENTINEL",
+  "control_artifact_contract": {
+    "sources": ["contracts/upstream/specs/errors/ERRORS-1.0.md (ERR-005)", "docs/architecture.md#artifact-e-streaming"],
+    "rule": "cooperative-cancellation-is-not-rollback",
+    "allowed_before_publication_confirmation": ["absent", "complete"],
+    "required_after_publication_confirmation": "complete",
+    "staging": "absent",
+    "complete_body": "{\"ok\":true}"
+  }
+}

@@ -1,0 +1,361 @@
+{
+  "oracle": "Fraction recurrence; factors are exact dyadic rationals; no 128-bit truncation within these eight steps",
+  "cases": [
+    {
+      "id": "dyadic-respect-False",
+      "base_ms": 7,
+      "factor": 1.5,
+      "cap_ms": 100,
+      "respect": false,
+      "retry_cap_ms": 1000,
+      "headers_ms": [
+        null,
+        500,
+        null,
+        1001,
+        null,
+        0,
+        1000,
+        null
+      ],
+      "waits_ms": [
+        7,
+        10,
+        15,
+        23,
+        35,
+        53,
+        79,
+        100
+      ]
+    },
+    {
+      "id": "dyadic-respect-True",
+      "base_ms": 7,
+      "factor": 1.5,
+      "cap_ms": 100,
+      "respect": true,
+      "retry_cap_ms": 1000,
+      "headers_ms": [
+        null,
+        500,
+        null,
+        1001,
+        null,
+        0,
+        1000,
+        null
+      ],
+      "waits_ms": [
+        7,
+        500,
+        15,
+        null,
+        23,
+        0,
+        1000,
+        79
+      ]
+    },
+    {
+      "id": "constant-respect-False",
+      "base_ms": 11,
+      "factor": 1.0,
+      "cap_ms": 100,
+      "respect": false,
+      "retry_cap_ms": 1000,
+      "headers_ms": [
+        null,
+        500,
+        null,
+        1001,
+        null,
+        0,
+        1000,
+        null
+      ],
+      "waits_ms": [
+        11,
+        11,
+        11,
+        11,
+        11,
+        11,
+        11,
+        11
+      ]
+    },
+    {
+      "id": "constant-respect-True",
+      "base_ms": 11,
+      "factor": 1.0,
+      "cap_ms": 100,
+      "respect": true,
+      "retry_cap_ms": 1000,
+      "headers_ms": [
+        null,
+        500,
+        null,
+        1001,
+        null,
+        0,
+        1000,
+        null
+      ],
+      "waits_ms": [
+        11,
+        500,
+        11,
+        null,
+        11,
+        0,
+        1000,
+        11
+      ]
+    },
+    {
+      "id": "zero-respect-False",
+      "base_ms": 0,
+      "factor": 2.0,
+      "cap_ms": 100,
+      "respect": false,
+      "retry_cap_ms": 1000,
+      "headers_ms": [
+        null,
+        500,
+        null,
+        1001,
+        null,
+        0,
+        1000,
+        null
+      ],
+      "waits_ms": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "zero-respect-True",
+      "base_ms": 0,
+      "factor": 2.0,
+      "cap_ms": 100,
+      "respect": true,
+      "retry_cap_ms": 1000,
+      "headers_ms": [
+        null,
+        500,
+        null,
+        1001,
+        null,
+        0,
+        1000,
+        null
+      ],
+      "waits_ms": [
+        0,
+        500,
+        0,
+        null,
+        0,
+        0,
+        1000,
+        0
+      ]
+    },
+    {
+      "id": "initial-cap-respect-False",
+      "base_ms": 300,
+      "factor": 2.0,
+      "cap_ms": 100,
+      "respect": false,
+      "retry_cap_ms": 1000,
+      "headers_ms": [
+        null,
+        500,
+        null,
+        1001,
+        null,
+        0,
+        1000,
+        null
+      ],
+      "waits_ms": [
+        100,
+        100,
+        100,
+        100,
+        100,
+        100,
+        100,
+        100
+      ]
+    },
+    {
+      "id": "initial-cap-respect-True",
+      "base_ms": 300,
+      "factor": 2.0,
+      "cap_ms": 100,
+      "respect": true,
+      "retry_cap_ms": 1000,
+      "headers_ms": [
+        null,
+        500,
+        null,
+        1001,
+        null,
+        0,
+        1000,
+        null
+      ],
+      "waits_ms": [
+        100,
+        500,
+        100,
+        null,
+        100,
+        0,
+        1000,
+        100
+      ]
+    },
+    {
+      "id": "wide-integer-respect-False",
+      "base_ms": 9007199254740993,
+      "factor": 2.0,
+      "cap_ms": 18446744073709551615,
+      "respect": false,
+      "retry_cap_ms": 1000,
+      "headers_ms": [
+        null,
+        500,
+        null,
+        1001,
+        null,
+        0,
+        1000,
+        null
+      ],
+      "waits_ms": [
+        9007199254740993,
+        18014398509481986,
+        36028797018963972,
+        72057594037927944,
+        144115188075855888,
+        288230376151711776,
+        576460752303423552,
+        1152921504606847104
+      ]
+    },
+    {
+      "id": "wide-integer-respect-True",
+      "base_ms": 9007199254740993,
+      "factor": 2.0,
+      "cap_ms": 18446744073709551615,
+      "respect": true,
+      "retry_cap_ms": 1000,
+      "headers_ms": [
+        null,
+        500,
+        null,
+        1001,
+        null,
+        0,
+        1000,
+        null
+      ],
+      "waits_ms": [
+        9007199254740993,
+        500,
+        36028797018963972,
+        null,
+        72057594037927944,
+        0,
+        1000,
+        576460752303423552
+      ]
+    }
+  ],
+  "network": [
+    {
+      "id": "recover",
+      "method": "GET",
+      "statuses": [
+        503,
+        200
+      ],
+      "header": "0",
+      "respect": true,
+      "max_attempts": 3,
+      "success": true
+    },
+    {
+      "id": "over-cap",
+      "method": "GET",
+      "statuses": [
+        503
+      ],
+      "header": "1",
+      "respect": true,
+      "max_attempts": 3,
+      "success": false
+    },
+    {
+      "id": "ignore-header",
+      "method": "GET",
+      "statuses": [
+        503,
+        200
+      ],
+      "header": "1",
+      "respect": false,
+      "max_attempts": 3,
+      "success": true
+    },
+    {
+      "id": "post-refused",
+      "method": "POST",
+      "statuses": [
+        503
+      ],
+      "header": "0",
+      "respect": true,
+      "max_attempts": 3,
+      "success": false
+    },
+    {
+      "id": "attempt-budget",
+      "method": "GET",
+      "statuses": [
+        503,
+        503
+      ],
+      "header": "0",
+      "respect": true,
+      "max_attempts": 2,
+      "success": false
+    },
+    {
+      "id": "status-refused",
+      "method": "GET",
+      "statuses": [
+        400
+      ],
+      "header": "0",
+      "respect": true,
+      "max_attempts": 3,
+      "success": false
+    }
+  ],
+  "http_date": {
+    "now_unix_seconds": 1700000000,
+    "header": "Tue, 14 Nov 2023 22:13:27 GMT",
+    "wait_ms": 7000
+  }
+}

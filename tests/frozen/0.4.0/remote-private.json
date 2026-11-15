@@ -1,0 +1,13 @@
+{
+  "headers":["Authorization","Proxy-Authorization","Cookie","Set-Cookie","X-Auth-Token","X-Api-Key","X-Amz-Security-Token"],
+  "bodies":[
+    {"id":"headers","format":"json","body":"{\"ok\":true}"},
+    {"id":"json","format":"json","body":"{\"private\":\"PRIVATE_REMOTE_SENTINEL\",","code":"INVALID_RESPONSE"},
+    {"id":"xml","format":"xml","body":"<!DOCTYPE PRIVATE_REMOTE_SENTINEL><root/>","code":"INVALID_RESPONSE"},
+    {"id":"csv","format":"csv","body":"a,a\nPRIVATE_REMOTE_SENTINEL,1\n","code":"INVALID_RESPONSE"},
+    {"id":"ndjson","format":"ndjson","body":"{\"private\":\"PRIVATE_REMOTE_SENTINEL\"}\nPRIVATE_REMOTE_SENTINEL\n","code":"INVALID_RESPONSE"},
+    {"id":"text","format":"text","body":"PRIVATE_REMOTE_SENTINEL","success_when":false,"code":"APPLICATION_ERROR"},
+    {"id":"binary","format":"binary","body":"PRIVATE_REMOTE_SENTINEL","success_when":false,"code":"APPLICATION_ERROR"},
+    {"id":"application","format":"json","body":"{\"error\":\"PRIVATE_REMOTE_SENTINEL\"}","error_path":"error","code":"APPLICATION_ERROR"}
+  ]
+}

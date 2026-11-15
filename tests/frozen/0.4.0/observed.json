@@ -1,0 +1,6008 @@
+{
+  "artifact_observations": "Raw files/bytes/results are retained in target/frozen/control-artifacts/<os>; contract_checked_cases freeze invariants, not scheduler outcomes.",
+  "cases": {
+    "address-before-send": {
+      "errors": [
+        {
+          "category": "authorization",
+          "code": "UNSAFE_ADDRESS",
+          "details": {},
+          "message": "Outbound address is not allowed",
+          "phase": "connect",
+          "remote_effect": "none",
+          "retry": {
+            "kind": "never"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 0,
+        "retries": 0
+      },
+      "output": {
+        "type": "none"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "artifact-ignore-header": {
+      "bytes": [
+        123,
+        34,
+        111,
+        107,
+        34,
+        58,
+        116,
+        114,
+        117,
+        101,
+        125
+      ],
+      "files": [
+        "artifact.bin"
+      ]
+    },
+    "artifact-recover": {
+      "bytes": [
+        123,
+        34,
+        111,
+        107,
+        34,
+        58,
+        116,
+        114,
+        117,
+        101,
+        125
+      ],
+      "files": [
+        "artifact.bin"
+      ]
+    },
+    "batch": {
+      "errors": [],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 3,
+        "output_records": 3,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 2,
+        "retries": 0
+      },
+      "output": {
+        "records": [
+          {
+            "id": 1,
+            "remote_name": "Ada"
+          },
+          {
+            "id": 2,
+            "remote_name": "Grace"
+          },
+          {
+            "id": 3,
+            "remote_name": "Linus"
+          }
+        ],
+        "type": "records"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "success"
+    },
+    "batch-wire": [
+      {
+        "items": [
+          {
+            "id": 1
+          },
+          {
+            "id": 2
+          }
+        ]
+      },
+      {
+        "items": [
+          {
+            "id": 3
+          }
+        ]
+      }
+    ],
+    "cancel-after-headers": {
+      "errors": [
+        {
+          "category": "cancelled",
+          "code": "CANCELLED",
+          "details": {},
+          "message": "REST execution was cancelled",
+          "phase": "cleanup",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "quarantine"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 1,
+        "retries": 0
+      },
+      "output": {
+        "type": "none"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "cancel-before-send": {
+      "errors": [
+        {
+          "category": "cancelled",
+          "code": "CANCELLED",
+          "details": {},
+          "message": "REST execution was cancelled",
+          "phase": "cleanup",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "quarantine"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 0,
+        "retries": 0
+      },
+      "output": {
+        "type": "none"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "cli-signals-alternate": {
+      "document": {
+        "command": "test",
+        "component": "plenora-rest-tools",
+        "component_version": "0.4.0",
+        "contract": "plenora-rest-execution-result-v1",
+        "error": {
+          "category": "cancelled",
+          "code": "CANCELLED",
+          "details": {
+            "async_jobs": [
+              {
+                "cancel_accepted": true,
+                "cancel_requested": true,
+                "contract": "plenora-rest-async-job-recovery-v1",
+                "job_id": "job-1"
+              }
+            ]
+          },
+          "message": "REST execution was cancelled",
+          "phase": "cleanup",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "quarantine"
+          }
+        },
+        "protocol_version": 2,
+        "status": "error"
+      },
+      "exit": 130,
+      "requests": [
+        "/submit",
+        "/poll",
+        "/cancel"
+      ]
+    },
+    "cli-signals-primary": {
+      "document": {
+        "command": "test",
+        "component": "plenora-rest-tools",
+        "component_version": "0.4.0",
+        "contract": "plenora-rest-execution-result-v1",
+        "error": {
+          "category": "cancelled",
+          "code": "CANCELLED",
+          "details": {
+            "async_jobs": [
+              {
+                "cancel_accepted": true,
+                "cancel_requested": true,
+                "contract": "plenora-rest-async-job-recovery-v1",
+                "job_id": "job-1"
+              }
+            ]
+          },
+          "message": "REST execution was cancelled",
+          "phase": "cleanup",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "quarantine"
+          }
+        },
+        "protocol_version": 2,
+        "status": "error"
+      },
+      "exit": 130,
+      "requests": [
+        "/submit",
+        "/poll",
+        "/cancel"
+      ]
+    },
+    "control-Cache-cancel": {
+      "errors": [
+        {
+          "category": "cancelled",
+          "code": "CANCELLED",
+          "details": {},
+          "message": "REST execution was cancelled",
+          "phase": "cleanup",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "quarantine"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 1,
+        "retries": 0
+      },
+      "output": {
+        "type": "none"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "control-Cache-deadline": {
+      "errors": [
+        {
+          "category": "timeout",
+          "code": "TIMEOUT",
+          "details": {},
+          "message": "REST execution timed out",
+          "phase": "read",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "quarantine"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 1,
+        "retries": 0
+      },
+      "output": {
+        "type": "none"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "control-CacheHit-cancel": {
+      "errors": [],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 1,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 1,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 0,
+        "retries": 0
+      },
+      "output": {
+        "type": "json",
+        "value": {
+          "ok": true
+        }
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "success"
+    },
+    "control-CacheHit-deadline": {
+      "errors": [],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 1,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 1,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 0,
+        "retries": 0
+      },
+      "output": {
+        "type": "json",
+        "value": {
+          "ok": true
+        }
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "success"
+    },
+    "control-CacheRevalidate-cancel": {
+      "errors": [],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 1,
+        "cache_revalidations": 1,
+        "input_records": 0,
+        "output_records": 1,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 1,
+        "retries": 0
+      },
+      "output": {
+        "type": "json",
+        "value": {
+          "ok": true
+        }
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "success"
+    },
+    "control-CacheRevalidate-deadline": {
+      "errors": [],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 1,
+        "cache_revalidations": 1,
+        "input_records": 0,
+        "output_records": 1,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 1,
+        "retries": 0
+      },
+      "output": {
+        "type": "json",
+        "value": {
+          "ok": true
+        }
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "success"
+    },
+    "control-Circuit-cancel": {
+      "errors": [
+        {
+          "category": "cancelled",
+          "code": "CANCELLED",
+          "details": {},
+          "message": "REST execution was cancelled",
+          "phase": "cleanup",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "quarantine"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 1,
+        "retries": 0
+      },
+      "output": {
+        "type": "none"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "control-Circuit-deadline": {
+      "errors": [
+        {
+          "category": "timeout",
+          "code": "TIMEOUT",
+          "details": {},
+          "message": "REST execution timed out",
+          "phase": "read",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "quarantine"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 1,
+        "retries": 0
+      },
+      "output": {
+        "type": "none"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "control-CircuitProbe-cancel": {
+      "errors": [
+        {
+          "category": "cancelled",
+          "code": "CANCELLED",
+          "details": {},
+          "message": "REST execution was cancelled",
+          "phase": "cleanup",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "quarantine"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 1,
+        "retries": 0
+      },
+      "output": {
+        "type": "none"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "control-CircuitProbe-deadline": {
+      "errors": [
+        {
+          "category": "timeout",
+          "code": "TIMEOUT",
+          "details": {},
+          "message": "REST execution timed out",
+          "phase": "read",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "quarantine"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 1,
+        "retries": 0
+      },
+      "output": {
+        "type": "none"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "control-CircuitReject-cancel": {
+      "errors": [
+        {
+          "category": "transient",
+          "code": "CIRCUIT_OPEN",
+          "details": {},
+          "message": "Circuit breaker is open",
+          "phase": "connect",
+          "remote_effect": "none",
+          "retry": {
+            "kind": "safe"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 0,
+        "retries": 0
+      },
+      "output": {
+        "type": "none"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "control-CircuitReject-deadline": {
+      "errors": [
+        {
+          "category": "transient",
+          "code": "CIRCUIT_OPEN",
+          "details": {},
+          "message": "Circuit breaker is open",
+          "phase": "connect",
+          "remote_effect": "none",
+          "retry": {
+            "kind": "safe"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 0,
+        "retries": 0
+      },
+      "output": {
+        "type": "none"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "control-Cleanup-cancel": {
+      "errors": [
+        {
+          "category": "cancelled",
+          "code": "CANCELLED",
+          "details": {},
+          "message": "REST execution was cancelled",
+          "phase": "cleanup",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "quarantine"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 1,
+        "retries": 0
+      },
+      "output": {
+        "type": "none"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "control-Cleanup-deadline": {
+      "errors": [
+        {
+          "category": "timeout",
+          "code": "TIMEOUT",
+          "details": {},
+          "message": "REST execution timed out",
+          "phase": "read",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "quarantine"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 1,
+        "retries": 0
+      },
+      "output": {
+        "type": "none"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "control-Cookie-cancel": {
+      "errors": [
+        {
+          "category": "cancelled",
+          "code": "CANCELLED",
+          "details": {},
+          "message": "REST execution was cancelled",
+          "phase": "cleanup",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "quarantine"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 0,
+        "retries": 0
+      },
+      "output": {
+        "type": "none"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "control-Cookie-deadline": {
+      "errors": [
+        {
+          "category": "timeout",
+          "code": "TIMEOUT",
+          "details": {},
+          "message": "REST execution timed out",
+          "phase": "read",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "quarantine"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 1,
+        "retries": 0
+      },
+      "output": {
+        "type": "none"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "control-Finalize-cancel": {
+      "errors": [
+        {
+          "category": "cancelled",
+          "code": "CANCELLED",
+          "details": {},
+          "message": "REST execution was cancelled",
+          "phase": "cleanup",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "quarantine"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 1,
+        "retries": 0
+      },
+      "output": {
+        "type": "none"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "control-Finalize-deadline": {
+      "errors": [
+        {
+          "category": "timeout",
+          "code": "TIMEOUT",
+          "details": {},
+          "message": "REST execution timed out",
+          "phase": "read",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "quarantine"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 1,
+        "retries": 0
+      },
+      "output": {
+        "type": "none"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "control-Flush-cancel": {
+      "errors": [
+        {
+          "category": "cancelled",
+          "code": "CANCELLED",
+          "details": {},
+          "message": "REST execution was cancelled",
+          "phase": "cleanup",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "quarantine"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 1,
+        "retries": 0
+      },
+      "output": {
+        "type": "none"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "control-Flush-deadline": {
+      "errors": [
+        {
+          "category": "timeout",
+          "code": "TIMEOUT",
+          "details": {},
+          "message": "REST execution timed out",
+          "phase": "read",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "quarantine"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 1,
+        "retries": 0
+      },
+      "output": {
+        "type": "none"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "control-OAuth-cancel": {
+      "errors": [
+        {
+          "category": "cancelled",
+          "code": "CANCELLED",
+          "details": {},
+          "message": "REST execution was cancelled",
+          "phase": "cleanup",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "quarantine"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 1,
+        "retries": 0
+      },
+      "output": {
+        "type": "none"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "control-OAuth-deadline": {
+      "errors": [
+        {
+          "category": "timeout",
+          "code": "TIMEOUT",
+          "details": {},
+          "message": "REST execution timed out",
+          "phase": "read",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "quarantine"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 1,
+        "retries": 0
+      },
+      "output": {
+        "type": "none"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "control-OAuthCached-cancel": {
+      "errors": [
+        {
+          "category": "cancelled",
+          "code": "CANCELLED",
+          "details": {},
+          "message": "REST execution was cancelled",
+          "phase": "cleanup",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "quarantine"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 1,
+        "retries": 0
+      },
+      "output": {
+        "type": "none"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "control-OAuthCached-deadline": {
+      "errors": [
+        {
+          "category": "timeout",
+          "code": "TIMEOUT",
+          "details": {},
+          "message": "REST execution timed out",
+          "phase": "read",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "quarantine"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 1,
+        "retries": 0
+      },
+      "output": {
+        "type": "none"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "control-OAuthRead-cancel": {
+      "errors": [
+        {
+          "category": "cancelled",
+          "code": "CANCELLED",
+          "details": {},
+          "message": "REST execution was cancelled",
+          "phase": "cleanup",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "quarantine"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 2,
+        "retries": 0
+      },
+      "output": {
+        "type": "none"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "control-OAuthRead-deadline": {
+      "errors": [
+        {
+          "category": "timeout",
+          "code": "TIMEOUT",
+          "details": {},
+          "message": "REST execution timed out",
+          "phase": "read",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "quarantine"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 2,
+        "retries": 0
+      },
+      "output": {
+        "type": "none"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "control-Open-cancel": {
+      "errors": [
+        {
+          "category": "cancelled",
+          "code": "CANCELLED",
+          "details": {},
+          "message": "REST execution was cancelled",
+          "phase": "cleanup",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "quarantine"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 1,
+        "retries": 0
+      },
+      "output": {
+        "type": "none"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "control-Open-deadline": {
+      "errors": [
+        {
+          "category": "timeout",
+          "code": "TIMEOUT",
+          "details": {},
+          "message": "REST execution timed out",
+          "phase": "read",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "quarantine"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 1,
+        "retries": 0
+      },
+      "output": {
+        "type": "none"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "control-Polling-cancel": {
+      "errors": [
+        {
+          "category": "cancelled",
+          "code": "CANCELLED",
+          "details": {},
+          "message": "REST execution was cancelled",
+          "phase": "cleanup",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "quarantine"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 1,
+        "retries": 0
+      },
+      "output": {
+        "type": "none"
+      },
+      "recoveries": [
+        {
+          "cancel_requested": false,
+          "contract": "plenora-rest-async-job-recovery-v1",
+          "job_id": "job-1"
+        }
+      ],
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "control-Polling-deadline": {
+      "errors": [
+        {
+          "category": "timeout",
+          "code": "TIMEOUT",
+          "details": {},
+          "message": "REST execution timed out",
+          "phase": "read",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "quarantine"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 1,
+        "retries": 0
+      },
+      "output": {
+        "type": "none"
+      },
+      "recoveries": [
+        {
+          "cancel_requested": false,
+          "contract": "plenora-rest-async-job-recovery-v1",
+          "job_id": "job-1"
+        }
+      ],
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "control-Prepare-cancel": {
+      "errors": [
+        {
+          "category": "cancelled",
+          "code": "CANCELLED",
+          "details": {},
+          "message": "REST execution was cancelled",
+          "phase": "cleanup",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "quarantine"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 1,
+        "retries": 0
+      },
+      "output": {
+        "type": "none"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "control-Prepare-deadline": {
+      "errors": [
+        {
+          "category": "timeout",
+          "code": "TIMEOUT",
+          "details": {},
+          "message": "REST execution timed out",
+          "phase": "read",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "quarantine"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 1,
+        "retries": 0
+      },
+      "output": {
+        "type": "none"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "control-Publish-cancel": {
+      "errors": [
+        {
+          "category": "cancelled",
+          "code": "CANCELLED",
+          "details": {},
+          "message": "REST execution was cancelled",
+          "phase": "cleanup",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "quarantine"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 1,
+        "retries": 0
+      },
+      "output": {
+        "type": "none"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "control-Publish-deadline": {
+      "errors": [
+        {
+          "category": "timeout",
+          "code": "TIMEOUT",
+          "details": {},
+          "message": "REST execution timed out",
+          "phase": "read",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "quarantine"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 1,
+        "retries": 0
+      },
+      "output": {
+        "type": "none"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "control-Rename-cancel": {
+      "errors": [
+        {
+          "category": "cancelled",
+          "code": "CANCELLED",
+          "details": {},
+          "message": "REST execution was cancelled",
+          "phase": "cleanup",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "quarantine"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 1,
+        "retries": 0
+      },
+      "output": {
+        "type": "none"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "control-Rename-deadline": {
+      "errors": [
+        {
+          "category": "timeout",
+          "code": "TIMEOUT",
+          "details": {},
+          "message": "REST execution timed out",
+          "phase": "read",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "quarantine"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 1,
+        "retries": 0
+      },
+      "output": {
+        "type": "none"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "control-Write-cancel": {
+      "errors": [
+        {
+          "category": "cancelled",
+          "code": "CANCELLED",
+          "details": {},
+          "message": "REST execution was cancelled",
+          "phase": "cleanup",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "quarantine"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 1,
+        "retries": 0
+      },
+      "output": {
+        "type": "none"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "control-Write-deadline": {
+      "errors": [
+        {
+          "category": "timeout",
+          "code": "TIMEOUT",
+          "details": {},
+          "message": "REST execution timed out",
+          "phase": "read",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "quarantine"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 1,
+        "retries": 0
+      },
+      "output": {
+        "type": "none"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "control-artifacts-Cache-cancel": {
+      "bytes": null,
+      "files": []
+    },
+    "control-artifacts-Cache-deadline": {
+      "bytes": null,
+      "files": []
+    },
+    "control-artifacts-CacheHit-cancel": {
+      "bytes": null,
+      "files": []
+    },
+    "control-artifacts-CacheHit-deadline": {
+      "bytes": null,
+      "files": []
+    },
+    "control-artifacts-CacheRevalidate-cancel": {
+      "bytes": null,
+      "files": []
+    },
+    "control-artifacts-CacheRevalidate-deadline": {
+      "bytes": null,
+      "files": []
+    },
+    "control-artifacts-Circuit-cancel": {
+      "bytes": null,
+      "files": []
+    },
+    "control-artifacts-Circuit-deadline": {
+      "bytes": null,
+      "files": []
+    },
+    "control-artifacts-CircuitProbe-cancel": {
+      "bytes": null,
+      "files": []
+    },
+    "control-artifacts-CircuitProbe-deadline": {
+      "bytes": null,
+      "files": []
+    },
+    "control-artifacts-CircuitReject-cancel": {
+      "bytes": null,
+      "files": []
+    },
+    "control-artifacts-CircuitReject-deadline": {
+      "bytes": null,
+      "files": []
+    },
+    "control-artifacts-Cleanup-cancel": {
+      "allowed_before_publication_confirmation": [
+        "absent",
+        "complete"
+      ],
+      "complete_body": "{\"ok\":true}",
+      "required_after_publication_confirmation": "complete",
+      "rule": "cooperative-cancellation-is-not-rollback",
+      "sources": [
+        "contracts/upstream/specs/errors/ERRORS-1.0.md (ERR-005)",
+        "docs/architecture.md#artifact-e-streaming"
+      ],
+      "staging": "absent"
+    },
+    "control-artifacts-Cleanup-deadline": {
+      "allowed_before_publication_confirmation": [
+        "absent",
+        "complete"
+      ],
+      "complete_body": "{\"ok\":true}",
+      "required_after_publication_confirmation": "complete",
+      "rule": "cooperative-cancellation-is-not-rollback",
+      "sources": [
+        "contracts/upstream/specs/errors/ERRORS-1.0.md (ERR-005)",
+        "docs/architecture.md#artifact-e-streaming"
+      ],
+      "staging": "absent"
+    },
+    "control-artifacts-Cookie-cancel": {
+      "bytes": null,
+      "files": []
+    },
+    "control-artifacts-Cookie-deadline": {
+      "bytes": null,
+      "files": []
+    },
+    "control-artifacts-Finalize-cancel": {
+      "allowed_before_publication_confirmation": [
+        "absent",
+        "complete"
+      ],
+      "complete_body": "{\"ok\":true}",
+      "required_after_publication_confirmation": "complete",
+      "rule": "cooperative-cancellation-is-not-rollback",
+      "sources": [
+        "contracts/upstream/specs/errors/ERRORS-1.0.md (ERR-005)",
+        "docs/architecture.md#artifact-e-streaming"
+      ],
+      "staging": "absent"
+    },
+    "control-artifacts-Finalize-deadline": {
+      "allowed_before_publication_confirmation": [
+        "absent",
+        "complete"
+      ],
+      "complete_body": "{\"ok\":true}",
+      "required_after_publication_confirmation": "complete",
+      "rule": "cooperative-cancellation-is-not-rollback",
+      "sources": [
+        "contracts/upstream/specs/errors/ERRORS-1.0.md (ERR-005)",
+        "docs/architecture.md#artifact-e-streaming"
+      ],
+      "staging": "absent"
+    },
+    "control-artifacts-Flush-cancel": {
+      "allowed_before_publication_confirmation": [
+        "absent",
+        "complete"
+      ],
+      "complete_body": "{\"ok\":true}",
+      "required_after_publication_confirmation": "complete",
+      "rule": "cooperative-cancellation-is-not-rollback",
+      "sources": [
+        "contracts/upstream/specs/errors/ERRORS-1.0.md (ERR-005)",
+        "docs/architecture.md#artifact-e-streaming"
+      ],
+      "staging": "absent"
+    },
+    "control-artifacts-Flush-deadline": {
+      "allowed_before_publication_confirmation": [
+        "absent",
+        "complete"
+      ],
+      "complete_body": "{\"ok\":true}",
+      "required_after_publication_confirmation": "complete",
+      "rule": "cooperative-cancellation-is-not-rollback",
+      "sources": [
+        "contracts/upstream/specs/errors/ERRORS-1.0.md (ERR-005)",
+        "docs/architecture.md#artifact-e-streaming"
+      ],
+      "staging": "absent"
+    },
+    "control-artifacts-OAuth-cancel": {
+      "bytes": null,
+      "files": []
+    },
+    "control-artifacts-OAuth-deadline": {
+      "bytes": null,
+      "files": []
+    },
+    "control-artifacts-OAuthCached-cancel": {
+      "bytes": null,
+      "files": []
+    },
+    "control-artifacts-OAuthCached-deadline": {
+      "bytes": null,
+      "files": []
+    },
+    "control-artifacts-OAuthRead-cancel": {
+      "bytes": null,
+      "files": []
+    },
+    "control-artifacts-OAuthRead-deadline": {
+      "bytes": null,
+      "files": []
+    },
+    "control-artifacts-Open-cancel": {
+      "allowed_before_publication_confirmation": [
+        "absent",
+        "complete"
+      ],
+      "complete_body": "{\"ok\":true}",
+      "required_after_publication_confirmation": "complete",
+      "rule": "cooperative-cancellation-is-not-rollback",
+      "sources": [
+        "contracts/upstream/specs/errors/ERRORS-1.0.md (ERR-005)",
+        "docs/architecture.md#artifact-e-streaming"
+      ],
+      "staging": "absent"
+    },
+    "control-artifacts-Open-deadline": {
+      "allowed_before_publication_confirmation": [
+        "absent",
+        "complete"
+      ],
+      "complete_body": "{\"ok\":true}",
+      "required_after_publication_confirmation": "complete",
+      "rule": "cooperative-cancellation-is-not-rollback",
+      "sources": [
+        "contracts/upstream/specs/errors/ERRORS-1.0.md (ERR-005)",
+        "docs/architecture.md#artifact-e-streaming"
+      ],
+      "staging": "absent"
+    },
+    "control-artifacts-Polling-cancel": {
+      "bytes": null,
+      "files": []
+    },
+    "control-artifacts-Polling-deadline": {
+      "bytes": null,
+      "files": []
+    },
+    "control-artifacts-Prepare-cancel": {
+      "bytes": null,
+      "files": []
+    },
+    "control-artifacts-Prepare-deadline": {
+      "bytes": null,
+      "files": []
+    },
+    "control-artifacts-Publish-cancel": {
+      "allowed_before_publication_confirmation": [
+        "absent",
+        "complete"
+      ],
+      "complete_body": "{\"ok\":true}",
+      "required_after_publication_confirmation": "complete",
+      "rule": "cooperative-cancellation-is-not-rollback",
+      "sources": [
+        "contracts/upstream/specs/errors/ERRORS-1.0.md (ERR-005)",
+        "docs/architecture.md#artifact-e-streaming"
+      ],
+      "staging": "absent"
+    },
+    "control-artifacts-Publish-deadline": {
+      "allowed_before_publication_confirmation": [
+        "absent",
+        "complete"
+      ],
+      "complete_body": "{\"ok\":true}",
+      "required_after_publication_confirmation": "complete",
+      "rule": "cooperative-cancellation-is-not-rollback",
+      "sources": [
+        "contracts/upstream/specs/errors/ERRORS-1.0.md (ERR-005)",
+        "docs/architecture.md#artifact-e-streaming"
+      ],
+      "staging": "absent"
+    },
+    "control-artifacts-Rename-cancel": {
+      "allowed_before_publication_confirmation": [
+        "absent",
+        "complete"
+      ],
+      "complete_body": "{\"ok\":true}",
+      "required_after_publication_confirmation": "complete",
+      "rule": "cooperative-cancellation-is-not-rollback",
+      "sources": [
+        "contracts/upstream/specs/errors/ERRORS-1.0.md (ERR-005)",
+        "docs/architecture.md#artifact-e-streaming"
+      ],
+      "staging": "absent"
+    },
+    "control-artifacts-Rename-deadline": {
+      "allowed_before_publication_confirmation": [
+        "absent",
+        "complete"
+      ],
+      "complete_body": "{\"ok\":true}",
+      "required_after_publication_confirmation": "complete",
+      "rule": "cooperative-cancellation-is-not-rollback",
+      "sources": [
+        "contracts/upstream/specs/errors/ERRORS-1.0.md (ERR-005)",
+        "docs/architecture.md#artifact-e-streaming"
+      ],
+      "staging": "absent"
+    },
+    "control-artifacts-Write-cancel": {
+      "allowed_before_publication_confirmation": [
+        "absent",
+        "complete"
+      ],
+      "complete_body": "{\"ok\":true}",
+      "required_after_publication_confirmation": "complete",
+      "rule": "cooperative-cancellation-is-not-rollback",
+      "sources": [
+        "contracts/upstream/specs/errors/ERRORS-1.0.md (ERR-005)",
+        "docs/architecture.md#artifact-e-streaming"
+      ],
+      "staging": "absent"
+    },
+    "control-artifacts-Write-deadline": {
+      "allowed_before_publication_confirmation": [
+        "absent",
+        "complete"
+      ],
+      "complete_body": "{\"ok\":true}",
+      "required_after_publication_confirmation": "complete",
+      "rule": "cooperative-cancellation-is-not-rollback",
+      "sources": [
+        "contracts/upstream/specs/errors/ERRORS-1.0.md (ERR-005)",
+        "docs/architecture.md#artifact-e-streaming"
+      ],
+      "staging": "absent"
+    },
+    "deadline-after-headers": {
+      "errors": [
+        {
+          "category": "timeout",
+          "code": "TIMEOUT",
+          "details": {},
+          "message": "REST execution timed out",
+          "phase": "read",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "quarantine"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 1,
+        "retries": 0
+      },
+      "output": {
+        "type": "none"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "expired-before-send": {
+      "errors": [
+        {
+          "category": "timeout",
+          "code": "DEADLINE_EXPIRED",
+          "details": {},
+          "message": "Execution deadline had already passed",
+          "phase": "validate",
+          "remote_effect": "none",
+          "retry": {
+            "kind": "never"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 0,
+        "retries": 0
+      },
+      "output": {
+        "type": "none"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "internal-wait-result-download-body": {
+      "errors": [],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 13,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 1,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 3,
+        "retries": 2
+      },
+      "output": {
+        "artifact_reference": "sha256:4062edaf750fb8074e7e83e0c9028c94e32468a8b6f1614774328ef045150f93",
+        "bytes_transferred": 11,
+        "checksum": {
+          "algorithm": "sha256",
+          "value": "4062edaf750fb8074e7e83e0c9028c94e32468a8b6f1614774328ef045150f93"
+        },
+        "direction": "download",
+        "media_type": "application/json",
+        "type": "file"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "success"
+    },
+    "internal-wait-result-download-connect": {
+      "errors": [],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 11,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 1,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 3,
+        "retries": 2
+      },
+      "output": {
+        "artifact_reference": "sha256:4062edaf750fb8074e7e83e0c9028c94e32468a8b6f1614774328ef045150f93",
+        "bytes_transferred": 11,
+        "checksum": {
+          "algorithm": "sha256",
+          "value": "4062edaf750fb8074e7e83e0c9028c94e32468a8b6f1614774328ef045150f93"
+        },
+        "direction": "download",
+        "media_type": "application/json",
+        "type": "file"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "success"
+    },
+    "internal-wait-result-download-status": {
+      "errors": [],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 11,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 1,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 3,
+        "retries": 2
+      },
+      "output": {
+        "artifact_reference": "sha256:4062edaf750fb8074e7e83e0c9028c94e32468a8b6f1614774328ef045150f93",
+        "bytes_transferred": 11,
+        "checksum": {
+          "algorithm": "sha256",
+          "value": "4062edaf750fb8074e7e83e0c9028c94e32468a8b6f1614774328ef045150f93"
+        },
+        "direction": "download",
+        "media_type": "application/json",
+        "type": "file"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "success"
+    },
+    "internal-wait-result-test-body": {
+      "errors": [],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 1,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 3,
+        "retries": 2
+      },
+      "output": {
+        "type": "json",
+        "value": {
+          "ok": true
+        }
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "success"
+    },
+    "internal-wait-result-test-connect": {
+      "errors": [],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 1,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 3,
+        "retries": 2
+      },
+      "output": {
+        "type": "json",
+        "value": {
+          "ok": true
+        }
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "success"
+    },
+    "internal-wait-result-test-status": {
+      "errors": [],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 1,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 3,
+        "retries": 2
+      },
+      "output": {
+        "type": "json",
+        "value": {
+          "ok": true
+        }
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "success"
+    },
+    "internal-waits-download-body": [
+      250,
+      500
+    ],
+    "internal-waits-download-connect": [
+      250,
+      500
+    ],
+    "internal-waits-download-status": [
+      250,
+      500
+    ],
+    "internal-waits-test-body": [
+      250,
+      500
+    ],
+    "internal-waits-test-connect": [
+      250,
+      500
+    ],
+    "internal-waits-test-status": [
+      250,
+      500
+    ],
+    "io-fault-Cleanup": {
+      "errors": [
+        {
+          "category": "io",
+          "code": "CLEANUP_AFTER_PUBLISH_FAILED",
+          "details": {},
+          "message": "Download was published but its staging file could not be removed",
+          "phase": "cleanup",
+          "remote_effect": "committed",
+          "retry": {
+            "kind": "never"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 1,
+        "retries": 0
+      },
+      "output": {
+        "type": "none"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "io-fault-Finalize": {
+      "errors": [
+        {
+          "category": "io",
+          "code": "DOWNLOAD_WRITE_FAILED",
+          "details": {},
+          "message": "Download could not be written after the request was sent",
+          "phase": "write",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "requires_recovery"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 1,
+        "retries": 0
+      },
+      "output": {
+        "type": "none"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "io-fault-Flush": {
+      "errors": [
+        {
+          "category": "io",
+          "code": "DOWNLOAD_WRITE_FAILED",
+          "details": {},
+          "message": "Download could not be written after the request was sent",
+          "phase": "write",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "requires_recovery"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 1,
+        "retries": 0
+      },
+      "output": {
+        "type": "none"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "io-fault-Open": {
+      "errors": [
+        {
+          "category": "io",
+          "code": "FILE_IO",
+          "details": {},
+          "message": "File operation failed",
+          "phase": "write",
+          "remote_effect": "none",
+          "retry": {
+            "kind": "never"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 0,
+        "retries": 0
+      },
+      "output": {
+        "type": "none"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "io-fault-Publish": {
+      "errors": [
+        {
+          "category": "io",
+          "code": "DOWNLOAD_WRITE_FAILED",
+          "details": {},
+          "message": "Download could not be written after the request was sent",
+          "phase": "write",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "requires_recovery"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 1,
+        "retries": 0
+      },
+      "output": {
+        "type": "none"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "io-fault-Rename": {
+      "errors": [
+        {
+          "category": "io",
+          "code": "DOWNLOAD_WRITE_FAILED",
+          "details": {},
+          "message": "Download could not be written after the request was sent",
+          "phase": "write",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "requires_recovery"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 1,
+        "retries": 0
+      },
+      "output": {
+        "type": "none"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "io-fault-Write": {
+      "errors": [
+        {
+          "category": "io",
+          "code": "DOWNLOAD_WRITE_FAILED",
+          "details": {},
+          "message": "Download could not be written after the request was sent",
+          "phase": "write",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "requires_recovery"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 1,
+        "retries": 0
+      },
+      "output": {
+        "type": "none"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "mixed-1": {
+      "errors": [
+        {
+          "category": "data_mapping",
+          "code": "MISSING_PARAMETER",
+          "details": {},
+          "input_index": 2,
+          "message": "A required parameter is missing",
+          "phase": "prepare",
+          "remote_effect": "none",
+          "retry": {
+            "kind": "never"
+          }
+        },
+        {
+          "category": "execution",
+          "code": "HTTP_STATUS",
+          "details": {
+            "http_status": 400
+          },
+          "input_index": 3,
+          "message": "Remote service returned an unsuccessful status",
+          "phase": "read",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "never"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 4,
+        "output_records": 2,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 3,
+        "retries": 0
+      },
+      "output": {
+        "records": [
+          {
+            "id": "a",
+            "remote": "A"
+          },
+          {
+            "id": "b",
+            "remote": "B"
+          },
+          {
+            "missing": true
+          },
+          {
+            "id": "c"
+          }
+        ],
+        "type": "records"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "partial"
+    },
+    "mixed-2": {
+      "errors": [
+        {
+          "category": "data_mapping",
+          "code": "MISSING_PARAMETER",
+          "details": {},
+          "input_index": 2,
+          "message": "A required parameter is missing",
+          "phase": "prepare",
+          "remote_effect": "none",
+          "retry": {
+            "kind": "never"
+          }
+        },
+        {
+          "category": "execution",
+          "code": "HTTP_STATUS",
+          "details": {
+            "http_status": 400
+          },
+          "input_index": 3,
+          "message": "Remote service returned an unsuccessful status",
+          "phase": "read",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "never"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 4,
+        "output_records": 2,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 3,
+        "retries": 0
+      },
+      "output": {
+        "records": [
+          {
+            "id": "a",
+            "remote": "A"
+          },
+          {
+            "id": "b",
+            "remote": "B"
+          },
+          {
+            "missing": true
+          },
+          {
+            "id": "c"
+          }
+        ],
+        "type": "records"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "partial"
+    },
+    "mixed-4": {
+      "errors": [
+        {
+          "category": "data_mapping",
+          "code": "MISSING_PARAMETER",
+          "details": {},
+          "input_index": 2,
+          "message": "A required parameter is missing",
+          "phase": "prepare",
+          "remote_effect": "none",
+          "retry": {
+            "kind": "never"
+          }
+        },
+        {
+          "category": "execution",
+          "code": "HTTP_STATUS",
+          "details": {
+            "http_status": 400
+          },
+          "input_index": 3,
+          "message": "Remote service returned an unsuccessful status",
+          "phase": "read",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "never"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 4,
+        "output_records": 2,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 3,
+        "retries": 0
+      },
+      "output": {
+        "records": [
+          {
+            "id": "a",
+            "remote": "A"
+          },
+          {
+            "id": "b",
+            "remote": "B"
+          },
+          {
+            "missing": true
+          },
+          {
+            "id": "c"
+          }
+        ],
+        "type": "records"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "partial"
+    },
+    "parameter-before-send": {
+      "errors": [
+        {
+          "category": "data_mapping",
+          "code": "MISSING_PARAMETER",
+          "details": {},
+          "message": "A required parameter is missing",
+          "phase": "prepare",
+          "remote_effect": "none",
+          "retry": {
+            "kind": "never"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 0,
+        "retries": 0
+      },
+      "output": {
+        "type": "none"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "private-cli-invalid-method": {
+      "document": {
+        "command": "test",
+        "component": "plenora-rest-tools",
+        "component_version": "0.4.0",
+        "contract": "plenora-rest-execution-result-v1",
+        "error": {
+          "category": "authorization",
+          "code": "POLICY_VIOLATION",
+          "details": {},
+          "message": "Security policy denied the request",
+          "phase": "validate",
+          "remote_effect": "none",
+          "retry": {
+            "kind": "never"
+          }
+        },
+        "protocol_version": 2,
+        "status": "error"
+      },
+      "exit": 5,
+      "stderr": ""
+    },
+    "private-cli-unknown-connection-member": {
+      "document": {
+        "command": "test",
+        "component": "plenora-rest-tools",
+        "component_version": "0.4.0",
+        "contract": "plenora-rest-execution-result-v1",
+        "error": {
+          "category": "invalid_configuration",
+          "code": "INVALID_INPUT",
+          "details": {
+            "column": 99,
+            "line": 1
+          },
+          "message": "the request is not valid JSON for the execution request contract",
+          "phase": "validate",
+          "remote_effect": "none",
+          "retry": {
+            "kind": "never"
+          }
+        },
+        "protocol_version": 2,
+        "status": "error"
+      },
+      "exit": 2,
+      "stderr": ""
+    },
+    "private-core-invalid-method": {
+      "errors": [
+        {
+          "category": "authorization",
+          "code": "POLICY_VIOLATION",
+          "details": {},
+          "message": "Security policy denied the request",
+          "phase": "validate",
+          "remote_effect": "none",
+          "retry": {
+            "kind": "never"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 0,
+        "retries": 0
+      },
+      "output": {
+        "type": "none"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "private-core-unknown-connection-member": {
+      "category": "invalid_configuration",
+      "code": "INVALID_INPUT",
+      "details": {},
+      "message": "REST input is invalid",
+      "phase": "validate",
+      "remote_effect": "none",
+      "retry": {
+        "kind": "never"
+      }
+    },
+    "private-runtime-invalid-method": {
+      "content_type": "application/vnd.plenora.error+json",
+      "contract": "plenora-runtime-binding-v1",
+      "kind": "error",
+      "metadata": {
+        "plenora.capability.operation": "rest.test",
+        "plenora.message.causation_id": "11111111-1111-4111-8111-111111111111",
+        "plenora.operation.version": "1",
+        "plenora.output.contract": "plenora-error-v1",
+        "plenora.trace.correlation_id": "22222222-2222-4222-8222-222222222222"
+      },
+      "payload": {
+        "category": "invalid_configuration",
+        "code": "INVALID_INPUT",
+        "details": {},
+        "message": "REST input is invalid",
+        "phase": "validate",
+        "remote_effect": "none",
+        "retry": {
+          "kind": "never"
+        }
+      },
+      "schema_version": 1
+    },
+    "private-runtime-unknown-connection-member": {
+      "content_type": "application/vnd.plenora.error+json",
+      "contract": "plenora-runtime-binding-v1",
+      "kind": "error",
+      "metadata": {
+        "plenora.capability.operation": "rest.test",
+        "plenora.message.causation_id": "11111111-1111-4111-8111-111111111111",
+        "plenora.operation.version": "1",
+        "plenora.output.contract": "plenora-error-v1",
+        "plenora.trace.correlation_id": "22222222-2222-4222-8222-222222222222"
+      },
+      "payload": {
+        "category": "invalid_configuration",
+        "code": "INVALID_INPUT",
+        "details": {},
+        "message": "REST input is invalid",
+        "phase": "validate",
+        "remote_effect": "none",
+        "retry": {
+          "kind": "never"
+        }
+      },
+      "schema_version": 1
+    },
+    "private-sdk-invalid-method": {
+      "result": {
+        "errors": [
+          {
+            "category": "authorization",
+            "code": "POLICY_VIOLATION",
+            "details": {},
+            "message": "Security policy denied the request",
+            "phase": "validate",
+            "remote_effect": "none",
+            "retry": {
+              "kind": "never"
+            }
+          }
+        ],
+        "metrics": {
+          "auth_requests": 0,
+          "bytes_downloaded": 0,
+          "bytes_uploaded": 0,
+          "cache_hits": 0,
+          "cache_revalidations": 0,
+          "input_records": 0,
+          "output_records": 0,
+          "poll_requests": 0,
+          "rate_limit_wait_ms": 0,
+          "requests": 0,
+          "retries": 0
+        },
+        "output": {
+          "type": "none"
+        },
+        "responses": [],
+        "schema_version": 1,
+        "status": "failed"
+      }
+    },
+    "private-sdk-unknown-connection-member": {
+      "exception": "REST input is invalid",
+      "payload": {
+        "category": "invalid_configuration",
+        "code": "INVALID_INPUT",
+        "details": {},
+        "message": "REST input is invalid",
+        "phase": "validate",
+        "remote_effect": "none",
+        "retry": {
+          "kind": "never"
+        }
+      }
+    },
+    "record-errors-1": {
+      "errors": [
+        {
+          "category": "authorization",
+          "code": "UNSAFE_ADDRESS",
+          "details": {},
+          "input_index": 0,
+          "message": "Outbound address is not allowed",
+          "phase": "read",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "requires_recovery"
+          }
+        },
+        {
+          "category": "data_mapping",
+          "code": "MISSING_PARAMETER",
+          "details": {},
+          "input_index": 1,
+          "message": "A required parameter is missing",
+          "phase": "prepare",
+          "remote_effect": "none",
+          "retry": {
+            "kind": "never"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 2,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 1,
+        "retries": 0
+      },
+      "output": {
+        "records": [
+          {
+            "id": "a"
+          },
+          {
+            "other": "b"
+          }
+        ],
+        "type": "records"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "record-errors-2": {
+      "errors": [
+        {
+          "category": "authorization",
+          "code": "UNSAFE_ADDRESS",
+          "details": {},
+          "input_index": 0,
+          "message": "Outbound address is not allowed",
+          "phase": "read",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "requires_recovery"
+          }
+        },
+        {
+          "category": "data_mapping",
+          "code": "MISSING_PARAMETER",
+          "details": {},
+          "input_index": 1,
+          "message": "A required parameter is missing",
+          "phase": "prepare",
+          "remote_effect": "none",
+          "retry": {
+            "kind": "never"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 2,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 1,
+        "retries": 0
+      },
+      "output": {
+        "records": [
+          {
+            "id": "a"
+          },
+          {
+            "other": "b"
+          }
+        ],
+        "type": "records"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "record-errors-4": {
+      "errors": [
+        {
+          "category": "authorization",
+          "code": "UNSAFE_ADDRESS",
+          "details": {},
+          "input_index": 0,
+          "message": "Outbound address is not allowed",
+          "phase": "read",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "requires_recovery"
+          }
+        },
+        {
+          "category": "data_mapping",
+          "code": "MISSING_PARAMETER",
+          "details": {},
+          "input_index": 1,
+          "message": "A required parameter is missing",
+          "phase": "prepare",
+          "remote_effect": "none",
+          "retry": {
+            "kind": "never"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 2,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 1,
+        "retries": 0
+      },
+      "output": {
+        "records": [
+          {
+            "id": "a"
+          },
+          {
+            "other": "b"
+          }
+        ],
+        "type": "records"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "redirect-after-send": {
+      "errors": [
+        {
+          "category": "authorization",
+          "code": "UNSAFE_ADDRESS",
+          "details": {},
+          "message": "Outbound address is not allowed",
+          "phase": "read",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "requires_recovery"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 1,
+        "retries": 0
+      },
+      "output": {
+        "type": "none"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "remote-application-200": {
+      "errors": [
+        {
+          "category": "execution",
+          "code": "APPLICATION_ERROR",
+          "details": {},
+          "message": "Remote application reported failure",
+          "phase": "read",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "never"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 1,
+        "retries": 0
+      },
+      "output": {
+        "type": "none"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "remote-application-400": {
+      "errors": [
+        {
+          "category": "execution",
+          "code": "HTTP_STATUS",
+          "details": {
+            "http_status": 400
+          },
+          "message": "Remote service returned an unsuccessful status",
+          "phase": "read",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "never"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 1,
+        "retries": 0
+      },
+      "output": {
+        "type": "none"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "remote-binary-200": {
+      "errors": [
+        {
+          "category": "execution",
+          "code": "APPLICATION_ERROR",
+          "details": {},
+          "message": "Remote application reported failure",
+          "phase": "read",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "never"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 1,
+        "retries": 0
+      },
+      "output": {
+        "type": "none"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "remote-binary-400": {
+      "errors": [
+        {
+          "category": "execution",
+          "code": "HTTP_STATUS",
+          "details": {
+            "http_status": 400
+          },
+          "message": "Remote service returned an unsuccessful status",
+          "phase": "read",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "never"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 1,
+        "retries": 0
+      },
+      "output": {
+        "type": "none"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "remote-csv-200": {
+      "errors": [
+        {
+          "category": "protocol",
+          "code": "INVALID_RESPONSE",
+          "details": {},
+          "message": "Remote response is invalid",
+          "phase": "read",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "never"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 1,
+        "retries": 0
+      },
+      "output": {
+        "type": "none"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "remote-csv-400": {
+      "errors": [
+        {
+          "category": "execution",
+          "code": "HTTP_STATUS",
+          "details": {
+            "http_status": 400
+          },
+          "message": "Remote service returned an unsuccessful status",
+          "phase": "read",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "never"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 1,
+        "retries": 0
+      },
+      "output": {
+        "type": "none"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "remote-headers-200": {
+      "errors": [],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 1,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 1,
+        "retries": 0
+      },
+      "output": {
+        "type": "json",
+        "value": {
+          "ok": true
+        }
+      },
+      "responses": [
+        {
+          "attempts": 1,
+          "final_url": "<loopback-origin>",
+          "headers": {
+            "connection": "close",
+            "content-length": "11"
+          },
+          "status": 200
+        }
+      ],
+      "schema_version": 1,
+      "status": "success"
+    },
+    "remote-headers-400": {
+      "errors": [
+        {
+          "category": "execution",
+          "code": "HTTP_STATUS",
+          "details": {
+            "http_status": 400
+          },
+          "message": "Remote service returned an unsuccessful status",
+          "phase": "read",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "never"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 1,
+        "retries": 0
+      },
+      "output": {
+        "type": "none"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "remote-json-200": {
+      "errors": [
+        {
+          "category": "protocol",
+          "code": "INVALID_RESPONSE",
+          "details": {},
+          "message": "Remote response is invalid",
+          "phase": "read",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "never"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 1,
+        "retries": 0
+      },
+      "output": {
+        "type": "none"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "remote-json-400": {
+      "errors": [
+        {
+          "category": "execution",
+          "code": "HTTP_STATUS",
+          "details": {
+            "http_status": 400
+          },
+          "message": "Remote service returned an unsuccessful status",
+          "phase": "read",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "never"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 1,
+        "retries": 0
+      },
+      "output": {
+        "type": "none"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "remote-ndjson-200": {
+      "errors": [
+        {
+          "category": "protocol",
+          "code": "INVALID_RESPONSE",
+          "details": {},
+          "message": "Remote response is invalid",
+          "phase": "read",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "never"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 1,
+        "retries": 0
+      },
+      "output": {
+        "type": "none"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "remote-ndjson-400": {
+      "errors": [
+        {
+          "category": "execution",
+          "code": "HTTP_STATUS",
+          "details": {
+            "http_status": 400
+          },
+          "message": "Remote service returned an unsuccessful status",
+          "phase": "read",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "never"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 1,
+        "retries": 0
+      },
+      "output": {
+        "type": "none"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "remote-runtime-application-200": {
+      "content_type": "application/vnd.plenora.error+json",
+      "contract": "plenora-runtime-binding-v1",
+      "kind": "error",
+      "metadata": {
+        "plenora.capability.operation": "rest.test",
+        "plenora.message.causation_id": "11111111-1111-4111-8111-111111111111",
+        "plenora.operation.version": "1",
+        "plenora.output.contract": "plenora-error-v1",
+        "plenora.trace.correlation_id": "22222222-2222-4222-8222-222222222222"
+      },
+      "payload": {
+        "category": "execution",
+        "code": "APPLICATION_ERROR",
+        "details": {},
+        "message": "Remote application reported failure",
+        "phase": "read",
+        "remote_effect": "unknown",
+        "retry": {
+          "kind": "never"
+        }
+      },
+      "schema_version": 1
+    },
+    "remote-runtime-application-400": {
+      "content_type": "application/vnd.plenora.error+json",
+      "contract": "plenora-runtime-binding-v1",
+      "kind": "error",
+      "metadata": {
+        "plenora.capability.operation": "rest.test",
+        "plenora.message.causation_id": "11111111-1111-4111-8111-111111111111",
+        "plenora.operation.version": "1",
+        "plenora.output.contract": "plenora-error-v1",
+        "plenora.trace.correlation_id": "22222222-2222-4222-8222-222222222222"
+      },
+      "payload": {
+        "category": "execution",
+        "code": "HTTP_STATUS",
+        "details": {
+          "http_status": 400
+        },
+        "message": "Remote service returned an unsuccessful status",
+        "phase": "read",
+        "remote_effect": "unknown",
+        "retry": {
+          "kind": "never"
+        }
+      },
+      "schema_version": 1
+    },
+    "remote-runtime-binary-200": {
+      "content_type": "application/vnd.plenora.error+json",
+      "contract": "plenora-runtime-binding-v1",
+      "kind": "error",
+      "metadata": {
+        "plenora.capability.operation": "rest.test",
+        "plenora.message.causation_id": "11111111-1111-4111-8111-111111111111",
+        "plenora.operation.version": "1",
+        "plenora.output.contract": "plenora-error-v1",
+        "plenora.trace.correlation_id": "22222222-2222-4222-8222-222222222222"
+      },
+      "payload": {
+        "category": "execution",
+        "code": "APPLICATION_ERROR",
+        "details": {},
+        "message": "Remote application reported failure",
+        "phase": "read",
+        "remote_effect": "unknown",
+        "retry": {
+          "kind": "never"
+        }
+      },
+      "schema_version": 1
+    },
+    "remote-runtime-binary-400": {
+      "content_type": "application/vnd.plenora.error+json",
+      "contract": "plenora-runtime-binding-v1",
+      "kind": "error",
+      "metadata": {
+        "plenora.capability.operation": "rest.test",
+        "plenora.message.causation_id": "11111111-1111-4111-8111-111111111111",
+        "plenora.operation.version": "1",
+        "plenora.output.contract": "plenora-error-v1",
+        "plenora.trace.correlation_id": "22222222-2222-4222-8222-222222222222"
+      },
+      "payload": {
+        "category": "execution",
+        "code": "HTTP_STATUS",
+        "details": {
+          "http_status": 400
+        },
+        "message": "Remote service returned an unsuccessful status",
+        "phase": "read",
+        "remote_effect": "unknown",
+        "retry": {
+          "kind": "never"
+        }
+      },
+      "schema_version": 1
+    },
+    "remote-runtime-csv-200": {
+      "content_type": "application/vnd.plenora.error+json",
+      "contract": "plenora-runtime-binding-v1",
+      "kind": "error",
+      "metadata": {
+        "plenora.capability.operation": "rest.test",
+        "plenora.message.causation_id": "11111111-1111-4111-8111-111111111111",
+        "plenora.operation.version": "1",
+        "plenora.output.contract": "plenora-error-v1",
+        "plenora.trace.correlation_id": "22222222-2222-4222-8222-222222222222"
+      },
+      "payload": {
+        "category": "protocol",
+        "code": "INVALID_RESPONSE",
+        "details": {},
+        "message": "Remote response is invalid",
+        "phase": "read",
+        "remote_effect": "unknown",
+        "retry": {
+          "kind": "never"
+        }
+      },
+      "schema_version": 1
+    },
+    "remote-runtime-csv-400": {
+      "content_type": "application/vnd.plenora.error+json",
+      "contract": "plenora-runtime-binding-v1",
+      "kind": "error",
+      "metadata": {
+        "plenora.capability.operation": "rest.test",
+        "plenora.message.causation_id": "11111111-1111-4111-8111-111111111111",
+        "plenora.operation.version": "1",
+        "plenora.output.contract": "plenora-error-v1",
+        "plenora.trace.correlation_id": "22222222-2222-4222-8222-222222222222"
+      },
+      "payload": {
+        "category": "execution",
+        "code": "HTTP_STATUS",
+        "details": {
+          "http_status": 400
+        },
+        "message": "Remote service returned an unsuccessful status",
+        "phase": "read",
+        "remote_effect": "unknown",
+        "retry": {
+          "kind": "never"
+        }
+      },
+      "schema_version": 1
+    },
+    "remote-runtime-headers-200": {
+      "content_type": "application/json",
+      "contract": "plenora-runtime-binding-v1",
+      "kind": "success",
+      "metadata": {
+        "plenora.capability.operation": "rest.test",
+        "plenora.message.causation_id": "11111111-1111-4111-8111-111111111111",
+        "plenora.operation.version": "1",
+        "plenora.output.contract": "plenora-rest-execution-result-v1",
+        "plenora.trace.correlation_id": "22222222-2222-4222-8222-222222222222"
+      },
+      "payload": {
+        "errors": [],
+        "metrics": {
+          "auth_requests": 0,
+          "bytes_downloaded": 0,
+          "bytes_uploaded": 0,
+          "cache_hits": 0,
+          "cache_revalidations": 0,
+          "input_records": 0,
+          "output_records": 1,
+          "poll_requests": 0,
+          "rate_limit_wait_ms": 0,
+          "requests": 1,
+          "retries": 0
+        },
+        "output": {
+          "type": "json",
+          "value": {
+            "ok": true
+          }
+        },
+        "responses": [
+          {
+            "attempts": 1,
+            "final_url": "<loopback-origin>",
+            "headers": {
+              "connection": "close",
+              "content-length": "11"
+            },
+            "status": 200
+          }
+        ],
+        "schema_version": 1,
+        "status": "success"
+      },
+      "schema_version": 1
+    },
+    "remote-runtime-headers-400": {
+      "content_type": "application/vnd.plenora.error+json",
+      "contract": "plenora-runtime-binding-v1",
+      "kind": "error",
+      "metadata": {
+        "plenora.capability.operation": "rest.test",
+        "plenora.message.causation_id": "11111111-1111-4111-8111-111111111111",
+        "plenora.operation.version": "1",
+        "plenora.output.contract": "plenora-error-v1",
+        "plenora.trace.correlation_id": "22222222-2222-4222-8222-222222222222"
+      },
+      "payload": {
+        "category": "execution",
+        "code": "HTTP_STATUS",
+        "details": {
+          "http_status": 400
+        },
+        "message": "Remote service returned an unsuccessful status",
+        "phase": "read",
+        "remote_effect": "unknown",
+        "retry": {
+          "kind": "never"
+        }
+      },
+      "schema_version": 1
+    },
+    "remote-runtime-json-200": {
+      "content_type": "application/vnd.plenora.error+json",
+      "contract": "plenora-runtime-binding-v1",
+      "kind": "error",
+      "metadata": {
+        "plenora.capability.operation": "rest.test",
+        "plenora.message.causation_id": "11111111-1111-4111-8111-111111111111",
+        "plenora.operation.version": "1",
+        "plenora.output.contract": "plenora-error-v1",
+        "plenora.trace.correlation_id": "22222222-2222-4222-8222-222222222222"
+      },
+      "payload": {
+        "category": "protocol",
+        "code": "INVALID_RESPONSE",
+        "details": {},
+        "message": "Remote response is invalid",
+        "phase": "read",
+        "remote_effect": "unknown",
+        "retry": {
+          "kind": "never"
+        }
+      },
+      "schema_version": 1
+    },
+    "remote-runtime-json-400": {
+      "content_type": "application/vnd.plenora.error+json",
+      "contract": "plenora-runtime-binding-v1",
+      "kind": "error",
+      "metadata": {
+        "plenora.capability.operation": "rest.test",
+        "plenora.message.causation_id": "11111111-1111-4111-8111-111111111111",
+        "plenora.operation.version": "1",
+        "plenora.output.contract": "plenora-error-v1",
+        "plenora.trace.correlation_id": "22222222-2222-4222-8222-222222222222"
+      },
+      "payload": {
+        "category": "execution",
+        "code": "HTTP_STATUS",
+        "details": {
+          "http_status": 400
+        },
+        "message": "Remote service returned an unsuccessful status",
+        "phase": "read",
+        "remote_effect": "unknown",
+        "retry": {
+          "kind": "never"
+        }
+      },
+      "schema_version": 1
+    },
+    "remote-runtime-ndjson-200": {
+      "content_type": "application/vnd.plenora.error+json",
+      "contract": "plenora-runtime-binding-v1",
+      "kind": "error",
+      "metadata": {
+        "plenora.capability.operation": "rest.test",
+        "plenora.message.causation_id": "11111111-1111-4111-8111-111111111111",
+        "plenora.operation.version": "1",
+        "plenora.output.contract": "plenora-error-v1",
+        "plenora.trace.correlation_id": "22222222-2222-4222-8222-222222222222"
+      },
+      "payload": {
+        "category": "protocol",
+        "code": "INVALID_RESPONSE",
+        "details": {},
+        "message": "Remote response is invalid",
+        "phase": "read",
+        "remote_effect": "unknown",
+        "retry": {
+          "kind": "never"
+        }
+      },
+      "schema_version": 1
+    },
+    "remote-runtime-ndjson-400": {
+      "content_type": "application/vnd.plenora.error+json",
+      "contract": "plenora-runtime-binding-v1",
+      "kind": "error",
+      "metadata": {
+        "plenora.capability.operation": "rest.test",
+        "plenora.message.causation_id": "11111111-1111-4111-8111-111111111111",
+        "plenora.operation.version": "1",
+        "plenora.output.contract": "plenora-error-v1",
+        "plenora.trace.correlation_id": "22222222-2222-4222-8222-222222222222"
+      },
+      "payload": {
+        "category": "execution",
+        "code": "HTTP_STATUS",
+        "details": {
+          "http_status": 400
+        },
+        "message": "Remote service returned an unsuccessful status",
+        "phase": "read",
+        "remote_effect": "unknown",
+        "retry": {
+          "kind": "never"
+        }
+      },
+      "schema_version": 1
+    },
+    "remote-runtime-text-200": {
+      "content_type": "application/vnd.plenora.error+json",
+      "contract": "plenora-runtime-binding-v1",
+      "kind": "error",
+      "metadata": {
+        "plenora.capability.operation": "rest.test",
+        "plenora.message.causation_id": "11111111-1111-4111-8111-111111111111",
+        "plenora.operation.version": "1",
+        "plenora.output.contract": "plenora-error-v1",
+        "plenora.trace.correlation_id": "22222222-2222-4222-8222-222222222222"
+      },
+      "payload": {
+        "category": "execution",
+        "code": "APPLICATION_ERROR",
+        "details": {},
+        "message": "Remote application reported failure",
+        "phase": "read",
+        "remote_effect": "unknown",
+        "retry": {
+          "kind": "never"
+        }
+      },
+      "schema_version": 1
+    },
+    "remote-runtime-text-400": {
+      "content_type": "application/vnd.plenora.error+json",
+      "contract": "plenora-runtime-binding-v1",
+      "kind": "error",
+      "metadata": {
+        "plenora.capability.operation": "rest.test",
+        "plenora.message.causation_id": "11111111-1111-4111-8111-111111111111",
+        "plenora.operation.version": "1",
+        "plenora.output.contract": "plenora-error-v1",
+        "plenora.trace.correlation_id": "22222222-2222-4222-8222-222222222222"
+      },
+      "payload": {
+        "category": "execution",
+        "code": "HTTP_STATUS",
+        "details": {
+          "http_status": 400
+        },
+        "message": "Remote service returned an unsuccessful status",
+        "phase": "read",
+        "remote_effect": "unknown",
+        "retry": {
+          "kind": "never"
+        }
+      },
+      "schema_version": 1
+    },
+    "remote-runtime-xml-200": {
+      "content_type": "application/vnd.plenora.error+json",
+      "contract": "plenora-runtime-binding-v1",
+      "kind": "error",
+      "metadata": {
+        "plenora.capability.operation": "rest.test",
+        "plenora.message.causation_id": "11111111-1111-4111-8111-111111111111",
+        "plenora.operation.version": "1",
+        "plenora.output.contract": "plenora-error-v1",
+        "plenora.trace.correlation_id": "22222222-2222-4222-8222-222222222222"
+      },
+      "payload": {
+        "category": "protocol",
+        "code": "INVALID_RESPONSE",
+        "details": {},
+        "message": "Remote response is invalid",
+        "phase": "read",
+        "remote_effect": "unknown",
+        "retry": {
+          "kind": "never"
+        }
+      },
+      "schema_version": 1
+    },
+    "remote-runtime-xml-400": {
+      "content_type": "application/vnd.plenora.error+json",
+      "contract": "plenora-runtime-binding-v1",
+      "kind": "error",
+      "metadata": {
+        "plenora.capability.operation": "rest.test",
+        "plenora.message.causation_id": "11111111-1111-4111-8111-111111111111",
+        "plenora.operation.version": "1",
+        "plenora.output.contract": "plenora-error-v1",
+        "plenora.trace.correlation_id": "22222222-2222-4222-8222-222222222222"
+      },
+      "payload": {
+        "category": "execution",
+        "code": "HTTP_STATUS",
+        "details": {
+          "http_status": 400
+        },
+        "message": "Remote service returned an unsuccessful status",
+        "phase": "read",
+        "remote_effect": "unknown",
+        "retry": {
+          "kind": "never"
+        }
+      },
+      "schema_version": 1
+    },
+    "remote-surfaces-application-200": {
+      "async": {
+        "errors": [
+          {
+            "category": "execution",
+            "code": "APPLICATION_ERROR",
+            "details": {},
+            "message": "Remote application reported failure",
+            "phase": "read",
+            "remote_effect": "unknown",
+            "retry": {
+              "kind": "never"
+            }
+          }
+        ],
+        "metrics": {
+          "auth_requests": 0,
+          "bytes_downloaded": 0,
+          "bytes_uploaded": 0,
+          "cache_hits": 0,
+          "cache_revalidations": 0,
+          "input_records": 0,
+          "output_records": 0,
+          "poll_requests": 0,
+          "rate_limit_wait_ms": 0,
+          "requests": 1,
+          "retries": 0
+        },
+        "output": {
+          "type": "none"
+        },
+        "responses": [],
+        "schema_version": 1,
+        "status": "failed"
+      },
+      "cli": {
+        "command": "test",
+        "component": "plenora-rest-tools",
+        "component_version": "0.4.0",
+        "contract": "plenora-rest-execution-result-v1",
+        "error": {
+          "category": "execution",
+          "code": "APPLICATION_ERROR",
+          "details": {},
+          "message": "Remote application reported failure",
+          "phase": "read",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "never"
+          }
+        },
+        "protocol_version": 2,
+        "status": "error"
+      },
+      "exit": 6,
+      "sync": {
+        "errors": [
+          {
+            "category": "execution",
+            "code": "APPLICATION_ERROR",
+            "details": {},
+            "message": "Remote application reported failure",
+            "phase": "read",
+            "remote_effect": "unknown",
+            "retry": {
+              "kind": "never"
+            }
+          }
+        ],
+        "metrics": {
+          "auth_requests": 0,
+          "bytes_downloaded": 0,
+          "bytes_uploaded": 0,
+          "cache_hits": 0,
+          "cache_revalidations": 0,
+          "input_records": 0,
+          "output_records": 0,
+          "poll_requests": 0,
+          "rate_limit_wait_ms": 0,
+          "requests": 1,
+          "retries": 0
+        },
+        "output": {
+          "type": "none"
+        },
+        "responses": [],
+        "schema_version": 1,
+        "status": "failed"
+      }
+    },
+    "remote-surfaces-application-400": {
+      "async": {
+        "errors": [
+          {
+            "category": "execution",
+            "code": "HTTP_STATUS",
+            "details": {
+              "http_status": 400
+            },
+            "message": "Remote service returned an unsuccessful status",
+            "phase": "read",
+            "remote_effect": "unknown",
+            "retry": {
+              "kind": "never"
+            }
+          }
+        ],
+        "metrics": {
+          "auth_requests": 0,
+          "bytes_downloaded": 0,
+          "bytes_uploaded": 0,
+          "cache_hits": 0,
+          "cache_revalidations": 0,
+          "input_records": 0,
+          "output_records": 0,
+          "poll_requests": 0,
+          "rate_limit_wait_ms": 0,
+          "requests": 1,
+          "retries": 0
+        },
+        "output": {
+          "type": "none"
+        },
+        "responses": [],
+        "schema_version": 1,
+        "status": "failed"
+      },
+      "cli": {
+        "command": "test",
+        "component": "plenora-rest-tools",
+        "component_version": "0.4.0",
+        "contract": "plenora-rest-execution-result-v1",
+        "error": {
+          "category": "execution",
+          "code": "HTTP_STATUS",
+          "details": {
+            "http_status": 400
+          },
+          "message": "Remote service returned an unsuccessful status",
+          "phase": "read",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "never"
+          }
+        },
+        "protocol_version": 2,
+        "status": "error"
+      },
+      "exit": 6,
+      "sync": {
+        "errors": [
+          {
+            "category": "execution",
+            "code": "HTTP_STATUS",
+            "details": {
+              "http_status": 400
+            },
+            "message": "Remote service returned an unsuccessful status",
+            "phase": "read",
+            "remote_effect": "unknown",
+            "retry": {
+              "kind": "never"
+            }
+          }
+        ],
+        "metrics": {
+          "auth_requests": 0,
+          "bytes_downloaded": 0,
+          "bytes_uploaded": 0,
+          "cache_hits": 0,
+          "cache_revalidations": 0,
+          "input_records": 0,
+          "output_records": 0,
+          "poll_requests": 0,
+          "rate_limit_wait_ms": 0,
+          "requests": 1,
+          "retries": 0
+        },
+        "output": {
+          "type": "none"
+        },
+        "responses": [],
+        "schema_version": 1,
+        "status": "failed"
+      }
+    },
+    "remote-surfaces-binary-200": {
+      "async": {
+        "errors": [
+          {
+            "category": "execution",
+            "code": "APPLICATION_ERROR",
+            "details": {},
+            "message": "Remote application reported failure",
+            "phase": "read",
+            "remote_effect": "unknown",
+            "retry": {
+              "kind": "never"
+            }
+          }
+        ],
+        "metrics": {
+          "auth_requests": 0,
+          "bytes_downloaded": 0,
+          "bytes_uploaded": 0,
+          "cache_hits": 0,
+          "cache_revalidations": 0,
+          "input_records": 0,
+          "output_records": 0,
+          "poll_requests": 0,
+          "rate_limit_wait_ms": 0,
+          "requests": 1,
+          "retries": 0
+        },
+        "output": {
+          "type": "none"
+        },
+        "responses": [],
+        "schema_version": 1,
+        "status": "failed"
+      },
+      "cli": {
+        "command": "test",
+        "component": "plenora-rest-tools",
+        "component_version": "0.4.0",
+        "contract": "plenora-rest-execution-result-v1",
+        "error": {
+          "category": "execution",
+          "code": "APPLICATION_ERROR",
+          "details": {},
+          "message": "Remote application reported failure",
+          "phase": "read",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "never"
+          }
+        },
+        "protocol_version": 2,
+        "status": "error"
+      },
+      "exit": 6,
+      "sync": {
+        "errors": [
+          {
+            "category": "execution",
+            "code": "APPLICATION_ERROR",
+            "details": {},
+            "message": "Remote application reported failure",
+            "phase": "read",
+            "remote_effect": "unknown",
+            "retry": {
+              "kind": "never"
+            }
+          }
+        ],
+        "metrics": {
+          "auth_requests": 0,
+          "bytes_downloaded": 0,
+          "bytes_uploaded": 0,
+          "cache_hits": 0,
+          "cache_revalidations": 0,
+          "input_records": 0,
+          "output_records": 0,
+          "poll_requests": 0,
+          "rate_limit_wait_ms": 0,
+          "requests": 1,
+          "retries": 0
+        },
+        "output": {
+          "type": "none"
+        },
+        "responses": [],
+        "schema_version": 1,
+        "status": "failed"
+      }
+    },
+    "remote-surfaces-binary-400": {
+      "async": {
+        "errors": [
+          {
+            "category": "execution",
+            "code": "HTTP_STATUS",
+            "details": {
+              "http_status": 400
+            },
+            "message": "Remote service returned an unsuccessful status",
+            "phase": "read",
+            "remote_effect": "unknown",
+            "retry": {
+              "kind": "never"
+            }
+          }
+        ],
+        "metrics": {
+          "auth_requests": 0,
+          "bytes_downloaded": 0,
+          "bytes_uploaded": 0,
+          "cache_hits": 0,
+          "cache_revalidations": 0,
+          "input_records": 0,
+          "output_records": 0,
+          "poll_requests": 0,
+          "rate_limit_wait_ms": 0,
+          "requests": 1,
+          "retries": 0
+        },
+        "output": {
+          "type": "none"
+        },
+        "responses": [],
+        "schema_version": 1,
+        "status": "failed"
+      },
+      "cli": {
+        "command": "test",
+        "component": "plenora-rest-tools",
+        "component_version": "0.4.0",
+        "contract": "plenora-rest-execution-result-v1",
+        "error": {
+          "category": "execution",
+          "code": "HTTP_STATUS",
+          "details": {
+            "http_status": 400
+          },
+          "message": "Remote service returned an unsuccessful status",
+          "phase": "read",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "never"
+          }
+        },
+        "protocol_version": 2,
+        "status": "error"
+      },
+      "exit": 6,
+      "sync": {
+        "errors": [
+          {
+            "category": "execution",
+            "code": "HTTP_STATUS",
+            "details": {
+              "http_status": 400
+            },
+            "message": "Remote service returned an unsuccessful status",
+            "phase": "read",
+            "remote_effect": "unknown",
+            "retry": {
+              "kind": "never"
+            }
+          }
+        ],
+        "metrics": {
+          "auth_requests": 0,
+          "bytes_downloaded": 0,
+          "bytes_uploaded": 0,
+          "cache_hits": 0,
+          "cache_revalidations": 0,
+          "input_records": 0,
+          "output_records": 0,
+          "poll_requests": 0,
+          "rate_limit_wait_ms": 0,
+          "requests": 1,
+          "retries": 0
+        },
+        "output": {
+          "type": "none"
+        },
+        "responses": [],
+        "schema_version": 1,
+        "status": "failed"
+      }
+    },
+    "remote-surfaces-csv-200": {
+      "async": {
+        "errors": [
+          {
+            "category": "protocol",
+            "code": "INVALID_RESPONSE",
+            "details": {},
+            "message": "Remote response is invalid",
+            "phase": "read",
+            "remote_effect": "unknown",
+            "retry": {
+              "kind": "never"
+            }
+          }
+        ],
+        "metrics": {
+          "auth_requests": 0,
+          "bytes_downloaded": 0,
+          "bytes_uploaded": 0,
+          "cache_hits": 0,
+          "cache_revalidations": 0,
+          "input_records": 0,
+          "output_records": 0,
+          "poll_requests": 0,
+          "rate_limit_wait_ms": 0,
+          "requests": 1,
+          "retries": 0
+        },
+        "output": {
+          "type": "none"
+        },
+        "responses": [],
+        "schema_version": 1,
+        "status": "failed"
+      },
+      "cli": {
+        "command": "test",
+        "component": "plenora-rest-tools",
+        "component_version": "0.4.0",
+        "contract": "plenora-rest-execution-result-v1",
+        "error": {
+          "category": "protocol",
+          "code": "INVALID_RESPONSE",
+          "details": {},
+          "message": "Remote response is invalid",
+          "phase": "read",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "never"
+          }
+        },
+        "protocol_version": 2,
+        "status": "error"
+      },
+      "exit": 5,
+      "sync": {
+        "errors": [
+          {
+            "category": "protocol",
+            "code": "INVALID_RESPONSE",
+            "details": {},
+            "message": "Remote response is invalid",
+            "phase": "read",
+            "remote_effect": "unknown",
+            "retry": {
+              "kind": "never"
+            }
+          }
+        ],
+        "metrics": {
+          "auth_requests": 0,
+          "bytes_downloaded": 0,
+          "bytes_uploaded": 0,
+          "cache_hits": 0,
+          "cache_revalidations": 0,
+          "input_records": 0,
+          "output_records": 0,
+          "poll_requests": 0,
+          "rate_limit_wait_ms": 0,
+          "requests": 1,
+          "retries": 0
+        },
+        "output": {
+          "type": "none"
+        },
+        "responses": [],
+        "schema_version": 1,
+        "status": "failed"
+      }
+    },
+    "remote-surfaces-csv-400": {
+      "async": {
+        "errors": [
+          {
+            "category": "execution",
+            "code": "HTTP_STATUS",
+            "details": {
+              "http_status": 400
+            },
+            "message": "Remote service returned an unsuccessful status",
+            "phase": "read",
+            "remote_effect": "unknown",
+            "retry": {
+              "kind": "never"
+            }
+          }
+        ],
+        "metrics": {
+          "auth_requests": 0,
+          "bytes_downloaded": 0,
+          "bytes_uploaded": 0,
+          "cache_hits": 0,
+          "cache_revalidations": 0,
+          "input_records": 0,
+          "output_records": 0,
+          "poll_requests": 0,
+          "rate_limit_wait_ms": 0,
+          "requests": 1,
+          "retries": 0
+        },
+        "output": {
+          "type": "none"
+        },
+        "responses": [],
+        "schema_version": 1,
+        "status": "failed"
+      },
+      "cli": {
+        "command": "test",
+        "component": "plenora-rest-tools",
+        "component_version": "0.4.0",
+        "contract": "plenora-rest-execution-result-v1",
+        "error": {
+          "category": "execution",
+          "code": "HTTP_STATUS",
+          "details": {
+            "http_status": 400
+          },
+          "message": "Remote service returned an unsuccessful status",
+          "phase": "read",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "never"
+          }
+        },
+        "protocol_version": 2,
+        "status": "error"
+      },
+      "exit": 6,
+      "sync": {
+        "errors": [
+          {
+            "category": "execution",
+            "code": "HTTP_STATUS",
+            "details": {
+              "http_status": 400
+            },
+            "message": "Remote service returned an unsuccessful status",
+            "phase": "read",
+            "remote_effect": "unknown",
+            "retry": {
+              "kind": "never"
+            }
+          }
+        ],
+        "metrics": {
+          "auth_requests": 0,
+          "bytes_downloaded": 0,
+          "bytes_uploaded": 0,
+          "cache_hits": 0,
+          "cache_revalidations": 0,
+          "input_records": 0,
+          "output_records": 0,
+          "poll_requests": 0,
+          "rate_limit_wait_ms": 0,
+          "requests": 1,
+          "retries": 0
+        },
+        "output": {
+          "type": "none"
+        },
+        "responses": [],
+        "schema_version": 1,
+        "status": "failed"
+      }
+    },
+    "remote-surfaces-headers-200": {
+      "async": {
+        "errors": [],
+        "metrics": {
+          "auth_requests": 0,
+          "bytes_downloaded": 0,
+          "bytes_uploaded": 0,
+          "cache_hits": 0,
+          "cache_revalidations": 0,
+          "input_records": 0,
+          "output_records": 1,
+          "poll_requests": 0,
+          "rate_limit_wait_ms": 0,
+          "requests": 1,
+          "retries": 0
+        },
+        "output": {
+          "type": "json",
+          "value": {
+            "ok": true
+          }
+        },
+        "responses": [
+          {
+            "attempts": 1,
+            "final_url": "<loopback-origin>",
+            "headers": {
+              "content-length": "11",
+              "date": "Thu, 01 Jan 1970 00:00:00 GMT",
+              "server": "frozen-http/1"
+            },
+            "status": 200
+          }
+        ],
+        "schema_version": 1,
+        "status": "success"
+      },
+      "cli": {
+        "command": "test",
+        "component": "plenora-rest-tools",
+        "component_version": "0.4.0",
+        "contract": "plenora-rest-execution-result-v1",
+        "protocol_version": 2,
+        "result": {
+          "errors": [],
+          "metrics": {
+            "auth_requests": 0,
+            "bytes_downloaded": 0,
+            "bytes_uploaded": 0,
+            "cache_hits": 0,
+            "cache_revalidations": 0,
+            "input_records": 0,
+            "output_records": 1,
+            "poll_requests": 0,
+            "rate_limit_wait_ms": 0,
+            "requests": 1,
+            "retries": 0
+          },
+          "output": {
+            "type": "json",
+            "value": {
+              "ok": true
+            }
+          },
+          "responses": [
+            {
+              "attempts": 1,
+              "final_url": "<loopback-origin>",
+              "headers": {
+                "content-length": "11",
+                "date": "Thu, 01 Jan 1970 00:00:00 GMT",
+                "server": "frozen-http/1"
+              },
+              "status": 200
+            }
+          ],
+          "schema_version": 1,
+          "status": "success"
+        },
+        "status": "ok"
+      },
+      "exit": 0,
+      "sync": {
+        "errors": [],
+        "metrics": {
+          "auth_requests": 0,
+          "bytes_downloaded": 0,
+          "bytes_uploaded": 0,
+          "cache_hits": 0,
+          "cache_revalidations": 0,
+          "input_records": 0,
+          "output_records": 1,
+          "poll_requests": 0,
+          "rate_limit_wait_ms": 0,
+          "requests": 1,
+          "retries": 0
+        },
+        "output": {
+          "type": "json",
+          "value": {
+            "ok": true
+          }
+        },
+        "responses": [
+          {
+            "attempts": 1,
+            "final_url": "<loopback-origin>",
+            "headers": {
+              "content-length": "11",
+              "date": "Thu, 01 Jan 1970 00:00:00 GMT",
+              "server": "frozen-http/1"
+            },
+            "status": 200
+          }
+        ],
+        "schema_version": 1,
+        "status": "success"
+      }
+    },
+    "remote-surfaces-headers-400": {
+      "async": {
+        "errors": [
+          {
+            "category": "execution",
+            "code": "HTTP_STATUS",
+            "details": {
+              "http_status": 400
+            },
+            "message": "Remote service returned an unsuccessful status",
+            "phase": "read",
+            "remote_effect": "unknown",
+            "retry": {
+              "kind": "never"
+            }
+          }
+        ],
+        "metrics": {
+          "auth_requests": 0,
+          "bytes_downloaded": 0,
+          "bytes_uploaded": 0,
+          "cache_hits": 0,
+          "cache_revalidations": 0,
+          "input_records": 0,
+          "output_records": 0,
+          "poll_requests": 0,
+          "rate_limit_wait_ms": 0,
+          "requests": 1,
+          "retries": 0
+        },
+        "output": {
+          "type": "none"
+        },
+        "responses": [],
+        "schema_version": 1,
+        "status": "failed"
+      },
+      "cli": {
+        "command": "test",
+        "component": "plenora-rest-tools",
+        "component_version": "0.4.0",
+        "contract": "plenora-rest-execution-result-v1",
+        "error": {
+          "category": "execution",
+          "code": "HTTP_STATUS",
+          "details": {
+            "http_status": 400
+          },
+          "message": "Remote service returned an unsuccessful status",
+          "phase": "read",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "never"
+          }
+        },
+        "protocol_version": 2,
+        "status": "error"
+      },
+      "exit": 6,
+      "sync": {
+        "errors": [
+          {
+            "category": "execution",
+            "code": "HTTP_STATUS",
+            "details": {
+              "http_status": 400
+            },
+            "message": "Remote service returned an unsuccessful status",
+            "phase": "read",
+            "remote_effect": "unknown",
+            "retry": {
+              "kind": "never"
+            }
+          }
+        ],
+        "metrics": {
+          "auth_requests": 0,
+          "bytes_downloaded": 0,
+          "bytes_uploaded": 0,
+          "cache_hits": 0,
+          "cache_revalidations": 0,
+          "input_records": 0,
+          "output_records": 0,
+          "poll_requests": 0,
+          "rate_limit_wait_ms": 0,
+          "requests": 1,
+          "retries": 0
+        },
+        "output": {
+          "type": "none"
+        },
+        "responses": [],
+        "schema_version": 1,
+        "status": "failed"
+      }
+    },
+    "remote-surfaces-json-200": {
+      "async": {
+        "errors": [
+          {
+            "category": "protocol",
+            "code": "INVALID_RESPONSE",
+            "details": {},
+            "message": "Remote response is invalid",
+            "phase": "read",
+            "remote_effect": "unknown",
+            "retry": {
+              "kind": "never"
+            }
+          }
+        ],
+        "metrics": {
+          "auth_requests": 0,
+          "bytes_downloaded": 0,
+          "bytes_uploaded": 0,
+          "cache_hits": 0,
+          "cache_revalidations": 0,
+          "input_records": 0,
+          "output_records": 0,
+          "poll_requests": 0,
+          "rate_limit_wait_ms": 0,
+          "requests": 1,
+          "retries": 0
+        },
+        "output": {
+          "type": "none"
+        },
+        "responses": [],
+        "schema_version": 1,
+        "status": "failed"
+      },
+      "cli": {
+        "command": "test",
+        "component": "plenora-rest-tools",
+        "component_version": "0.4.0",
+        "contract": "plenora-rest-execution-result-v1",
+        "error": {
+          "category": "protocol",
+          "code": "INVALID_RESPONSE",
+          "details": {},
+          "message": "Remote response is invalid",
+          "phase": "read",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "never"
+          }
+        },
+        "protocol_version": 2,
+        "status": "error"
+      },
+      "exit": 5,
+      "sync": {
+        "errors": [
+          {
+            "category": "protocol",
+            "code": "INVALID_RESPONSE",
+            "details": {},
+            "message": "Remote response is invalid",
+            "phase": "read",
+            "remote_effect": "unknown",
+            "retry": {
+              "kind": "never"
+            }
+          }
+        ],
+        "metrics": {
+          "auth_requests": 0,
+          "bytes_downloaded": 0,
+          "bytes_uploaded": 0,
+          "cache_hits": 0,
+          "cache_revalidations": 0,
+          "input_records": 0,
+          "output_records": 0,
+          "poll_requests": 0,
+          "rate_limit_wait_ms": 0,
+          "requests": 1,
+          "retries": 0
+        },
+        "output": {
+          "type": "none"
+        },
+        "responses": [],
+        "schema_version": 1,
+        "status": "failed"
+      }
+    },
+    "remote-surfaces-json-400": {
+      "async": {
+        "errors": [
+          {
+            "category": "execution",
+            "code": "HTTP_STATUS",
+            "details": {
+              "http_status": 400
+            },
+            "message": "Remote service returned an unsuccessful status",
+            "phase": "read",
+            "remote_effect": "unknown",
+            "retry": {
+              "kind": "never"
+            }
+          }
+        ],
+        "metrics": {
+          "auth_requests": 0,
+          "bytes_downloaded": 0,
+          "bytes_uploaded": 0,
+          "cache_hits": 0,
+          "cache_revalidations": 0,
+          "input_records": 0,
+          "output_records": 0,
+          "poll_requests": 0,
+          "rate_limit_wait_ms": 0,
+          "requests": 1,
+          "retries": 0
+        },
+        "output": {
+          "type": "none"
+        },
+        "responses": [],
+        "schema_version": 1,
+        "status": "failed"
+      },
+      "cli": {
+        "command": "test",
+        "component": "plenora-rest-tools",
+        "component_version": "0.4.0",
+        "contract": "plenora-rest-execution-result-v1",
+        "error": {
+          "category": "execution",
+          "code": "HTTP_STATUS",
+          "details": {
+            "http_status": 400
+          },
+          "message": "Remote service returned an unsuccessful status",
+          "phase": "read",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "never"
+          }
+        },
+        "protocol_version": 2,
+        "status": "error"
+      },
+      "exit": 6,
+      "sync": {
+        "errors": [
+          {
+            "category": "execution",
+            "code": "HTTP_STATUS",
+            "details": {
+              "http_status": 400
+            },
+            "message": "Remote service returned an unsuccessful status",
+            "phase": "read",
+            "remote_effect": "unknown",
+            "retry": {
+              "kind": "never"
+            }
+          }
+        ],
+        "metrics": {
+          "auth_requests": 0,
+          "bytes_downloaded": 0,
+          "bytes_uploaded": 0,
+          "cache_hits": 0,
+          "cache_revalidations": 0,
+          "input_records": 0,
+          "output_records": 0,
+          "poll_requests": 0,
+          "rate_limit_wait_ms": 0,
+          "requests": 1,
+          "retries": 0
+        },
+        "output": {
+          "type": "none"
+        },
+        "responses": [],
+        "schema_version": 1,
+        "status": "failed"
+      }
+    },
+    "remote-surfaces-ndjson-200": {
+      "async": {
+        "errors": [
+          {
+            "category": "protocol",
+            "code": "INVALID_RESPONSE",
+            "details": {},
+            "message": "Remote response is invalid",
+            "phase": "read",
+            "remote_effect": "unknown",
+            "retry": {
+              "kind": "never"
+            }
+          }
+        ],
+        "metrics": {
+          "auth_requests": 0,
+          "bytes_downloaded": 0,
+          "bytes_uploaded": 0,
+          "cache_hits": 0,
+          "cache_revalidations": 0,
+          "input_records": 0,
+          "output_records": 0,
+          "poll_requests": 0,
+          "rate_limit_wait_ms": 0,
+          "requests": 1,
+          "retries": 0
+        },
+        "output": {
+          "type": "none"
+        },
+        "responses": [],
+        "schema_version": 1,
+        "status": "failed"
+      },
+      "cli": {
+        "command": "test",
+        "component": "plenora-rest-tools",
+        "component_version": "0.4.0",
+        "contract": "plenora-rest-execution-result-v1",
+        "error": {
+          "category": "protocol",
+          "code": "INVALID_RESPONSE",
+          "details": {},
+          "message": "Remote response is invalid",
+          "phase": "read",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "never"
+          }
+        },
+        "protocol_version": 2,
+        "status": "error"
+      },
+      "exit": 5,
+      "sync": {
+        "errors": [
+          {
+            "category": "protocol",
+            "code": "INVALID_RESPONSE",
+            "details": {},
+            "message": "Remote response is invalid",
+            "phase": "read",
+            "remote_effect": "unknown",
+            "retry": {
+              "kind": "never"
+            }
+          }
+        ],
+        "metrics": {
+          "auth_requests": 0,
+          "bytes_downloaded": 0,
+          "bytes_uploaded": 0,
+          "cache_hits": 0,
+          "cache_revalidations": 0,
+          "input_records": 0,
+          "output_records": 0,
+          "poll_requests": 0,
+          "rate_limit_wait_ms": 0,
+          "requests": 1,
+          "retries": 0
+        },
+        "output": {
+          "type": "none"
+        },
+        "responses": [],
+        "schema_version": 1,
+        "status": "failed"
+      }
+    },
+    "remote-surfaces-ndjson-400": {
+      "async": {
+        "errors": [
+          {
+            "category": "execution",
+            "code": "HTTP_STATUS",
+            "details": {
+              "http_status": 400
+            },
+            "message": "Remote service returned an unsuccessful status",
+            "phase": "read",
+            "remote_effect": "unknown",
+            "retry": {
+              "kind": "never"
+            }
+          }
+        ],
+        "metrics": {
+          "auth_requests": 0,
+          "bytes_downloaded": 0,
+          "bytes_uploaded": 0,
+          "cache_hits": 0,
+          "cache_revalidations": 0,
+          "input_records": 0,
+          "output_records": 0,
+          "poll_requests": 0,
+          "rate_limit_wait_ms": 0,
+          "requests": 1,
+          "retries": 0
+        },
+        "output": {
+          "type": "none"
+        },
+        "responses": [],
+        "schema_version": 1,
+        "status": "failed"
+      },
+      "cli": {
+        "command": "test",
+        "component": "plenora-rest-tools",
+        "component_version": "0.4.0",
+        "contract": "plenora-rest-execution-result-v1",
+        "error": {
+          "category": "execution",
+          "code": "HTTP_STATUS",
+          "details": {
+            "http_status": 400
+          },
+          "message": "Remote service returned an unsuccessful status",
+          "phase": "read",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "never"
+          }
+        },
+        "protocol_version": 2,
+        "status": "error"
+      },
+      "exit": 6,
+      "sync": {
+        "errors": [
+          {
+            "category": "execution",
+            "code": "HTTP_STATUS",
+            "details": {
+              "http_status": 400
+            },
+            "message": "Remote service returned an unsuccessful status",
+            "phase": "read",
+            "remote_effect": "unknown",
+            "retry": {
+              "kind": "never"
+            }
+          }
+        ],
+        "metrics": {
+          "auth_requests": 0,
+          "bytes_downloaded": 0,
+          "bytes_uploaded": 0,
+          "cache_hits": 0,
+          "cache_revalidations": 0,
+          "input_records": 0,
+          "output_records": 0,
+          "poll_requests": 0,
+          "rate_limit_wait_ms": 0,
+          "requests": 1,
+          "retries": 0
+        },
+        "output": {
+          "type": "none"
+        },
+        "responses": [],
+        "schema_version": 1,
+        "status": "failed"
+      }
+    },
+    "remote-surfaces-text-200": {
+      "async": {
+        "errors": [
+          {
+            "category": "execution",
+            "code": "APPLICATION_ERROR",
+            "details": {},
+            "message": "Remote application reported failure",
+            "phase": "read",
+            "remote_effect": "unknown",
+            "retry": {
+              "kind": "never"
+            }
+          }
+        ],
+        "metrics": {
+          "auth_requests": 0,
+          "bytes_downloaded": 0,
+          "bytes_uploaded": 0,
+          "cache_hits": 0,
+          "cache_revalidations": 0,
+          "input_records": 0,
+          "output_records": 0,
+          "poll_requests": 0,
+          "rate_limit_wait_ms": 0,
+          "requests": 1,
+          "retries": 0
+        },
+        "output": {
+          "type": "none"
+        },
+        "responses": [],
+        "schema_version": 1,
+        "status": "failed"
+      },
+      "cli": {
+        "command": "test",
+        "component": "plenora-rest-tools",
+        "component_version": "0.4.0",
+        "contract": "plenora-rest-execution-result-v1",
+        "error": {
+          "category": "execution",
+          "code": "APPLICATION_ERROR",
+          "details": {},
+          "message": "Remote application reported failure",
+          "phase": "read",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "never"
+          }
+        },
+        "protocol_version": 2,
+        "status": "error"
+      },
+      "exit": 6,
+      "sync": {
+        "errors": [
+          {
+            "category": "execution",
+            "code": "APPLICATION_ERROR",
+            "details": {},
+            "message": "Remote application reported failure",
+            "phase": "read",
+            "remote_effect": "unknown",
+            "retry": {
+              "kind": "never"
+            }
+          }
+        ],
+        "metrics": {
+          "auth_requests": 0,
+          "bytes_downloaded": 0,
+          "bytes_uploaded": 0,
+          "cache_hits": 0,
+          "cache_revalidations": 0,
+          "input_records": 0,
+          "output_records": 0,
+          "poll_requests": 0,
+          "rate_limit_wait_ms": 0,
+          "requests": 1,
+          "retries": 0
+        },
+        "output": {
+          "type": "none"
+        },
+        "responses": [],
+        "schema_version": 1,
+        "status": "failed"
+      }
+    },
+    "remote-surfaces-text-400": {
+      "async": {
+        "errors": [
+          {
+            "category": "execution",
+            "code": "HTTP_STATUS",
+            "details": {
+              "http_status": 400
+            },
+            "message": "Remote service returned an unsuccessful status",
+            "phase": "read",
+            "remote_effect": "unknown",
+            "retry": {
+              "kind": "never"
+            }
+          }
+        ],
+        "metrics": {
+          "auth_requests": 0,
+          "bytes_downloaded": 0,
+          "bytes_uploaded": 0,
+          "cache_hits": 0,
+          "cache_revalidations": 0,
+          "input_records": 0,
+          "output_records": 0,
+          "poll_requests": 0,
+          "rate_limit_wait_ms": 0,
+          "requests": 1,
+          "retries": 0
+        },
+        "output": {
+          "type": "none"
+        },
+        "responses": [],
+        "schema_version": 1,
+        "status": "failed"
+      },
+      "cli": {
+        "command": "test",
+        "component": "plenora-rest-tools",
+        "component_version": "0.4.0",
+        "contract": "plenora-rest-execution-result-v1",
+        "error": {
+          "category": "execution",
+          "code": "HTTP_STATUS",
+          "details": {
+            "http_status": 400
+          },
+          "message": "Remote service returned an unsuccessful status",
+          "phase": "read",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "never"
+          }
+        },
+        "protocol_version": 2,
+        "status": "error"
+      },
+      "exit": 6,
+      "sync": {
+        "errors": [
+          {
+            "category": "execution",
+            "code": "HTTP_STATUS",
+            "details": {
+              "http_status": 400
+            },
+            "message": "Remote service returned an unsuccessful status",
+            "phase": "read",
+            "remote_effect": "unknown",
+            "retry": {
+              "kind": "never"
+            }
+          }
+        ],
+        "metrics": {
+          "auth_requests": 0,
+          "bytes_downloaded": 0,
+          "bytes_uploaded": 0,
+          "cache_hits": 0,
+          "cache_revalidations": 0,
+          "input_records": 0,
+          "output_records": 0,
+          "poll_requests": 0,
+          "rate_limit_wait_ms": 0,
+          "requests": 1,
+          "retries": 0
+        },
+        "output": {
+          "type": "none"
+        },
+        "responses": [],
+        "schema_version": 1,
+        "status": "failed"
+      }
+    },
+    "remote-surfaces-xml-200": {
+      "async": {
+        "errors": [
+          {
+            "category": "protocol",
+            "code": "INVALID_RESPONSE",
+            "details": {},
+            "message": "Remote response is invalid",
+            "phase": "read",
+            "remote_effect": "unknown",
+            "retry": {
+              "kind": "never"
+            }
+          }
+        ],
+        "metrics": {
+          "auth_requests": 0,
+          "bytes_downloaded": 0,
+          "bytes_uploaded": 0,
+          "cache_hits": 0,
+          "cache_revalidations": 0,
+          "input_records": 0,
+          "output_records": 0,
+          "poll_requests": 0,
+          "rate_limit_wait_ms": 0,
+          "requests": 1,
+          "retries": 0
+        },
+        "output": {
+          "type": "none"
+        },
+        "responses": [],
+        "schema_version": 1,
+        "status": "failed"
+      },
+      "cli": {
+        "command": "test",
+        "component": "plenora-rest-tools",
+        "component_version": "0.4.0",
+        "contract": "plenora-rest-execution-result-v1",
+        "error": {
+          "category": "protocol",
+          "code": "INVALID_RESPONSE",
+          "details": {},
+          "message": "Remote response is invalid",
+          "phase": "read",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "never"
+          }
+        },
+        "protocol_version": 2,
+        "status": "error"
+      },
+      "exit": 5,
+      "sync": {
+        "errors": [
+          {
+            "category": "protocol",
+            "code": "INVALID_RESPONSE",
+            "details": {},
+            "message": "Remote response is invalid",
+            "phase": "read",
+            "remote_effect": "unknown",
+            "retry": {
+              "kind": "never"
+            }
+          }
+        ],
+        "metrics": {
+          "auth_requests": 0,
+          "bytes_downloaded": 0,
+          "bytes_uploaded": 0,
+          "cache_hits": 0,
+          "cache_revalidations": 0,
+          "input_records": 0,
+          "output_records": 0,
+          "poll_requests": 0,
+          "rate_limit_wait_ms": 0,
+          "requests": 1,
+          "retries": 0
+        },
+        "output": {
+          "type": "none"
+        },
+        "responses": [],
+        "schema_version": 1,
+        "status": "failed"
+      }
+    },
+    "remote-surfaces-xml-400": {
+      "async": {
+        "errors": [
+          {
+            "category": "execution",
+            "code": "HTTP_STATUS",
+            "details": {
+              "http_status": 400
+            },
+            "message": "Remote service returned an unsuccessful status",
+            "phase": "read",
+            "remote_effect": "unknown",
+            "retry": {
+              "kind": "never"
+            }
+          }
+        ],
+        "metrics": {
+          "auth_requests": 0,
+          "bytes_downloaded": 0,
+          "bytes_uploaded": 0,
+          "cache_hits": 0,
+          "cache_revalidations": 0,
+          "input_records": 0,
+          "output_records": 0,
+          "poll_requests": 0,
+          "rate_limit_wait_ms": 0,
+          "requests": 1,
+          "retries": 0
+        },
+        "output": {
+          "type": "none"
+        },
+        "responses": [],
+        "schema_version": 1,
+        "status": "failed"
+      },
+      "cli": {
+        "command": "test",
+        "component": "plenora-rest-tools",
+        "component_version": "0.4.0",
+        "contract": "plenora-rest-execution-result-v1",
+        "error": {
+          "category": "execution",
+          "code": "HTTP_STATUS",
+          "details": {
+            "http_status": 400
+          },
+          "message": "Remote service returned an unsuccessful status",
+          "phase": "read",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "never"
+          }
+        },
+        "protocol_version": 2,
+        "status": "error"
+      },
+      "exit": 6,
+      "sync": {
+        "errors": [
+          {
+            "category": "execution",
+            "code": "HTTP_STATUS",
+            "details": {
+              "http_status": 400
+            },
+            "message": "Remote service returned an unsuccessful status",
+            "phase": "read",
+            "remote_effect": "unknown",
+            "retry": {
+              "kind": "never"
+            }
+          }
+        ],
+        "metrics": {
+          "auth_requests": 0,
+          "bytes_downloaded": 0,
+          "bytes_uploaded": 0,
+          "cache_hits": 0,
+          "cache_revalidations": 0,
+          "input_records": 0,
+          "output_records": 0,
+          "poll_requests": 0,
+          "rate_limit_wait_ms": 0,
+          "requests": 1,
+          "retries": 0
+        },
+        "output": {
+          "type": "none"
+        },
+        "responses": [],
+        "schema_version": 1,
+        "status": "failed"
+      }
+    },
+    "remote-text-200": {
+      "errors": [
+        {
+          "category": "execution",
+          "code": "APPLICATION_ERROR",
+          "details": {},
+          "message": "Remote application reported failure",
+          "phase": "read",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "never"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 1,
+        "retries": 0
+      },
+      "output": {
+        "type": "none"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "remote-text-400": {
+      "errors": [
+        {
+          "category": "execution",
+          "code": "HTTP_STATUS",
+          "details": {
+            "http_status": 400
+          },
+          "message": "Remote service returned an unsuccessful status",
+          "phase": "read",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "never"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 1,
+        "retries": 0
+      },
+      "output": {
+        "type": "none"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "remote-xml-200": {
+      "errors": [
+        {
+          "category": "protocol",
+          "code": "INVALID_RESPONSE",
+          "details": {},
+          "message": "Remote response is invalid",
+          "phase": "read",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "never"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 1,
+        "retries": 0
+      },
+      "output": {
+        "type": "none"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "remote-xml-400": {
+      "errors": [
+        {
+          "category": "execution",
+          "code": "HTTP_STATUS",
+          "details": {
+            "http_status": 400
+          },
+          "message": "Remote service returned an unsuccessful status",
+          "phase": "read",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "never"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 1,
+        "retries": 0
+      },
+      "output": {
+        "type": "none"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "retry-attempt-budget-download": {
+      "errors": [
+        {
+          "category": "execution",
+          "code": "HTTP_STATUS",
+          "details": {
+            "http_status": 503
+          },
+          "message": "Remote service returned an unsuccessful status",
+          "phase": "read",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "never"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 2,
+        "retries": 1
+      },
+      "output": {
+        "type": "none"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "retry-attempt-budget-test": {
+      "errors": [
+        {
+          "category": "execution",
+          "code": "HTTP_STATUS",
+          "details": {
+            "http_status": 503
+          },
+          "message": "Remote service returned an unsuccessful status",
+          "phase": "read",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "never"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 2,
+        "retries": 1
+      },
+      "output": {
+        "type": "none"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "retry-ignore-header-download": {
+      "errors": [],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 11,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 1,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 2,
+        "retries": 1
+      },
+      "output": {
+        "artifact_reference": "sha256:4062edaf750fb8074e7e83e0c9028c94e32468a8b6f1614774328ef045150f93",
+        "bytes_transferred": 11,
+        "checksum": {
+          "algorithm": "sha256",
+          "value": "4062edaf750fb8074e7e83e0c9028c94e32468a8b6f1614774328ef045150f93"
+        },
+        "direction": "download",
+        "media_type": "application/json",
+        "type": "file"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "success"
+    },
+    "retry-ignore-header-test": {
+      "errors": [],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 1,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 2,
+        "retries": 1
+      },
+      "output": {
+        "type": "json",
+        "value": {
+          "ok": true
+        }
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "success"
+    },
+    "retry-over-cap-download": {
+      "errors": [
+        {
+          "category": "execution",
+          "code": "HTTP_STATUS",
+          "details": {
+            "http_status": 503
+          },
+          "message": "Remote service returned an unsuccessful status",
+          "phase": "read",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "never"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 1,
+        "retries": 0
+      },
+      "output": {
+        "type": "none"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "retry-over-cap-test": {
+      "errors": [
+        {
+          "category": "execution",
+          "code": "HTTP_STATUS",
+          "details": {
+            "http_status": 503
+          },
+          "message": "Remote service returned an unsuccessful status",
+          "phase": "read",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "never"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 1,
+        "retries": 0
+      },
+      "output": {
+        "type": "none"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "retry-policy": {
+      "constant-respect-False": [
+        11,
+        11,
+        11,
+        11,
+        11,
+        11,
+        11,
+        11
+      ],
+      "constant-respect-True": [
+        11,
+        500,
+        11,
+        null,
+        11,
+        0,
+        1000,
+        11
+      ],
+      "dyadic-respect-False": [
+        7,
+        10,
+        15,
+        23,
+        35,
+        53,
+        79,
+        100
+      ],
+      "dyadic-respect-True": [
+        7,
+        500,
+        15,
+        null,
+        23,
+        0,
+        1000,
+        79
+      ],
+      "initial-cap-respect-False": [
+        100,
+        100,
+        100,
+        100,
+        100,
+        100,
+        100,
+        100
+      ],
+      "initial-cap-respect-True": [
+        100,
+        500,
+        100,
+        null,
+        100,
+        0,
+        1000,
+        100
+      ],
+      "wide-integer-respect-False": [
+        9007199254740993,
+        18014398509481986,
+        36028797018963972,
+        72057594037927944,
+        144115188075855888,
+        288230376151711776,
+        576460752303423552,
+        1152921504606847104
+      ],
+      "wide-integer-respect-True": [
+        9007199254740993,
+        500,
+        36028797018963972,
+        null,
+        72057594037927944,
+        0,
+        1000,
+        576460752303423552
+      ],
+      "zero-respect-False": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "zero-respect-True": [
+        0,
+        500,
+        0,
+        null,
+        0,
+        0,
+        1000,
+        0
+      ]
+    },
+    "retry-post-refused-download": {
+      "errors": [
+        {
+          "category": "execution",
+          "code": "HTTP_STATUS",
+          "details": {
+            "http_status": 503
+          },
+          "message": "Remote service returned an unsuccessful status",
+          "phase": "read",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "never"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 1,
+        "retries": 0
+      },
+      "output": {
+        "type": "none"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "retry-post-refused-test": {
+      "errors": [
+        {
+          "category": "execution",
+          "code": "HTTP_STATUS",
+          "details": {
+            "http_status": 503
+          },
+          "message": "Remote service returned an unsuccessful status",
+          "phase": "read",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "never"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 1,
+        "retries": 0
+      },
+      "output": {
+        "type": "none"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "retry-recover-download": {
+      "errors": [],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 11,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 1,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 2,
+        "retries": 1
+      },
+      "output": {
+        "artifact_reference": "sha256:4062edaf750fb8074e7e83e0c9028c94e32468a8b6f1614774328ef045150f93",
+        "bytes_transferred": 11,
+        "checksum": {
+          "algorithm": "sha256",
+          "value": "4062edaf750fb8074e7e83e0c9028c94e32468a8b6f1614774328ef045150f93"
+        },
+        "direction": "download",
+        "media_type": "application/json",
+        "type": "file"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "success"
+    },
+    "retry-recover-test": {
+      "errors": [],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 1,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 2,
+        "retries": 1
+      },
+      "output": {
+        "type": "json",
+        "value": {
+          "ok": true
+        }
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "success"
+    },
+    "retry-status-refused-download": {
+      "errors": [
+        {
+          "category": "execution",
+          "code": "HTTP_STATUS",
+          "details": {
+            "http_status": 400
+          },
+          "message": "Remote service returned an unsuccessful status",
+          "phase": "read",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "never"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 1,
+        "retries": 0
+      },
+      "output": {
+        "type": "none"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    },
+    "retry-status-refused-test": {
+      "errors": [
+        {
+          "category": "execution",
+          "code": "HTTP_STATUS",
+          "details": {
+            "http_status": 400
+          },
+          "message": "Remote service returned an unsuccessful status",
+          "phase": "read",
+          "remote_effect": "unknown",
+          "retry": {
+            "kind": "never"
+          }
+        }
+      ],
+      "metrics": {
+        "auth_requests": 0,
+        "bytes_downloaded": 0,
+        "bytes_uploaded": 0,
+        "cache_hits": 0,
+        "cache_revalidations": 0,
+        "input_records": 0,
+        "output_records": 0,
+        "poll_requests": 0,
+        "rate_limit_wait_ms": 0,
+        "requests": 1,
+        "retries": 0
+      },
+      "output": {
+        "type": "none"
+      },
+      "responses": [],
+      "schema_version": 1,
+      "status": "failed"
+    }
+  },
+  "contract_checked_cases": [
+    "control-artifacts-Cleanup-cancel",
+    "control-artifacts-Cleanup-deadline",
+    "control-artifacts-Finalize-cancel",
+    "control-artifacts-Finalize-deadline",
+    "control-artifacts-Flush-cancel",
+    "control-artifacts-Flush-deadline",
+    "control-artifacts-Open-cancel",
+    "control-artifacts-Open-deadline",
+    "control-artifacts-Publish-cancel",
+    "control-artifacts-Publish-deadline",
+    "control-artifacts-Rename-cancel",
+    "control-artifacts-Rename-deadline",
+    "control-artifacts-Write-cancel",
+    "control-artifacts-Write-deadline"
+  ],
+  "normalization": [
+    "execution metrics.elapsed_ms at explicit core/CLI/SDK/runtime payload paths",
+    "runtime response plenora.message.id",
+    "remote fixture loopback origin (asserted before replacement)"
+  ],
+  "source_commit": "a05d2bd19d4fc048a5285ab0642178b98db7b8e9",
+  "source_files": {
+    "crates/rest-campaign/src/config.rs": "22d8651ccf674e2b47e305d7544b09fd8f29ff9069c5a2ecdf85836f005bba2f",
+    "crates/rest-campaign/src/driver.rs": "c442170da84c9d67a515e7037ef26047e5dfe48b7474349a7974b4271146e688",
+    "crates/rest-campaign/src/http.rs": "e53317ff4d23e547e534a28eb0e06ad017200311edbb20b44d9a655d6ed9b4ff",
+    "crates/rest-campaign/src/lib.rs": "369a0b52d35322754ed8341313f0b2d25cc298703d321fb438951c51bd2c34b2",
+    "crates/rest-campaign/src/main.rs": "40e3ad6a3232bc432ec9bda511c1306cd6071dcd9bfd818755dd16a558f64a8a",
+    "crates/rest-campaign/src/report.rs": "f687bc6b6b1d43d79e44b0375f20e4512e170b55a2c220ca8a40f0f8c764d014",
+    "crates/rest-campaign/src/resources.rs": "eae9973c894aa612321ab67b7bdad60facd3a8dd20a64383305b69b4caaf449c",
+    "crates/rest-campaign/src/rng.rs": "f3ff4da287af67c11f4a6be1d268764e6744c79c4e442caccfa283e583d51172",
+    "crates/rest-campaign/src/scenarios.rs": "7f15ffc1c384e3bb35693f4761af8e30f68b53f0b7d93c4499e7fcd85c66308c",
+    "crates/rest-campaign/src/server.rs": "62efabf30a43833c4e1239c60a64482c0e2777795cd19abcc10f401f01f7e5e1",
+    "crates/rest-campaign/src/stats.rs": "2fcfd84ecbb81083cc05315c2dbf59b47f0144b0b4e7be42f62752ecc3da8e4e",
+    "crates/rest-campaign/src/timefmt.rs": "449e0061ad7aa9dba3ab5fa6c4ba6f845a77c5ced3c1e7ba2676b52580e1b026",
+    "crates/rest-campaign/src/verify.rs": "f3b3e1bb813856b8ab4da831a4a461a2629b2adc3fa4d4979c7f2357b8228812",
+    "crates/rest-cli/src/args.rs": "5a70bfc0a5be142d4c2eea0ab5681b93ee1a8b411514de209b4d8fc9b1e66897",
+    "crates/rest-cli/src/commands.rs": "eb8ff3e0f9114c9c83846d47d310d8cb489d215cc8a0c8c91e978a608c4b51a3",
+    "crates/rest-cli/src/envelope.rs": "1d0261cfb364312272257624f0d1351a6174230c460cd3bc0c9e6a2c478d5014",
+    "crates/rest-cli/src/main.rs": "5a8bf35de6d1ccef653b83cd38237120cac76f23fab83a4665dff12c6eb7522d",
+    "crates/rest-cli/src/signal.rs": "b78cb82bcba10fcaed77573fd8959a98d1e8950f30b5c8f7760b1c5800ec9aab",
+    "crates/rest-engine-core/src/capability.rs": "0b60803574f4c1172026e2a41f764a7886604c77f6d169d35618ec1e50dab9f4",
+    "crates/rest-engine-core/src/contract.rs": "a9f93dc7d583778e2b1d2c1b01a48ba39cbbf5e94be30712534ad1b50d4c72dc",
+    "crates/rest-engine-core/src/control.rs": "8bd2ecda6f6b32c300f5eb17f2ed0c442d47f4c638225380c2a6398ef03b3657",
+    "crates/rest-engine-core/src/control_json.rs": "b69553c8783d55d7b99d0332ef5f8773820fe1d0ef734ac3c8339310d4f91848",
+    "crates/rest-engine-core/src/engine.rs": "1cea1e92efd9d83504ee16615a790bf6df947051dfe98aeaa61f1e1a205878e1",
+    "crates/rest-engine-core/src/error.rs": "fc5653190079fc36f662d7d68dd03276f5bbdf9d8614b6c5086355d220d56bdb",
+    "crates/rest-engine-core/src/exact.rs": "c1852f34beb63789077736ffa08dd6938cb580e45d673e2a1686ac9fba649783",
+    "crates/rest-engine-core/src/fuzzing.rs": "84549aefa919d138892ab4494ed58d5508b39d35396c7dec7332901dc28af511",
+    "crates/rest-engine-core/src/json_path.rs": "3cad740848e805e82ce28547cca6f08c82830a613657099e945a12fab937a7da",
+    "crates/rest-engine-core/src/lib.rs": "30bdc6ad7c2b3c08cca73473a5a647eaf8366fe9b5fbe1a3f6972a2075e6c12e",
+    "crates/rest-engine-core/src/property_tests.rs": "604f865069ada178e196615be1fca4042513d654423f8793c1899e6bd75f38d5",
+    "crates/rest-engine-core/src/response_body.rs": "e08472c21df10974b341de2308f6fa128766ad0d2efb9e62954c9dd1d71e534c",
+    "crates/rest-engine-core/src/runtime.rs": "713780e3bb56032bf6469ccab28671ddbd763bb35f2e43726d0c9bbb7adb0f16",
+    "crates/rest-engine-core/src/tls.rs": "257364ce76ef4328aa422eb62dad44aa6725b5593cd19c6038243ddd72803994",
+    "crates/rest-engine-core/src/transport.rs": "0eadd6b607871657a0ca46709a5835b4c57c379452e179ad3dff7477ad2a3b1c",
+    "crates/rest-engine-python/src/lib.rs": "0f4b4cbf033e7373c217c335024199a4d9a6fe6d191028211ea11b843a7ff3ce"
+  },
+  "version": "0.4.0"
+}

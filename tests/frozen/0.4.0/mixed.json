@@ -1,0 +1,11 @@
+{
+  "input": [{"id":"a"},{"id":"b"},{"missing":true},{"id":"c"}],
+  "responses": {
+    "a": {"status":200,"body":{"remote":"A"}},
+    "b": {"status":200,"body":{"remote":"B"}},
+    "c": {"status":400,"body":{"private":"__CANARY__"}}
+  },
+  "expected_output": [{"id":"a","remote":"A"},{"id":"b","remote":"B"},{"missing":true},{"id":"c"}],
+  "expected_errors": [{"input_index":2,"code":"MISSING_PARAMETER"},{"input_index":3,"code":"HTTP_STATUS"}],
+  "gate": "For concurrency > 1, a is held until b's complete response has been read and its connection closed by the client"
+}

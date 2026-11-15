@@ -39,7 +39,8 @@ fuzzing = []
 [dev-dependencies]
 ring.workspace = true
 proptest.workspace = true
-tokio = { workspace = true, features = ["macros"] }
+# The paused clock is test-only; retry proofs advance time without wall-clock sleeps.
+tokio = { workspace = true, features = ["macros", "test-util"] }
 
 [lints]
 workspace = true

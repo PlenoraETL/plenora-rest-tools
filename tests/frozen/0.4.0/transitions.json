@@ -1,0 +1,19 @@
+{
+  "provenance": "Authored oracle: ERR-003, ERR-014 in contracts/upstream; historical black_box regressions at a0138e8. Not a captured execution.",
+  "cases": [
+    {"id":"address-before-send","private":false,"connection":{},"input":{},"options":{},"response":null,"expected":{"requests":0,"errors":[{"code":"UNSAFE_ADDRESS","phase":"connect","remote_effect":"none","retry":"never"}]}},
+    {"id":"parameter-before-send","private":true,"connection":{"parameters":[{"name":"id","mode":"mapped","source":"id","required":true,"location":"query"}]},"input":{},"options":{},"response":null,"expected":{"requests":0,"errors":[{"code":"MISSING_PARAMETER","phase":"prepare","remote_effect":"none","retry":"never"}]}},
+    {"id":"expired-before-send","private":true,"connection":{},"input":{},"options":{"deadline":"2000-01-01T00:00:00Z"},"response":null,"expected":{"requests":0,"errors":[{"code":"DEADLINE_EXPIRED","phase":"validate","remote_effect":"none","retry":"never"}]}},
+    {"id":"redirect-after-send","private":true,"connection":{"request":{"allow_redirects":true,"max_redirects":3}},"input":{},"options":{},"response":{"status":307,"body":"","location":"http://localhost:9/elsewhere"},"expected":{"requests":1,"errors":[{"code":"UNSAFE_ADDRESS","phase":"read","remote_effect":"unknown","retry":"requires_recovery"}]}}
+  ],
+  "records": {
+    "input":[{"id":"a"},{"other":"b"}],
+    "expected":{"requests":1,"errors":[{"code":"UNSAFE_ADDRESS","phase":"read","remote_effect":"unknown","retry":"requires_recovery","input_index":0},{"code":"MISSING_PARAMETER","phase":"prepare","remote_effect":"none","retry":"never","input_index":1}]}
+  },
+  "batch": {
+    "input":[{"id":1},{"id":2},{"id":3}],
+    "bodies":[{"results":[{"name":"Ada"},{"name":"Grace"}]},{"results":[{"name":"Linus"}]}],
+    "wire":[{"items":[{"id":1},{"id":2}]},{"items":[{"id":3}]}],
+    "output":[{"id":1,"remote_name":"Ada"},{"id":2,"remote_name":"Grace"},{"id":3,"remote_name":"Linus"}]
+  }
+}

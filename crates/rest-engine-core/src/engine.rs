@@ -1820,6 +1820,8 @@ impl Engine {
             if remaining(poll_started.elapsed()).is_some_and(|left| left.is_zero()) {
                 break;
             }
+            #[cfg(test)]
+            crate::injection::visit(crate::injection::Point::Polling);
             if interval_ms > 0 {
                 let delay = Duration::from_millis(interval_ms);
                 let delay = remaining(poll_started.elapsed()).map_or(delay, |left| delay.min(left));
@@ -2183,6 +2185,8 @@ impl Engine {
         idempotency_key: Option<&str>,
     ) -> Result<PreparedRequest, EngineError> {
         let template = url_override.unwrap_or(&connection.url);
+        #[cfg(test)]
+        crate::injection::visit(crate::injection::Point::Prepare);
         if template.trim().is_empty() {
             return Err(EngineError::InvalidUrl(ErrorDetail::from("URL is empty")));
         }
