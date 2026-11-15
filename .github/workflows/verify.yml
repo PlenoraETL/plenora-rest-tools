@@ -140,13 +140,13 @@ jobs:
           if ($wheels.Count -ne 1) { throw "expected exactly one cp314-abi3-win_amd64 wheel" }
 
       - name: Build the CLI fixture for the installed-wheel oracle
-        run: cargo build -p plenora-rest-cli --bin plenora-rest --locked
+        run: python scripts/cli_fixture.py --build --copy-to target/sdk-cli-fixture/plenora-rest.exe
 
       - name: Keep the CLI fixture for the CPython matrix
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: cli-windows-sdk-fixture
-          path: target/debug/plenora-rest.exe
+          path: target/sdk-cli-fixture/plenora-rest.exe
           if-no-files-found: error
           retention-days: 7
 
@@ -190,4 +190,4 @@ jobs:
       # the virtual environment.
       - name: Install the wheel in a clean environment and run the SDK suite
         shell: pwsh
-        run: ./scripts/test_wheel.ps1 -WheelDirectory dist
+        run: ./scripts/test_wheel.ps1 -WheelDirectory dist -CliBinary target/debug/plenora-rest.exe

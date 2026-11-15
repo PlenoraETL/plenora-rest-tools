@@ -71,8 +71,9 @@ RUN set -eux; \
             --target "${target}" \
             /tmp/wheels/*.whl; \
         cd /tmp; \
-        PLENORA_TEST_CLI=/tmp/release-artifacts/plenora-rest-linux-x86_64 \
-        PYTHONPATH="${target}" "${interpreter}" -m unittest \
+        PYTHONPATH="${target}" "${interpreter}" /io/scripts/cli_fixture.py \
+            --binary /tmp/release-artifacts/plenora-rest-linux-x86_64 -- \
+            "${interpreter}" -m unittest \
             discover \
             -s /io/python/tests \
             -v; \

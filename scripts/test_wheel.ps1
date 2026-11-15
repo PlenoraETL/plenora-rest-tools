@@ -2,6 +2,8 @@
 param(
     [Parameter(Mandatory = $true)]
     [string]$WheelDirectory,
+    [Parameter(Mandatory = $true)]
+    [string]$CliBinary,
     [string]$Python = "python"
 )
 
@@ -18,6 +20,9 @@ $repositoryRoot = Split-Path -Parent $PSScriptRoot
 & $Python (Join-Path $PSScriptRoot "check_python_version.py") --runtime
 if ($LASTEXITCODE -ne 0) { throw "Python runtime differs from policy" }
 $tests = Join-Path $repositoryRoot "python\tests"
+$fixture = Join-Path $PSScriptRoot "cli_fixture.py"
+$cliPath = & $Python $fixture --binary $CliBinary
+if ($LASTEXITCODE -ne 0) { throw "CLI fixture preflight failed" }
 
 $wheels = @(Get-ChildItem -LiteralPath $WheelDirectory -Filter "plenora_rest-*-cp314-abi3-win_amd64.whl")
 if ($wheels.Count -ne 1) {
@@ -40,7 +45,7 @@ try {
 
     Push-Location $workRoot
     try {
-        & $venvPython -m unittest discover -s $tests -v
+        & $venvPython $fixture --binary $cliPath -- $venvPython -m unittest discover -s $tests -v
         if ($LASTEXITCODE -ne 0) { throw "SDK suite failed against the installed wheel" }
     }
     finally {

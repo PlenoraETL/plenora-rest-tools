@@ -120,15 +120,15 @@ jobs:
           source <(cargo llvm-cov show-env --sh)
           cargo llvm-cov clean --workspace
           python -m maturin build --locked --out coverage/python-binding/dist
-          cargo build --locked -p plenora-rest-cli --bin plenora-rest
-          export PLENORA_TEST_CLI="$(realpath "$CARGO_TARGET_DIR/debug/plenora-rest")"
           python -m venv "$RUNNER_TEMP/sdk"
           "$RUNNER_TEMP/sdk/bin/pip" install --disable-pip-version-check --no-cache-dir \
             --no-deps coverage/python-binding/dist/*.whl
           "$RUNNER_TEMP/sdk/bin/pip" install --disable-pip-version-check --no-cache-dir \
             "$(grep '^coverage==' requirements-coverage.txt)"
           export COVERAGE_FILE="$GITHUB_WORKSPACE/coverage/python-sdk/.coverage"
-          (cd "$RUNNER_TEMP" && "$RUNNER_TEMP/sdk/bin/python" -m coverage run \
+          (cd "$RUNNER_TEMP" && "$RUNNER_TEMP/sdk/bin/python" \
+            "$GITHUB_WORKSPACE/scripts/cli_fixture.py" --build -- \
+            "$RUNNER_TEMP/sdk/bin/python" -m coverage run \
             --branch --source=plenora_rest \
             -m unittest discover -s "$GITHUB_WORKSPACE/python/tests" -v)
           "$RUNNER_TEMP/sdk/bin/python" -m coverage json --pretty-print -o coverage/python-sdk/summary.json

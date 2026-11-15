@@ -117,8 +117,7 @@ jobs:
       - name: Install the wheel in a clean environment and run the SDK suite
         shell: pwsh
         run: |
-          $env:PLENORA_TEST_CLI = (Resolve-Path windows-cli/plenora-rest-windows-x86_64.exe).Path
-          ./scripts/test_wheel.ps1 -WheelDirectory windows-wheel
+          ./scripts/test_wheel.ps1 -WheelDirectory windows-wheel -CliBinary windows-cli/plenora-rest-windows-x86_64.exe
 
   github-release:
     name: Reproducible GitHub release
