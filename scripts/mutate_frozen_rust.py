@@ -11,15 +11,15 @@ CORE = "crates/rest-engine-core/src/"
 INJECTED = "transport::tests::injected_transport::"
 CONTROL = [("plenora-rest-core", "--lib", None, [INJECTED + "frozen_controls_visit_every_declared_branch"])]
 MUTATIONS = [
-    ("branches-artifact-bytes", CORE + "transport.rs", ".write_all(&chunk)", '.write_all(b"x")', CONTROL),
-    ("branches-cleanup", CORE + "transport.rs", "let _ = std::fs::remove_file(&self.temporary);", "let _ = &self.temporary;", CONTROL),
+    ("branches-artifact-bytes", CORE + "transport/artifacts.rs", ".write_all(&chunk)", '.write_all(b"x")', CONTROL),
+    ("branches-cleanup", CORE + "transport/artifacts.rs", "let _ = std::fs::remove_file(&self.temporary);", "let _ = &self.temporary;", CONTROL),
     ("branches-cancel", CORE + "error.rs", 'C::Cancelled,\n                P::Cleanup,', 'C::Cancelled,\n                P::Read,', CONTROL),
     ("branches-deadline", CORE + "error.rs", 'Self::Timeout => (\n                "TIMEOUT",', 'Self::Timeout => (\n                "WRONG_TIMEOUT",', CONTROL),
-    ("branches-io", CORE + "transport.rs", "EngineError::DownloadWrite(crate::error::io_detail(&error))", "EngineError::FileIo(crate::error::io_detail(&error))",
+    ("branches-io", CORE + "transport/artifacts.rs", "EngineError::DownloadWrite(crate::error::io_detail(&error))", "EngineError::FileIo(crate::error::io_detail(&error))",
      [("plenora-rest-core", "--lib", None, [INJECTED + "frozen_io_faults_preserve_publication_and_redaction"])]),
     ("branches-wait", CORE + "transport.rs", "sleep(delay).await;\n                        continue;", "sleep(Duration::ZERO).await;\n                        continue;",
      [("plenora-rest-core", "--lib", None, [INJECTED + "frozen_internal_transport_waits_use_injected_clock"])]),
-    ("branches-headers", CORE + "engine.rs", "!is_sensitive_header_name(name)\n                &&", "(!is_sensitive_header_name(name) || name == &\"authorization\")\n                &&",
+    ("branches-headers", CORE + "engine/responses.rs", "!is_sensitive_header_name(name)\n                &&", "(!is_sensitive_header_name(name) || name == &\"authorization\")\n                &&",
      [("plenora-rest-core", "--test", "black_box", ["frozen::remote_private::frozen_remote_body_and_sensitive_header_matrix"]),
       ("plenora-rest-core", "--test", "runtime_binding", ["frozen_private_remote_runtime"])]),
     ("branches-inventory", "crates/rest-engine-core/tests/support/injection.rs", "    Prepare,\n    OAuth,", "    Prepare,\n    UndeclaredInCorpus,\n    OAuth,",

@@ -38,7 +38,7 @@ def main():
 
     if run(test, "baseline").returncode:
         raise RuntimeError("native baseline failed")
-    path = ROOT / "crates/rest-engine-core/src/engine.rs"
+    path = ROOT / "crates/rest-engine-core/src" / ("engine/responses.rs" if args.headers else "engine.rs")
     original = path.read_bytes()
     before = b"serde_json::to_string(&result)"
     after = b'serde_json::to_string(&{ let mut public = serde_json::json!(result); public["diagnostic"] = serde_json::json!(request_json); public })'

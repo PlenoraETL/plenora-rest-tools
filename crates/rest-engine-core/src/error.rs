@@ -816,6 +816,11 @@ impl EngineError {
     }
 }
 
+/// Static FileIo projection shared by artifact admission and transport.
+pub(crate) fn file_io(error: std::io::Error) -> EngineError {
+    EngineError::FileIo(crate::error::io_detail(&error))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{EngineError, ErrorDetail};
