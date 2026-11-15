@@ -1,5 +1,5 @@
 {
-  "revision": "3aec9f724f5a0ad21366f293895b4d0dbcd0aad1",
+  "revision": "38d68b402389855edbcecb7ce57c31e91282cb4e",
   "catalog": "catalogs/rest-tools-v1.json",
   "profile": "plenora-rest-tools-profile-v1",
   "requirements": [
@@ -82,7 +82,7 @@
       "evidence": "contracts/upstream/profiles/rest-tools.md; crates/rest-engine-core/src/capability.rs",
       "upstream_context": {
         "repository": "https://github.com/PlenoraETL/plenora-contracts.git",
-        "revision": "3aec9f724f5a0ad21366f293895b4d0dbcd0aad1",
+        "revision": "38d68b402389855edbcecb7ce57c31e91282cb4e",
         "path": "decisions/0017-rest-arrow-adapter.md"
       }
     },
@@ -99,9 +99,33 @@
       "evidence": "fuzz/Cargo.toml",
       "upstream_context": {
         "repository": "https://github.com/PlenoraETL/plenora-contracts.git",
-        "revision": "3aec9f724f5a0ad21366f293895b4d0dbcd0aad1",
+        "revision": "38d68b402389855edbcecb7ce57c31e91282cb4e",
         "path": "tools/gate_fuzz.py"
       }
+    },
+    {
+      "rule": "decision-0022",
+      "status": "not_applicable",
+      "reason": "Arrow field identity and mixed geometry types are not interpreted by REST; no Arrow output or conversion is advertised.",
+      "evidence": "contracts/upstream/decisions/0022-field-id-across-operations-and-the-mixed-form.md"
+    },
+    {
+      "rule": "PRIM-001..009",
+      "status": "not_applicable",
+      "reason": "Opt-in primary geometry applies to Arrow geometry adopters. REST exchanges JSON and opaque artifacts and does not select a geometry.",
+      "evidence": "contracts/upstream/specs/data/ARROW-PRIMARY-GEOMETRY-1.0.md"
+    },
+    {
+      "rule": "FILE-001..007",
+      "status": "not_applicable",
+      "reason": "Opt-in file handoff descriptors and IO/storage composition edges are not exposed by REST. Its opaque artifact transfer does not claim format-family or cross-component integrity verification.",
+      "evidence": "contracts/upstream/specs/composition/FILE-INTERCHANGE-1.0.md"
+    },
+    {
+      "rule": "io-python-sdk",
+      "status": "not_applicable",
+      "reason": "The new IO Python binding and catalog concern IO only; REST Python entrypoints and adopted REST catalog are unchanged.",
+      "evidence": "contracts/upstream/decisions/0016-io-tools-python-sdk.md"
     }
   ]
 }

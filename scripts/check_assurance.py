@@ -2,8 +2,8 @@
 
 Rust extraction is deliberately limited to the declarations used here. A changed
 shape fails closed and requires adapting the extractor, not a guessed inventory.
-Historical campaign reports are observations of their recorded commit, not current
-qualification. They are inventoried but never presented as current passing tests.
+Campaign reports are observations of their recorded commit. Inventory membership
+does not establish qualification of the current source tree.
 """
 from __future__ import annotations
 

@@ -36,7 +36,6 @@ python/plenora_rest           SDK Python pubblico
 python/tests                  test black-box della wheel installata
 contracts/schemas             schemi JSON component-owned
 contracts/bindings            mapping degli entrypoint Rust
-contracts/compatibility-v1.json baseline immutabile v1
 examples                      esempi provider-neutral
 fuzz                          target cargo-fuzz e corpus iniziale (workspace separato)
 scripts                       verifica, contratti e release
@@ -114,7 +113,7 @@ I target di fuzz stanno in `fuzz/`, crate `cargo-fuzz` con workspace e
 Cargo.lock propri, fuori dalla MSRV: target, proprietÃ , formato degli input,
 cosa non Ã¨ raggiungibile e comandi sono in [fuzz/README.md](../fuzz/README.md).
 Raggiungono i parser privati con la feature `fuzzing` del crate core, che
-abilita un modulo `doc(hidden)` non pubblico e fuori dal contratto v1. I due
+abilita un modulo `doc(hidden)` non pubblico e fuori dal contratto pubblico. I due
 target che eseguono il motore riscrivono ogni URL in un loopback letterale
 che la configurazione di default rifiuta: nessuna connessione, nessun DNS.
 
@@ -137,7 +136,7 @@ Il gate costruisce ambienti self-contained e verifica:
 
 1. cargo check dell'intero workspace con Rust 1.98.0 e Cargo.lock;
 2. JSON Schema Draft 2020-12, un corpus di istanze valide e non valide per ogni
-   schema, e compatibilitÃ  delle superfici v1;
+   schema, e coerenza delle superfici correnti;
 3. rustfmt;
 4. Clippy con tutti i warning negati;
 5. Clippy anti-panic sulle librerie e sul binario CLI;
@@ -242,27 +241,19 @@ fuori da verify.ps1 mantiene riproducibile il gate di release.
 
 ## Modifiche ai contratti
 
-Per una modifica interna che non tocca il confine pubblico:
+Il componente mantiene una sola versione corrente per famiglia di schema e
+binding, senza compatibilità con release Plenora precedenti. Per modificarla:
 
-1. modificare implementazione e test;
-2. verificare che compatibility-v1.json resti invariato;
-3. eseguire il gate completo.
+1. aggiornare implementazione, schemi, binding e test delle superfici insieme;
+2. registrare le rimozioni incompatibili nella voce non rilasciata del changelog;
+3. allineare pin, copie upstream, digest e registro dei requisiti adottati;
+4. dichiarare le deviazioni dai contratti comuni nel manifesto;
+5. eseguire il validatore e le prove pertinenti, poi il gate completo prima del commit.
 
-Per una modifica pubblica:
-
-1. stabilire se il cambiamento Ã¨ compatibile;
-2. per un breaking change creare una nuova versione di schema e binding;
-3. mantenere i file v1 immutati;
-4. aggiornare capability, binding, test delle superfici e adozione;
-5. rigenerare un baseline soltanto come risultato di una revisione esplicita;
-6. eseguire il gate completo.
-
-Il comando seguente stampa la superficie osservata dal validatore, ma non
-modifica file:
-
-~~~powershell
-python ./scripts/validate_contracts.py --print-baseline
-~~~
+`python scripts/validate_contracts.py` verifica schemi e corpus, riferimenti,
+unicità delle versioni locali, binding corrente, pin e adozione. Le copie
+upstream seguono i contratti comuni adottati, anche quando un envelope v1 è
+usato dal binding runtime v2: non sono versioni storiche del prodotto.
 
 ## Build della release
 

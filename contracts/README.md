@@ -22,8 +22,7 @@ Tutti gli schemi usano JSON Schema Draft 2020-12 e hanno versione v1:
 | schemas/plenora-rest-capability-attributes-v1.schema.json | attributi pubblici della capability |
 
 Gli identificatori canonici sono gli URI contenuti nel campo $id di ogni
-schema. I file, gli URI e i digest canonici sono congelati in
-compatibility-v1.json.
+schema. Il validatore controlla gli URI, i riferimenti e il corpus delle istanze correnti.
 
 ## Operazioni
 
@@ -108,15 +107,14 @@ d'errore porta il contratto di output del comando, oppure plenora-error-v1
 quando il comando non Ã¨ riconosciuto. Il documento delle capability del
 binario Ã¨ quello di plenora_rest_core::capabilities() con in piÃ¹ l'interfaccia
 `cli` (artifact plenora-rest) e la superficie `cli` sulle cinque operazioni;
-la superficie Rust congelata non cambia.
+la superficie Rust resta quella dichiarata dal core.
 
 Dalla v1.1.0 di plenora-contracts (decisione 0012) la CLI di rest-tools Ã¨ una
 superficie facoltativa: il catalogo la seleziona come `conditional` e la elenca
 sulle cinque operazioni, e il binding comune bindings/cli-v1.json registra il
 comando `plenora-rest`, le tre spellature di discovery e
 `<operazione> --input REQUEST.json --format json`. Le spellature sopra sono
-quelle del binding e sono quindi normative: cambiarle richiede un nuovo
-contratto. La superficie Rust (plenora_rest_core::capabilities) non elenca
+quelle del binding e sono quindi normative: cambiarle richiede allineare il binding comune adottato. La superficie Rust (plenora_rest_core::capabilities) non elenca
 `cli`, come il profilo ammette per un artefatto senza il comando.
 
 Nel manifest di adozione l'artefatto CLI si chiama plenora-rest-linux-x86_64,
@@ -169,28 +167,18 @@ resume.
 
 ## Compatibilità
 
-La politica v1 Ã¨ intenzionalmente rigida:
+Decisione del titolare del 15/11/2026: nessuna compatibilità con release
+Plenora precedenti. Il repository mantiene una sola versione corrente per
+famiglia di contratto locale; cambi incompatibili aggiornano insieme schemi,
+binding, implementazione e prove. Le regole comuni adottate restano vincolanti:
+le differenze vanno dichiarate come deviazioni nel manifesto.
 
-- gli schemi v1 pubblicati sono immutabili;
-- gli export pubblici Rust e Python sono congelati;
-- il mapping del binding Rust Ã¨ congelato;
-- una modifica incompatibile richiede nuovi schemi e binding versionati;
-- compatibility-v1.json non deve essere aggiornato per aggirare un errore del
-  gate.
-
-Deviazione dichiarata per la 0.3.0, decisa dal maintainer: la superficie Rust
-congelata cambia una volta sola per EngineError (campi testuali opachi, vedi
-docs/architecture.md) e per le sessioni cookie (export CookieSession, entrypoint
-Engine::open_cookie_session e Engine::close_cookie_session, CookiePolicy con
-session al posto di enabled e jar_id). compatibility-v1.json e
-bindings/rust-v1.json sono stati aggiornati insieme a questa decisione, non per
-aggirare il gate. Gli schemi JSON v1 non cambiano: `connection.cookies` era giÃ 
-un oggetto libero.
-
-Un'aggiunta apparentemente compatibile alla superficie pubblica richiede
-comunque una decisione esplicita e una revisione del contratto. Implementazioni
-interne e configurazioni private possono evolvere senza cambiare il wire
-contract.
+Il pin di famiglia e il registro includono geometria primaria (PRIM-001..009),
+identità Arrow (decisione 0022), scambio file (FILE-001..007) e SDK Python IO.
+Sono non applicabili a REST: nessuna conversione Arrow, selezione geometrica o
+composizione IO/storage è esposta. Catalogo, profilo e vettori REST sono invariati;
+la copia Surface Bindings aggiunge soltanto IO alla tabella degli SDK Python.
+RT-024 resta la deviazione aperta; il cambio di pin non la risolve.
 
 ## Verifica
 
@@ -211,15 +199,14 @@ Il validatore controlla:
 1. validitÃ  Draft 2020-12;
 2. unicitÃ  degli $id;
 3. risoluzione dei riferimenti posseduti dal componente;
-4. digest canonici dei sei schemi;
-5. export pubblici Rust e Python;
-6. firma del binding Rust;
+4. una sola versione corrente per famiglia di schema e binding locale;
+5. corpus positivo e negativo degli schemi;
+6. operazioni del binding Rust rispetto al catalogo ed esistenza degli entrypoint;
 7. pin dei file in upstream/, vettori runtime e sonde di rifiuto contro i loro
    schemi e manifesto di adozione contro lo schema v4 e le regole di
    ADOPTION.md; coerenza del registro dei requisiti e del catalogo adottato.
 
-Per una modifica breaking si crea una nuova versione del contratto e si
-mantiene la v1 invariata finchÃ© esistono consumer supportati.
+Le prove Rust e Python verificano le superfici correnti senza baseline storiche.
 
 ## Riferimenti
 

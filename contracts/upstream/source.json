@@ -1,6 +1,6 @@
 {
   "repository": "https://github.com/PlenoraETL/plenora-contracts.git",
-  "revision": "3aec9f724f5a0ad21366f293895b4d0dbcd0aad1",
+  "revision": "38d68b402389855edbcecb7ce57c31e91282cb4e",
   "files": {
     "bindings/runtime-v1.json": {
       "upstream": "bindings/runtime-v1.json",
@@ -156,7 +156,7 @@
     },
     "specs/surfaces/SURFACE-BINDINGS-1.0.md": {
       "upstream": "specs/surfaces/SURFACE-BINDINGS-1.0.md",
-      "sha256": "3d888a10f13f3b2ca41316f74cf94a1c52625565badd709ab353d19bd64c286f"
+      "sha256": "b177da98d1a49ad77a55816111f55b72bbd9836c010a67b951ccf6c5e57d9b47"
     },
     "vectors/runtime-v2/database-query-result-limit-error.json": {
       "upstream": "vectors/runtime-v2/database-query-result-limit-error.json",
@@ -165,6 +165,22 @@
     "vectors/runtime-v2/database-query-transport-limit-error.json": {
       "upstream": "vectors/runtime-v2/database-query-transport-limit-error.json",
       "sha256": "c34da6e468930ae7ebd19327618c36d3811c6388cd75450986a938c60c24c3a7"
+    },
+    "decisions/0022-field-id-across-operations-and-the-mixed-form.md": {
+      "upstream": "decisions/0022-field-id-across-operations-and-the-mixed-form.md",
+      "sha256": "c952c5a4fd6351b6e003c5989963ff22e21d30803b36f4c9f47e86ae51c75c72"
+    },
+    "specs/data/ARROW-PRIMARY-GEOMETRY-1.0.md": {
+      "upstream": "specs/data/ARROW-PRIMARY-GEOMETRY-1.0.md",
+      "sha256": "9b949e304219beed8e54792358d554570134590d5e93abd1e50ed802162dc941"
+    },
+    "specs/composition/FILE-INTERCHANGE-1.0.md": {
+      "upstream": "specs/composition/FILE-INTERCHANGE-1.0.md",
+      "sha256": "9b9527724833c9821b59211894d6d749fcc02808a4e01b039c8f316e244ba6fd"
+    },
+    "decisions/0016-io-tools-python-sdk.md": {
+      "upstream": "decisions/0016-io-tools-python-sdk.md",
+      "sha256": "5c4a4308a008c8bf323b9f64fa19a5f69200a9319646848b000f8a1188f37eb4"
     }
   }
 }

@@ -3,7 +3,7 @@
   "component": "plenora-rest-tools",
   "contracts_source": {
     "repository": "https://github.com/PlenoraETL/plenora-contracts.git",
-    "revision": "3aec9f724f5a0ad21366f293895b4d0dbcd0aad1"
+    "revision": "38d68b402389855edbcecb7ce57c31e91282cb4e"
   },
   "profile": "plenora-rest-tools-profile-v1",
   "artifacts": [
@@ -152,6 +152,22 @@
     },
     {
       "id": "plenora-rest-arrow-adapter-v1",
+      "status": "not_applicable"
+    },
+    {
+      "id": "plenora-arrow-primary-geometry-v1",
+      "status": "not_applicable"
+    },
+    {
+      "id": "plenora-file-interchange-v1",
+      "status": "not_applicable"
+    },
+    {
+      "id": "plenora-file-interop-vector-v1",
+      "status": "not_applicable"
+    },
+    {
+      "id": "plenora-file-composition-v1",
       "status": "not_applicable"
     }
   ],
