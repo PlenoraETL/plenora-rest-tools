@@ -104,6 +104,7 @@ their profile, are:
 |---|---|---|
 | database-tools | `plenora-database` | `plenora_database` |
 | data-tools | `plenora-data` | `plenora_data` |
+| io-tools | `plenora-io` | `plenora_io` |
 | rest-tools | `plenora-rest` | `plenora_rest` |
 | storage-tools | `plenora-storage` | `plenora_storage` |
 

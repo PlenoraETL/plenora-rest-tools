@@ -65,8 +65,8 @@ cattura rifiutano ID duplicati. Non basta che il processo termini con 0.
 
 Le ricevute in `target/frozen/` includono risultati individuali, commit, digest
 dei file locali e del modulo nativo. Skip, discovery vuota, risultati mancanti
-e test non eseguiti non qualificano la suite. I report in `campaign/reports`
-rimangono storici e non vengono promossi a evidenza corrente.
+e test non eseguiti non qualificano la suite. I nuovi report in `campaign/reports` devono identificare il codice eseguito;
+la presenza nel repository non li promuove a qualifica del worktree.
 
 ## Mutazioni
 

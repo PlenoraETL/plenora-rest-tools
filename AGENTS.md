@@ -35,10 +35,10 @@ l'unico posto in cui sono scritte. Sono le stesse delle altre librerie Plenora.
    Mai valori di righe o colonne, body remoti, header, credenziali o path
    locali, nemmeno in diagnostica (`ErrorDetail` si costruisce solo da
    stringhe statiche).
-7. **Contratti**: le superfici v1 (schemi, export Rust e Python, binding)
-   sono congelate da `contracts/compatibility-v1.json`; una modifica
-   incompatibile richiede un nuovo contratto versionato o una decisione
-   esplicita registrata. Una regola dei contratti comuni non rispettata è una
+7. **Contratti**: una sola versione corrente per ogni contratto posseduto dal
+   componente; nessuna compatibilità con release Plenora precedenti (decisione
+   del titolare del 15/11/2026). Schemi, binding e prove delle superfici correnti
+   devono restare coerenti. Una regola dei contratti comuni non rispettata è una
    deviazione dichiarata in `adoption-manifest.json` con regola, ambito,
    rischio e rientro, mai un silenzio.
 8. **Seconda revisione** per la logica critica: confronti, conversioni

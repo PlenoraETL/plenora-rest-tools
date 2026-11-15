@@ -2,6 +2,8 @@
   "files": {
     "contracts/upstream/bindings/runtime-v1.json": "3c2cf9d0a32e8bb5ba348cc42fc8daabedf5974d355ab0f7037dba6c1a39e685",
     "contracts/upstream/catalogs/rest-tools-v1.json": "867c7788bf83ece78348de528311b70339e2cc25c5cac731be323f070c33d614",
+    "contracts/upstream/decisions/0016-io-tools-python-sdk.md": "5c4a4308a008c8bf323b9f64fa19a5f69200a9319646848b000f8a1188f37eb4",
+    "contracts/upstream/decisions/0022-field-id-across-operations-and-the-mixed-form.md": "c952c5a4fd6351b6e003c5989963ff22e21d30803b36f4c9f47e86ae51c75c72",
     "contracts/upstream/profiles/rest-tools.md": "e0b2c8e9114fd79427de7cf489647527e1465fa64639f55b573ca249ed680680",
     "contracts/upstream/runtime-probes-v1/data-run-input-contract-malformed.json": "67723dae7b7e3306354a9db7548b8ec282d47524a9683632f81a93cd1f5e9115",
     "contracts/upstream/runtime-probes-v1/data-run-input-contract-mismatch.json": "6df1dd05888fd98e73ee41620089e2df380c4e79fa072193823cbdd3127731a2",
@@ -33,13 +35,15 @@
     "contracts/upstream/schemas/public-catalog-v2.schema.json": "4ad71cd2ccb018a92548ff6b64b5bb552a5a3d298032be871376d1ef4088f80b",
     "contracts/upstream/schemas/runtime-probe-v1.schema.json": "5188813894c59c67c5c9b1aab551c6c783e13b021e5a4896c033d1636e705c47",
     "contracts/upstream/schemas/runtime-vector-v1.schema.json": "3ec6148b8fb3db111ca0d1ff29283c3f8a46a7727c3051a777a123c102ca1f9e",
-    "contracts/upstream/source.json": "d8038e8b404c8990298c01451f03a46bdf116adf4cfaf89d33a63d019a9e878e",
+    "contracts/upstream/source.json": "c5ae1985b117dd1b454a9432249049303f2a71262a52b0e4bd83e5283d5479c4",
     "contracts/upstream/specs/RUNTIME-VECTORS-1.0.md": "56dbaf80987632369375c7f04d534e609b98d96a3ffa18acb52eb6ff7cabd5ad",
     "contracts/upstream/specs/catalogs/PUBLIC-CATALOGS-2.0.md": "c92637efd8448075c934826d45dde880d073b4961e8958f6f03e4afa14fae0d0",
+    "contracts/upstream/specs/composition/FILE-INTERCHANGE-1.0.md": "9b9527724833c9821b59211894d6d749fcc02808a4e01b039c8f316e244ba6fd",
     "contracts/upstream/specs/composition/INTEROP-VECTORS-1.0.md": "ad502f77dec0bb0c92ee48822bb7110275af437d815568675d0b2b56ef859185",
+    "contracts/upstream/specs/data/ARROW-PRIMARY-GEOMETRY-1.0.md": "9b949e304219beed8e54792358d554570134590d5e93abd1e50ed802162dc941",
     "contracts/upstream/specs/errors/ERRORS-1.0.md": "6c9d3a1045a515b6cdd657e407f164d6aa72da648e44881c91510f5e07502f88",
     "contracts/upstream/specs/runtime/RUNTIME-BINDING-2.0.md": "3a0141fb5588d51918af3bcfaff69628852fdbe1842eb6b75cff0625a19a03ff",
-    "contracts/upstream/specs/surfaces/SURFACE-BINDINGS-1.0.md": "3d888a10f13f3b2ca41316f74cf94a1c52625565badd709ab353d19bd64c286f",
+    "contracts/upstream/specs/surfaces/SURFACE-BINDINGS-1.0.md": "b177da98d1a49ad77a55816111f55b72bbd9836c010a67b951ccf6c5e57d9b47",
     "contracts/upstream/vectors/runtime-v2/database-query-result-limit-error.json": "c1130270b6af52f5118b938e773ed849cf8a15495eb68dd713a19810a2e186d8",
     "contracts/upstream/vectors/runtime-v2/database-query-transport-limit-error.json": "c34da6e468930ae7ebd19327618c36d3811c6388cd75450986a938c60c24c3a7",
     "tests/frozen/0.4.0/io-branches.json": "92f593d2bbb06e72637b9e0029e1ce64fa2fa435765e0ae6e24761763a82e9d6",
@@ -50,6 +54,6 @@
     "tests/frozen/0.4.0/transitions.json": "b3cebfd000351624f6e0f0f8f6e466204a6365ebb8ab03e9debf818b6de892fb"
   },
   "kind": "fixture-identities-not-observed-product-results",
-  "upstream_revision": "3aec9f724f5a0ad21366f293895b4d0dbcd0aad1",
+  "upstream_revision": "38d68b402389855edbcecb7ce57c31e91282cb4e",
   "version": "0.4.0"
 }
