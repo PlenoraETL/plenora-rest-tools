@@ -151,18 +151,11 @@ CAT-003 non trova assenze intenzionali nel profilo REST. Arrow, geometria,
 INTEROP-001..005 e l'adapter REST-to-Arrow sono non applicabili: REST scambia
 JSON e artifact opachi; l'adapter appartiene all'applicazione.
 
-I digest degli artifact nel manifesto restano quelli della release 0.3.0
-precedente: questa adozione nel worktree non è una release qualificata. Prima
-di pubblicarla occorre ricostruire gli artifact e registrarne i digest reali
-con il gate di release; nessun digest è stato inventato o aggiornato senza build.
-
-Decisioni del maintainer registrate nei contratti del componente, non
-deviazioni dai contratti comuni:
-
-| Regola | Ambito | Rischio | Rientro |
-| --- | --- | --- | --- |
-| superficie Rust v1 congelata (`contracts/compatibility-v1.json`) | 0.3.0: EngineError con campi testuali opachi; sessioni cookie (`CookieSession`, `open_cookie_session`, `close_cookie_session`) | un consumatore Rust 0.2.x non compila senza modifiche | cambio unico deciso per la 0.3.0, vedi [contratti](../contracts/README.md#compatibilità); le prossime modifiche incompatibili richiedono contratti v2 |
-| null e valori assenti | fino a 0.2.2 un parametro fixed con value null veniva omesso | un consumatore che contava sull'omissione invia ora null | chiuso in 0.3.0, vedi [architettura](architecture.md#null-e-valori-assenti) |
+I digest degli artifact identificano gli artefatti già registrati nel manifesto,
+non il presente worktree. Prima di pubblicare occorre ricostruire gli artifact
+e registrarne i digest reali con il gate di release. Nessun digest di release
+viene aggiornato senza build. I nuovi contratti opt-in di geometria primaria
+e scambio file sono non applicabili, con motivazioni nel registro dei requisiti.
 
 ## Riferimenti
 

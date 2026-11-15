@@ -242,10 +242,8 @@ Plenora si fissano dopo la staging. Le principali:
 - eseguire le fasi in staging con configurazioni, dimensioni e servizi
   rappresentativi di Plenora: il server locale prova il motore, non i servizi
   reali, le credenziali reali né gli artifact source e sink del runtime;
-- eseguire il soak per 4-6 ore su una macchina dedicata Linux: nel soak di
-  75 minuti già eseguito l'RSS cresce a gradini e si appiattisce, sotto le
-  soglie proposte ma vicino alla pendenza massima
-  ([report](../campaign/reports/README.md));
+- eseguire il soak per 4-6 ore su una macchina dedicata Linux e misurare
+  RSS, descriptor e thread sul codice corrente;
 - aggiungere un profilo in cui max_concurrent_requests sia il vincolo attivo:
   nei profili attuali domina il limite di rate e il picco di concorrenza
   osservato resta lontano dal limite;
@@ -257,8 +255,7 @@ Plenora si fissano dopo la staging. Le principali:
 ### Difetti trovati dalla campagna
 
 I primi tre, bloccanti, sono corretti nel motore, ciascuno con un test che
-fallisce senza la correzione; dopo le correzioni le fasi smoke e load sulla VM
-sono ripetute ([report](../campaign/reports/README.md)).
+fallisce senza la correzione. Le nuove campagne devono qualificare il codice corrente.
 
 1. **Deadline della richiesta ignorata da execute_with_control** — corretto:
    execute_with_control applica la più vicina tra la deadline del controllo e

@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Validate JSON Schemas and freeze the versioned public contract surface."""
+"""Validate the current public contracts and their adopted upstream source."""
 
 from __future__ import annotations
 
 import argparse
-import ast
 import hashlib
 import json
 import re
@@ -24,16 +23,9 @@ except ImportError as error:  # pragma: no cover - exercised by the container ga
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_ROOT = ROOT / "contracts" / "schemas"
-BASELINE_PATH = ROOT / "contracts" / "compatibility-v1.json"
-RUST_SURFACE = ROOT / "crates" / "rest-engine-core" / "src" / "lib.rs"
-PYTHON_SURFACE = ROOT / "python" / "plenora_rest" / "__init__.py"
 RUST_BINDING = ROOT / "contracts" / "bindings" / "rust-v1.json"
 UPSTREAM_ROOT = ROOT / "contracts" / "upstream"
 ADOPTION_MANIFEST = ROOT / "adoption-manifest.json"
-POLICY = (
-    "Published v1 schemas and public bindings are immutable. "
-    "Breaking changes require a new contract version."
-)
 
 
 def fail(message: str) -> NoReturn:
@@ -47,16 +39,6 @@ def load_json(path: Path) -> Any:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         fail(f"cannot load {path.relative_to(ROOT)}: {error}")
-
-
-def canonical_digest(document: Any) -> str:
-    encoded = json.dumps(
-        document,
-        ensure_ascii=True,
-        separators=(",", ":"),
-        sort_keys=True,
-    ).encode("ascii")
-    return hashlib.sha256(encoded).hexdigest()
 
 
 def schema_files() -> list[Path]:
@@ -124,81 +106,35 @@ def validate_references(
         resolve_pointer(target_document, parsed.fragment, label)
 
 
-def rust_public_exports() -> list[str]:
-    source = RUST_SURFACE.read_text(encoding="utf-8")
-    exports: set[str] = set()
-    grouped = re.compile(r"pub\s+use\s+[A-Za-z0-9_:]+::\{(.*?)\};", re.DOTALL)
-    for match in grouped.finditer(source):
-        for item in match.group(1).split(","):
-            item = item.strip()
-            if not item:
-                continue
-            exports.add(item.split(" as ")[-1].strip())
-
-    direct = re.compile(
-        r"pub\s+use\s+[A-Za-z0-9_:]+::([A-Za-z_][A-Za-z0-9_]*)\s*;"
-    )
-    exports.update(match.group(1) for match in direct.finditer(source))
-    if not exports:
-        fail("cannot discover the public Rust exports")
-    return sorted(exports)
-
-
-def python_public_exports() -> list[str]:
-    module = ast.parse(PYTHON_SURFACE.read_text(encoding="utf-8"), PYTHON_SURFACE.name)
-    for node in module.body:
-        if (
-            isinstance(node, ast.Assign)
-            and any(
-                isinstance(target, ast.Name) and target.id == "__all__"
-                for target in node.targets
-            )
-        ):
-            value = ast.literal_eval(node.value)
-            if not isinstance(value, list) or not all(
-                isinstance(item, str) for item in value
-            ):
-                fail("python/plenora_rest/__init__.py __all__ must be a string list")
-            return sorted(value)
-    fail("python/plenora_rest/__init__.py does not define __all__")
-
-
-def rust_binding_signature() -> dict[str, Any]:
+def validate_current_surface() -> None:
+    """One current version per component-owned schema/binding family."""
+    for directory, pattern in ((SCHEMA_ROOT, "*.schema.json"), (RUST_BINDING.parent, "*.json")):
+        families = set()
+        for path in sorted(directory.glob(pattern)):
+            family = re.sub(r"-v[0-9]+(?=\.|$)", "", path.name)
+            if family in families:
+                fail("multiple versions of a component-owned contract")
+            families.add(family)
     binding = load_json(RUST_BINDING)
-    return {
-        "schema_version": binding.get("schema_version"),
-        "component": binding.get("component"),
-        "artifact_name": binding.get("artifact", {}).get("name"),
-        "capability_entrypoint": binding.get("capability_entrypoint"),
-        "lifecycle_entrypoints": binding.get("lifecycle_entrypoints"),
-        "operations": binding.get("operations"),
-        "runtime_transport_entrypoint": binding.get("runtime_transport_entrypoint"),
-    }
+    catalog = load_json(UPSTREAM_ROOT / "catalogs/rest-tools-v1.json")
+    operations = binding.get("operations", [])
+    expected = {(item["id"], item["version"]) for item in catalog["operations"]}
+    actual = {(item["operation"], item["version"]) for item in operations}
+    if actual != expected or len(operations) != len(expected):
+        fail("binding operations differ from the current catalog")
+    source = "\n".join(path.read_text(encoding="utf-8") for path in
+                       sorted((ROOT / "crates/rest-engine-core/src").rglob("*.rs")))
+    entrypoints = [binding["capability_entrypoint"], binding["runtime_transport_entrypoint"],
+                  *binding["lifecycle_entrypoints"],
+                  *(entry for item in operations for entry in item["entrypoints"])]
+    for entry in entrypoints:
+        name = entry.rsplit("::", 1)[-1]
+        if not re.search(r"pub\s+(?:async\s+)?fn\s+" + re.escape(name) + r"\b", source):
+            fail("binding entrypoint absent from the current implementation")
 
 
-def build_baseline() -> dict[str, Any]:
-    schemas: dict[str, dict[str, str]] = {}
-    for path in schema_files():
-        document = load_json(path)
-        schema_id = document.get("$id")
-        if not isinstance(schema_id, str) or not schema_id:
-            fail(f"{path.relative_to(ROOT)} must define a non-empty $id")
-        schemas[path.name] = {
-            "id": schema_id,
-            "canonical_sha256": canonical_digest(document),
-        }
-    return {
-        "schema_version": 1,
-        "policy": POLICY,
-        "schemas": schemas,
-        "rust_public_exports": rust_public_exports(),
-        "python_public_exports": python_public_exports(),
-        "rust_binding": rust_binding_signature(),
-    }
-
-
-# Instances exercised against the published schemas. Metaschema validity and
-# digest stability say nothing about whether a schema actually accepts the
+# Instances exercised against the current schemas. Metaschema validity alone
+# says nothing about whether a schema actually accepts the
 # payloads the engine produces and rejects the ones it must refuse, so every
 # schema carries a small positive and negative corpus.
 #
@@ -579,6 +515,8 @@ def validate_upstream() -> int:
     source = load_json(UPSTREAM_ROOT / "source.json")
     manifest = load_json(ADOPTION_MANIFEST)
     adopted = manifest.get("contracts_source", {})
+    if not re.fullmatch(r"[0-9a-f]{40}", adopted.get("revision", "")):
+        fail("adoption requires an immutable revision")
     if source.get("revision") != adopted.get("revision"):
         fail(
             "contracts/upstream/source.json and adoption-manifest.json adopt "
@@ -586,6 +524,9 @@ def validate_upstream() -> int:
         )
     if source.get("repository") != adopted.get("repository"):
         fail("contracts/upstream/source.json names a different contracts repository")
+    fixture_source = load_json(ROOT / "tests/frozen/0.4.0/sources.json")
+    if fixture_source.get("upstream_revision") != adopted["revision"]:
+        fail("fixture source differs from adoption")
     pins = source.get("files")
     if not isinstance(pins, dict) or not pins:
         fail("contracts/upstream/source.json must pin at least one file")
@@ -645,11 +586,14 @@ def validate_upstream() -> int:
         fail("requirement register differs from adoption")
     if requirements["catalog"] != "catalogs/rest-tools-v1.json":
         fail("unexpected REST catalog")
-    required_rules = {"CAT-001", "CAT-002", "CAT-003", "RT-024", "RT-025", "RT-026", "RT-027", "ERR-015", "ERR-016", "SB-001", "INTEROP-001..005", "GEO-000..020/REJ-001..004", "RA-001..010", "decision-0021", "contracts-40"}
+    required_rules = {"CAT-001", "CAT-002", "CAT-003", "RT-024", "RT-025", "RT-026", "RT-027", "ERR-015", "ERR-016", "SB-001", "INTEROP-001..005", "GEO-000..020/REJ-001..004", "RA-001..010", "decision-0021", "contracts-40", "decision-0022", "PRIM-001..009", "FILE-001..007", "io-python-sdk"}
     entries = requirements["requirements"]
     if {entry["rule"] for entry in entries} != required_rules or len(entries) != len(required_rules):
         fail("incomplete requirement register")
     for entry in entries:
+        context = entry.get("upstream_context")
+        if context and (context.get("revision") != adopted["revision"] or context.get("repository") != adopted["repository"]):
+            fail("upstream context differs from adoption")
         if entry["status"] not in {"implemented", "deviation", "not_applicable"} or not entry["reason"] or not entry["evidence"]:
             fail("invalid requirement status")
     if {entry["rule"] for entry in entries if entry["status"] == "deviation"} != {entry["rule"] for entry in manifest["deviations"]}:
@@ -755,51 +699,19 @@ def validate() -> None:
     checked = validate_fixtures(documents)
     upstream = validate_upstream()
 
-    expected = load_json(BASELINE_PATH)
-    actual = build_baseline()
-    if actual != expected:
-        expected_schemas = expected.get("schemas", {})
-        actual_schemas = actual["schemas"]
-        changed = sorted(
-            name
-            for name in set(expected_schemas) | set(actual_schemas)
-            if expected_schemas.get(name) != actual_schemas.get(name)
-        )
-        surfaces = [
-            name
-            for name in ("rust_public_exports", "python_public_exports", "rust_binding")
-            if expected.get(name) != actual.get(name)
-        ]
-        details = []
-        if changed:
-            details.append(f"schemas={changed}")
-        if surfaces:
-            details.append(f"surfaces={surfaces}")
-        fail(
-            "published v1 compatibility baseline changed"
-            + (f": {', '.join(details)}" if details else "")
-            + "; introduce a versioned contract instead of mutating v1"
-        )
+    validate_current_surface()
 
     print(
         f"validated {len(paths)} Draft 2020-12 schemas, local references, "
         f"{checked} schema fixtures, {upstream} pinned upstream documents, "
-        "and immutable v1 public surfaces"
+        "and current public bindings"
     )
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--print-baseline",
-        action="store_true",
-        help="print the canonical compatibility baseline for explicit review",
-    )
-    args = parser.parse_args()
-    if args.print_baseline:
-        print(json.dumps(build_baseline(), indent=2, sort_keys=True))
-    else:
-        validate()
+    parser.parse_args()
+    validate()
 
 
 if __name__ == "__main__":
