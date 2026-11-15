@@ -902,8 +902,12 @@ async fn stalled(observation: &mut Observation, context: &Context, key: &str) {
     if let Some(error) = expect_failure(observation, &result, &["TIMEOUT"]) {
         fault_error(observation, fault, FaultClass::AfterSend, error);
     }
+    let Some(checked_limit) = plenora_rest_core::temporal::timer_sum(limit, context.slack) else {
+        observation.violate(Criterion::HarnessError, "timing tolerance is out of range");
+        return;
+    };
     observation.check(
-        elapsed <= limit + context.slack,
+        elapsed <= checked_limit,
         Criterion::CancellationNotHonored,
         "timeout o deadline superati oltre la tolleranza",
     );
@@ -964,8 +968,12 @@ async fn runtime_deadline(
         Criterion::UnexpectedOutcome,
         "deadline del payload del runtime non rifiutata",
     );
+    let Some(checked_limit) = plenora_rest_core::temporal::timer_sum(offset, context.slack) else {
+        observation.violate(Criterion::HarnessError, "timing tolerance is out of range");
+        return;
+    };
     observation.check(
-        elapsed <= offset + context.slack,
+        elapsed <= checked_limit,
         Criterion::CancellationNotHonored,
         "rifiuto della deadline del payload oltre la tolleranza",
     );
@@ -1400,7 +1408,14 @@ async fn job_interrupted(observation: &mut Observation, context: &Context, key: 
         // il submit prima di scrivere la risposta: una cancellazione che
         // arriva prima che il motore conosca il job id resta possibile ed è
         // registrata come guasto distinto.
-        let wait_until = Instant::now() + context.watchdog / 2;
+        let Some(wait_until) =
+            plenora_rest_core::temporal::instant_after(Instant::now(), context.watchdog / 2)
+        else {
+            token.cancel();
+            task.abort();
+            observation.violate(Criterion::HarnessError, "watchdog deadline is out of range");
+            return;
+        };
         while context.server.peek(key).submits == 0 && Instant::now() < wait_until {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
@@ -1445,7 +1460,11 @@ async fn job_interrupted(observation: &mut Observation, context: &Context, key: 
     let limit = if is_cancel {
         context.slack
     } else {
-        offset + context.slack
+        let Some(limit) = plenora_rest_core::temporal::timer_sum(offset, context.slack) else {
+            observation.violate(Criterion::HarnessError, "timing tolerance is out of range");
+            return;
+        };
+        limit
     };
     observation.check(
         elapsed <= limit,

@@ -20,7 +20,7 @@ mod cache;
 use cache::{CacheStore, fingerprint};
 mod admission;
 use admission::{apply_query_auth, method, request_headers, set_request_header};
-mod auth;
+pub(crate) mod auth;
 
 mod retry;
 use retry::{AttemptOutcome, RetryDecision, RetrySession, is_retryable_transport_error};
@@ -32,11 +32,10 @@ use std::{
     collections::{BTreeMap, HashMap},
     hash::{Hash, Hasher},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
-    num::IntErrorKind,
     path::{Path, PathBuf},
     sync::Arc,
     sync::atomic::{AtomicU64, AtomicUsize, Ordering},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime},
 };
 
 use crate::error::ErrorDetail;
@@ -639,13 +638,17 @@ impl Transport {
         let wait = if let Some(requests_per_second) = rate {
             // Both rates are validated before any request; an interval that
             // cannot be represented here is an internal invariant failure.
-            let interval = crate::exact::rate_interval(requests_per_second).ok_or_else(|| {
-                EngineError::Runtime(ErrorDetail::from("request rate has no exact interval"))
-            })?;
+            let interval =
+                crate::temporal::rate_interval(requests_per_second).ok_or_else(|| {
+                    EngineError::Runtime(ErrorDetail::from("request rate has no exact interval"))
+                })?;
             let mut state = self.rate_state.lock().await;
             let now = Instant::now();
-            let wait = state.next_allowed.saturating_duration_since(now);
-            state.next_allowed = state.next_allowed.max(now) + interval;
+            let (next, wait) = crate::temporal::rate_slot(state.next_allowed, now, interval)
+                .ok_or_else(|| {
+                    EngineError::Runtime(ErrorDetail::from("rate limiter deadline is out of range"))
+                })?;
+            state.next_allowed = next;
             wait
         } else {
             Duration::ZERO
@@ -730,14 +733,12 @@ pub(crate) fn parse_retry_after(value: &str, now: SystemTime) -> Option<u64> {
     // header: it saturates, so it exceeds max_retry_after_ms and retry_wait
     // stops the retry. Reading it as absent fell back to the exponential
     // backoff and retried sooner than the service asked.
-    match value.parse::<u64>() {
-        Ok(seconds) => return Some(seconds.saturating_mul(1_000)),
-        Err(error) if *error.kind() == IntErrorKind::PosOverflow => return Some(u64::MAX),
-        Err(_) => {}
+    if let Some(delay) = crate::temporal::remote_seconds_ms(value) {
+        return Some(delay);
     }
     let date = httpdate::parse_http_date(value).ok()?;
     let delay = date.duration_since(now).unwrap_or(Duration::ZERO);
-    Some(delay.as_millis().min(u128::from(u64::MAX)) as u64)
+    Some(crate::temporal::ceil_millis(delay))
 }
 
 pub(crate) fn same_origin(left: &Url, right: &Url) -> bool {
@@ -813,6 +814,62 @@ mod tests {
             &origin,
             &Url::parse("https://other.example/next").unwrap()
         ));
+    }
+
+    #[test]
+    fn remote_time_headers_and_cookies() {
+        use reqwest::cookie::CookieStore;
+        for (text, expected) in [
+            ("0", Some(0)),
+            ("18446744073709551", Some(18_446_744_073_709_551_000)),
+            ("18446744073709552", Some(u64::MAX)),
+            ("18446744073709551615", Some(u64::MAX)),
+            ("18446744073709551616", Some(u64::MAX)),
+            ("NaN", None),
+            ("-1", None),
+            ("inf", None),
+        ] {
+            assert_eq!(parse_retry_after(text, UNIX_EPOCH), expected);
+            let headers = std::collections::BTreeMap::from([(
+                "cache-control".to_owned(),
+                format!("max-age={text}"),
+            )]);
+            assert_eq!(super::cache::cache_max_age_ms(&headers), expected);
+        }
+        assert!(parse_retry_after("Fri, 31 Dec 9999 23:59:59 GMT", UNIX_EPOCH).is_some());
+        assert!(parse_retry_after("Fri, 31 Dec 10000 23:59:59 GMT", UNIX_EPOCH).is_none());
+        let policy = crate::RetryPolicy {
+            max_retry_after_ms: u64::MAX,
+            ..Default::default()
+        };
+        for delay in [crate::temporal::MAX_TIMER_MS + 1, u64::MAX] {
+            assert!(
+                super::retry_wait(
+                    &policy,
+                    &mut super::backoff_for(&policy).unwrap(),
+                    Some(delay)
+                )
+                .is_none()
+            );
+        }
+        let url = Url::parse("https://example.com/").unwrap();
+        for (cookie, stored) in [
+            ("id=1; Max-Age=0", false),
+            ("id=1; Max-Age=-1", false),
+            ("id=1; Max-Age=9223372036854775807", true),
+            ("id=1; Max-Age=18446744073709551615", true),
+            ("id=1; Max-Age=18446744073709551616", true),
+            ("id=1; Max-Age=NaN", true),
+            ("id=1; Expires=Fri, 31 Dec 9999 23:59:59 GMT", true),
+            ("id=1; Expires=Fri, 31 Dec 10000 23:59:59 GMT", true),
+        ] {
+            let jar = super::BoundedJar::default();
+            jar.set_cookies(
+                &mut [reqwest::header::HeaderValue::from_static(cookie)].iter(),
+                &url,
+            );
+            assert_eq!(jar.cookies(&url).is_some(), stored, "{cookie}");
+        }
     }
 
     #[test]

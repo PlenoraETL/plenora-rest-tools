@@ -21,6 +21,11 @@ pub(super) fn validate_idempotency_key(key: &str) -> Result<(), EngineError> {
 /// to become one, and a zero rate became a wait of centuries.
 pub(super) fn validate_engine_configuration(config: &EngineConfig) -> Result<(), EngineError> {
     let invalid = |reason: &'static str| Err(EngineError::InvalidInput(ErrorDetail::from(reason)));
+    validate_timer_fields(&[
+        config.connect_timeout_ms,
+        config.request_timeout_ms,
+        config.pool_idle_timeout_ms,
+    ])?;
     if config.connect_timeout_ms == 0 {
         return invalid("engine connect_timeout_ms must be greater than zero");
     }
@@ -34,7 +39,7 @@ pub(super) fn validate_engine_configuration(config: &EngineConfig) -> Result<(),
     }
     if config
         .requests_per_second
-        .is_some_and(|rate| crate::exact::rate_interval(f64::from(rate)).is_none())
+        .is_some_and(|rate| crate::temporal::rate_interval(f64::from(rate)).is_none())
     {
         return invalid("engine requests_per_second must be between 1 and 10^9");
     }
@@ -50,10 +55,15 @@ fn validate_numeric_settings(connection: &ConnectionConfig) -> Result<(), Engine
     let invalid = |reason: &'static str| Err(EngineError::InvalidInput(ErrorDetail::from(reason)));
     if connection
         .requests_per_second
-        .is_some_and(|rate| crate::exact::rate_interval(rate).is_none())
+        .is_some_and(|rate| crate::temporal::rate_interval(rate).is_none())
     {
         return invalid("requests_per_second must give an interval between 1 ns and u64::MAX ns");
     }
+    validate_timer_fields(&[
+        connection.request.timeout_ms.unwrap_or(0),
+        connection.retry.backoff_base_ms,
+        connection.retry.max_backoff_ms,
+    ])?;
     if connection.request.timeout_ms == Some(0) {
         return invalid("request timeout_ms must be greater than zero");
     }
@@ -104,6 +114,15 @@ pub(super) fn validate_execution_configuration(
     let Some(polling) = request.connection.polling.as_ref() else {
         return Ok(());
     };
+    validate_timer_fields(&[
+        polling.interval_ms,
+        polling.max_interval_ms,
+        polling.max_wait_ms.unwrap_or(0),
+        polling
+            .cancel
+            .as_ref()
+            .map_or(0, |cancel| cancel.timeout_ms),
+    ])?;
     if polling.max_attempts == 0 {
         return Err(EngineError::InvalidInput(ErrorDetail::from(
             "polling max_attempts must be greater than zero",
@@ -206,5 +225,105 @@ fn validate_json_paths(connection: &ConnectionConfig) -> Result<(), EngineError>
         Err(EngineError::InvalidInput(ErrorDetail::from(
             "connection contains a malformed JSON path",
         )))
+    }
+}
+
+fn validate_timer_fields(values: &[u64]) -> Result<(), EngineError> {
+    if values
+        .iter()
+        .any(|value| crate::temporal::timer_millis(*value).is_none())
+    {
+        return Err(EngineError::InvalidInput(ErrorDetail::from(
+            "timer exceeds the supported horizon",
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod temporal_tests {
+    use super::*;
+    use crate::temporal::MAX_TIMER_MS;
+    use serde_json::json;
+
+    #[test]
+    fn remote_time_wire_domain_is_not_truncated() {
+        for literal in ["18446744073709551616", "-1", "1.5", "NaN", "Infinity"] {
+            for name in [
+                "connect_timeout_ms",
+                "request_timeout_ms",
+                "pool_idle_timeout_ms",
+            ] {
+                let input = format!("{{\"{name}\":{literal}}}");
+                assert!(serde_json::from_str::<EngineConfig>(&input).is_err());
+            }
+            for (section, field) in [
+                ("request", "timeout_ms"),
+                ("retry", "backoff_base_ms"),
+                ("retry", "max_backoff_ms"),
+                ("retry", "max_retry_after_ms"),
+                ("cache", "fresh_for_ms"),
+                ("circuit_breaker", "recovery_timeout_ms"),
+                ("polling", "interval_ms"),
+                ("polling", "max_interval_ms"),
+                ("polling", "max_wait_ms"),
+            ] {
+                let input = format!(
+                    "{{\"url\":\"https://example.com\",\"{section}\":{{\"{field}\":{literal}}}}}"
+                );
+                assert!(
+                    serde_json::from_str::<ConnectionConfig>(&input).is_err(),
+                    "{section}.{field}: {literal}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn remote_time_engine_fields() {
+        for name in [
+            "connect_timeout_ms",
+            "request_timeout_ms",
+            "pool_idle_timeout_ms",
+        ] {
+            for value in [0, 1, MAX_TIMER_MS, MAX_TIMER_MS + 1, u64::MAX] {
+                let mut input = serde_json::to_value(EngineConfig::default()).unwrap();
+                input[name] = json!(value);
+                let config = serde_json::from_value(input).unwrap();
+                assert_eq!(
+                    validate_engine_configuration(&config).is_ok(),
+                    value <= MAX_TIMER_MS && (value != 0 || name == "pool_idle_timeout_ms"),
+                    "{name}: {value}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn remote_time_request_fields() {
+        for (section, field, zero_allowed) in [
+            ("request", "timeout_ms", false),
+            ("retry", "backoff_base_ms", true),
+            ("retry", "max_backoff_ms", true),
+            ("polling", "interval_ms", true),
+            ("polling", "max_interval_ms", true),
+            ("polling", "max_wait_ms", false),
+            ("cancel", "timeout_ms", false),
+        ] {
+            for value in [0, 1, MAX_TIMER_MS, MAX_TIMER_MS + 1, u64::MAX] {
+                let mut input = json!({"schema_version":1,"operation":"test","connection":{"url":"https://example.com"}});
+                if section == "cancel" {
+                    input["connection"]["polling"] = json!({"cancel":{"timeout_ms":value}});
+                } else {
+                    input["connection"][section] = json!({field:value});
+                }
+                let request: ExecutionRequest = serde_json::from_value(input).unwrap();
+                assert_eq!(
+                    validate_execution_configuration(&request).is_ok(),
+                    value <= MAX_TIMER_MS && (zero_allowed || value != 0),
+                    "{section}.{field}: {value}"
+                );
+            }
+        }
     }
 }

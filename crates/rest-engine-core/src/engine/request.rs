@@ -1,10 +1,10 @@
 //! Encode an admitted connection and parameters into a prepared request.
 
 use super::{
-    BTreeSet, BodyType, ConnectionConfig, Duration, Engine, EngineError, ErrorDetail, HttpMethod,
-    JsonObject, PATH_SEGMENT_ENCODE_SET, ParameterLocation, PreparedBody, PreparedFile,
-    PreparedFileSource, PreparedRequest, QuerySerialization, QueryStyle, STANDARD, Url, Value,
-    apply_idempotency, insert_header, utf8_percent_encode, value_as_text,
+    BTreeSet, BodyType, ConnectionConfig, Engine, EngineError, ErrorDetail, HttpMethod, JsonObject,
+    PATH_SEGMENT_ENCODE_SET, ParameterLocation, PreparedBody, PreparedFile, PreparedFileSource,
+    PreparedRequest, QuerySerialization, QueryStyle, STANDARD, Url, Value, apply_idempotency,
+    insert_header, utf8_percent_encode, value_as_text,
 };
 use base64::Engine as _;
 impl Engine {
@@ -161,7 +161,7 @@ impl Engine {
             headers,
             auth: connection.auth.clone(),
             body,
-            timeout: Duration::from_millis(
+            timeout: crate::temporal::millis(
                 connection
                     .request
                     .timeout_ms

@@ -5,6 +5,10 @@
 //! non validi, 3 errore dell'harness.
 
 #![forbid(unsafe_code)]
+#![cfg_attr(
+    not(test),
+    deny(clippy::arithmetic_side_effects, clippy::disallowed_methods)
+)]
 
 use std::{
     path::{Path, PathBuf},

@@ -21,6 +21,7 @@
       "src/engine/validation.rs",
       "src/error.rs",
       "src/exact.rs",
+      "src/temporal.rs",
       "src/fuzzing.rs",
       "src/json_path.rs",
       "src/lib.rs",

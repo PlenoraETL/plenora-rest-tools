@@ -12,7 +12,8 @@
 //! - `ETag`: il validatore forte è il valore senza spazi ai bordi, tra
 //!   virgolette, mai debole.
 //! - `Cache-Control`: `no-store`, `no-cache` solo se scritti; `max-age` in
-//!   millisecondi interi di secondo.
+//!   millisecondi interi di secondo, oppure la sentinella u64::MAX.
+//! - selettore esatto 5: payload OAuth e scadenza checked.
 //! - `Set-Cookie`: il jar limitato memorizza esattamente ciò che memorizza
 //!   dopo aver tolto a mano gli header oltre il limite (oracolo del limite).
 //!   Il secondo byte fissa una lunghezza minima a cui gli header vengono
@@ -94,7 +95,7 @@ fn cache_control(value: &str) {
     assert!(!no_cache || lower.contains("no-cache"));
     if let Some(ms) = max_age {
         assert!(lower.contains("max-age"));
-        assert_eq!(ms % 1_000, 0);
+        assert!(ms == u64::MAX || ms % 1_000 == 0);
     }
 }
 
@@ -133,6 +134,14 @@ fuzz_target!(|dati: &[u8]| {
     let [selettore, parametro, resto @ ..] = dati else {
         return;
     };
+    if *selettore == 5 {
+        if let Ok(value) = std::str::from_utf8(resto) {
+            if let Err(error) = fuzzing::token_expiration(value) {
+                esiti::controlla_errore(&error);
+            }
+        }
+        return;
+    }
     if selettore % 5 == 4 {
         set_cookie(usize::from(*parametro) * 64, resto);
         return;

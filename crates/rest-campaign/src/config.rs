@@ -171,6 +171,36 @@ impl Profiles {
 
 impl PhaseProfile {
     pub fn validate(&self) -> Result<(), CampaignError> {
+        use plenora_rest_core::temporal::{MAX_TIMER_MS, positive_seconds, timer_millis};
+        if [
+            self.duration_s,
+            self.sample_interval_s,
+            self.idle_settle_s,
+            self.drain_timeout_s,
+            self.op_watchdog_s,
+        ]
+        .iter()
+        .any(|value| *value > MAX_TIMER_MS / 1_000)
+            || [
+                self.sizes.slow_ms_min,
+                self.sizes.slow_ms_max,
+                self.sizes.stall_timeout_ms,
+                self.sizes.deadline_ms,
+                self.sizes.cancel_after_ms,
+                self.engine.connect_timeout_ms,
+                self.engine.request_timeout_ms,
+                self.engine.pool_idle_timeout_ms,
+            ]
+            .iter()
+            .any(|value| timer_millis(*value).is_none())
+            || positive_seconds(1.0 / self.ops_per_second).is_none()
+            || self
+                .drain_timeout_s
+                .checked_add(self.op_watchdog_s)
+                .is_none_or(|value| value > MAX_TIMER_MS / 1_000)
+        {
+            return Err(CampaignError::new("profile timer is out of range"));
+        }
         if self.workers == 0 || self.sample_interval_s == 0 || self.op_watchdog_s == 0 {
             return Err(CampaignError::new(
                 "profilo: workers, sample_interval_s e op_watchdog_s devono essere positivi",
@@ -397,5 +427,76 @@ mod duplicate_tests {
             result.unwrap_err().to_string(),
             "control document contains duplicate JSON members"
         );
+    }
+}
+
+#[cfg(test)]
+mod temporal_tests {
+    use super::*;
+
+    #[test]
+    fn remote_time_campaign_profile_boundaries() {
+        let profiles: Profiles =
+            serde_json::from_str(include_str!("../../../campaign/profiles.json")).unwrap();
+        for field in [
+            "slow_ms_max",
+            "stall_timeout_ms",
+            "deadline_ms",
+            "cancel_after_ms",
+        ] {
+            for value in [
+                0,
+                1,
+                plenora_rest_core::temporal::MAX_TIMER_MS,
+                plenora_rest_core::temporal::MAX_TIMER_MS + 1,
+                u64::MAX,
+            ] {
+                let mut input = serde_json::to_value(&profiles.smoke).unwrap();
+                input["sizes"]["slow_ms_min"] = serde_json::json!(0);
+                input["sizes"][field] = serde_json::json!(value);
+                let profile: PhaseProfile = serde_json::from_value(input).unwrap();
+                assert_eq!(
+                    profile.validate().is_ok(),
+                    value <= plenora_rest_core::temporal::MAX_TIMER_MS,
+                    "{field}: {value}"
+                );
+            }
+        }
+        for field in [
+            "duration_s",
+            "sample_interval_s",
+            "idle_settle_s",
+            "drain_timeout_s",
+            "op_watchdog_s",
+        ] {
+            for value in [
+                0,
+                1,
+                plenora_rest_core::temporal::MAX_TIMER_MS / 1_000,
+                u64::MAX,
+            ] {
+                let mut input = serde_json::to_value(&profiles.smoke).unwrap();
+                input[field] = serde_json::json!(value);
+                let profile: PhaseProfile = serde_json::from_value(input).unwrap();
+                let expected = value != u64::MAX
+                    && !(value == 0 && matches!(field, "sample_interval_s" | "op_watchdog_s"))
+                    && !(value == plenora_rest_core::temporal::MAX_TIMER_MS / 1_000
+                        && matches!(field, "drain_timeout_s" | "op_watchdog_s"));
+                assert_eq!(profile.validate().is_ok(), expected, "{field}: {value}");
+            }
+        }
+        for value in [
+            0.0,
+            -1.0,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::MIN_POSITIVE,
+            f64::MAX,
+        ] {
+            let mut profile = profiles.smoke.clone();
+            profile.ops_per_second = value;
+            assert!(profile.validate().is_err());
+        }
     }
 }

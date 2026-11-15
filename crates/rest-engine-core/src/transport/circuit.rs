@@ -1,7 +1,7 @@
 //! Circuit-breaker admission, probe leases and outcome recording.
 
 use super::{
-    CircuitBreakerPolicy, Duration, EngineError, ErrorDetail, Hash, Instant, MAX_PROBE_LEASE,
+    CircuitBreakerPolicy, EngineError, ErrorDetail, Hash, Instant, MAX_PROBE_LEASE,
     PreparedRequest, ResponseData, Transport, is_retryable_transport_error,
 };
 
@@ -94,7 +94,7 @@ impl Transport {
             group: policy.group.clone(),
         };
         let sequence = self.next_sequence();
-        let recovery = Duration::from_millis(policy.recovery_timeout_ms);
+        let recovery = crate::temporal::millis(policy.recovery_timeout_ms);
         // A probe whose future was cancelled never reaches `record_circuit`, so
         // the in-flight marker is a lease that expires instead of a sticky flag.
         //
@@ -108,7 +108,7 @@ impl Transport {
         // probe next to a healthy one, too long would bring back the wedge it is
         // meant to prevent.
         let attempts = request.retry.max_attempts.max(1);
-        let per_attempt = request.timeout.saturating_add(Duration::from_millis(
+        let retry_budget = crate::temporal::millis(
             request
                 .retry
                 .max_backoff_ms
@@ -118,10 +118,14 @@ impl Transport {
                 } else {
                     0
                 }),
-        ));
-        let probe_lease = recovery
-            .max(per_attempt.saturating_mul(attempts))
-            .min(MAX_PROBE_LEASE);
+        );
+        let probe_lease = crate::temporal::probe_lease(
+            recovery,
+            request.timeout,
+            retry_budget,
+            attempts,
+            MAX_PROBE_LEASE,
+        );
         let mut circuits = self.circuits.lock().await;
         if !circuits.contains_key(&key) && circuits.len() >= self.config.max_circuit_origins {
             let oldest = circuits

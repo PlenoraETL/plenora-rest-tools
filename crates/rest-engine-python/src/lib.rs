@@ -4,6 +4,10 @@
 //! no hand-written `unsafe` is allowed here, as in the core crate.
 
 #![forbid(unsafe_code)]
+#![cfg_attr(
+    not(test),
+    deny(clippy::arithmetic_side_effects, clippy::disallowed_methods)
+)]
 
 use plenora_rest_core::{
     CancellationToken, CookieSession, Engine, EngineConfig, EngineError, capabilities,

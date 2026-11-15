@@ -12,6 +12,10 @@
 //! misurate» e i criteri relativi risultano non valutati, mai superati.
 
 #![forbid(unsafe_code)]
+#![cfg_attr(
+    not(test),
+    deny(clippy::arithmetic_side_effects, clippy::disallowed_methods)
+)]
 
 pub mod config;
 pub mod driver;

@@ -1,10 +1,10 @@
 //! HTTP cache identity, storage and revalidation.
 
 use super::{
-    AuthConfig, BTreeMap, CACHE_CONTROL, CONTENT_LENGTH, Digest, Duration, ETAG, EngineError,
-    ErrorDetail, ErrorPhase, Fingerprint, Hash, HashMap, Hasher, HttpMethod, IF_MODIFIED_SINCE,
-    IF_NONE_MATCH, Instant, LAST_MODIFIED, PreparedBody, PreparedFileSource, PreparedRequest,
-    ResponseData, Sha256, Transport, Url, VARY, enter_phase,
+    AuthConfig, BTreeMap, CACHE_CONTROL, CONTENT_LENGTH, Digest, ETAG, EngineError, ErrorDetail,
+    ErrorPhase, Fingerprint, Hash, HashMap, Hasher, HttpMethod, IF_MODIFIED_SINCE, IF_NONE_MATCH,
+    Instant, LAST_MODIFIED, PreparedBody, PreparedFileSource, PreparedRequest, ResponseData,
+    Sha256, Transport, Url, VARY, enter_phase,
 };
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
@@ -97,7 +97,7 @@ impl Transport {
                 });
             let fresh = !cached.must_revalidate
                 && fresh_for_ms > 0
-                && cached.validated_at.elapsed() <= Duration::from_millis(fresh_for_ms);
+                && cached.validated_at.elapsed() <= crate::temporal::millis(fresh_for_ms);
             if fresh {
                 #[cfg(test)]
                 crate::injection::visit(crate::injection::Point::CacheHit);
@@ -363,10 +363,9 @@ pub(crate) fn cache_max_age_ms(headers: &BTreeMap<String, String>) -> Option<u64
             let (name, value) = directive.trim().split_once('=')?;
             name.trim()
                 .eq_ignore_ascii_case("max-age")
-                .then(|| value.trim().trim_matches('"').parse::<u64>().ok())
+                .then(|| crate::temporal::remote_seconds_ms(value.trim().trim_matches('"')))
                 .flatten()
         })
-        .and_then(|seconds| seconds.checked_mul(1_000))
 }
 
 fn header_has_directive(headers: &BTreeMap<String, String>, header: &str, directive: &str) -> bool {

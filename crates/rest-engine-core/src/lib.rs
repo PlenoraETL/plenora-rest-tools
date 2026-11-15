@@ -5,6 +5,10 @@
 //! types never cross this boundary.
 
 #![forbid(unsafe_code)]
+#![cfg_attr(
+    not(test),
+    deny(clippy::arithmetic_side_effects, clippy::disallowed_methods)
+)]
 #![deny(missing_docs)]
 
 mod capability;
@@ -19,6 +23,9 @@ mod exact;
 #[cfg(test)]
 #[path = "../tests/support/injection.rs"]
 mod injection;
+/// Internal time arithmetic shared with workspace adapters.
+#[doc(hidden)]
+pub mod temporal;
 // Surface for the detached fuzz crate only: behind a non-default feature,
 // hidden from the documentation, and outside the frozen v1 contract (its
 // items are not re-exported, so contracts/compatibility-v1.json does not see

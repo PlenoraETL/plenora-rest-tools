@@ -4,6 +4,14 @@ Le modifiche che cambiano il comportamento osservabile, l'API pubblica o la
 politica delle dipendenze. La versione dei manifest resta quella dell'ultima
 release finché una release non viene preparata.
 
+## Non rilasciato
+
+- Aritmetica temporale checked condivisa: TTL OAuth e ArcGIS estremi producono
+  errori tipizzati; timer fuori orizzonte rifiutati prima della rete.
+- Retry-After enorme impedisce il retry anche con limite configurato massimo;
+  le date HTTP arrotondano l'attesa per eccesso. Max-age della cache satura
+  esplicitamente. Guardia Clippy sui tipi temporali e corpus fuzz ampliato.
+
 ## 0.4.0 (2026-11-14)
 
 - Cambio incompatibile nella serie 0.x, deciso dal titolare: Python minimo

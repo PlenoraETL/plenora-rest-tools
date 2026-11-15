@@ -502,3 +502,15 @@ python .ci/plenora-dependencies/controlla_dipendenze.py --repo . --nome plenora-
 
 Le sole eccezioni ammesse sono quelle del manifesto comune; una nuova
 risoluzione non autorizza a modificare lo snapshot per far passare il gate.
+
+### Guardia dell'aritmetica temporale
+
+I crate di produzione negano `clippy::arithmetic_side_effects` fuori dai test.
+`clippy.toml` ammette i tipi numerici primitivi e la differenza tra date del
+calendario; non ammette somme di `Instant`, `SystemTime` o `Duration`.
+La verifica usa i tipi risolti da Clippy, anche per alias, macro e assegnazioni.
+Il test `python -m unittest discover -s scripts -p test_temporal_guard.py`
+compila operazioni proibite e operazioni checked di controllo; negli ambienti
+Python senza toolchain dichiara lo skip, mentre il gate Rust resta obbligatorio.
+Il modulo interno nascosto `temporal`, condiviso con la campagna, non appartiene
+alla superficie v1 congelata.

@@ -86,3 +86,53 @@ pub const MAX_SET_COOKIE_BYTES: usize = crate::transport::MAX_SET_COOKIE_BYTES;
 pub fn validate_runtime_reference(reference: &str) -> Result<(), EngineError> {
     crate::runtime::validate_reference(reference)
 }
+
+/// Exercise the same token expiration validation as remote OAuth responses.
+pub fn token_expiration(value: &str) -> Result<(), EngineError> {
+    let payload: serde_json::Value = serde_json::from_str(value).map_err(|_| {
+        EngineError::Authentication(crate::error::ErrorDetail::from(
+            "token expiration JSON is invalid",
+        ))
+    })?;
+    crate::transport::auth::token_deadline(
+        &payload,
+        false,
+        300,
+        std::time::Instant::now(),
+        SystemTime::UNIX_EPOCH,
+    )
+    .map(|_| ())
+}
+
+#[cfg(test)]
+mod temporal_tests {
+    use super::*;
+    #[test]
+    fn remote_time_fuzz_seeds_replay() {
+        let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fuzz/corpus/remote_headers");
+        for entry in std::fs::read_dir(directory).unwrap() {
+            let bytes = std::fs::read(entry.unwrap().path()).unwrap();
+            let [selector, _, rest @ ..] = bytes.as_slice() else {
+                panic!("invalid seed")
+            };
+            let text = std::str::from_utf8(rest).unwrap();
+            match selector {
+                5 => assert!(matches!(
+                    token_expiration(text),
+                    Err(EngineError::Authentication(_))
+                )),
+                0 => {
+                    let _ = parse_retry_after(text, SystemTime::UNIX_EPOCH);
+                }
+                3 => {
+                    let _ = cache_control(text);
+                }
+                4 => {
+                    let _ = stored_cookies(&[rest], "https://example.com/").unwrap();
+                }
+                _ => {}
+            }
+        }
+    }
+}

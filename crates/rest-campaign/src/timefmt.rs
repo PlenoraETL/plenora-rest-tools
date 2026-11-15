@@ -14,6 +14,9 @@ pub fn rfc3339(time: SystemTime) -> Option<String> {
     let days = seconds / 86_400;
     let rest = seconds % 86_400;
     let (year, month, day) = civil_from_days(days)?;
+    if year > 9999 {
+        return None;
+    }
     Some(format!(
         "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{millis:03}Z",
         rest / 3_600,
@@ -24,7 +27,10 @@ pub fn rfc3339(time: SystemTime) -> Option<String> {
 
 /// Deadline RFC 3339 a `offset` dall'istante corrente.
 pub fn deadline_after(offset: Duration) -> Option<String> {
-    rfc3339(SystemTime::now().checked_add(offset)?)
+    rfc3339(plenora_rest_core::temporal::system_after(
+        SystemTime::now(),
+        offset,
+    )?)
 }
 
 /// Giorni dall'epoca Unix in data civile gregoriana (algoritmo di Howard
@@ -59,5 +65,19 @@ mod tests {
         // 2026-10-05T23:59:59.999Z
         let recent = UNIX_EPOCH + Duration::from_millis(1_791_244_799_999);
         assert_eq!(rfc3339(recent).as_deref(), Some("2026-10-05T23:59:59.999Z"));
+    }
+}
+
+#[cfg(test)]
+mod temporal_tests {
+    use super::*;
+    #[test]
+    fn remote_time_calendar_horizon() {
+        let last = UNIX_EPOCH
+            .checked_add(Duration::from_secs(253_402_300_799))
+            .unwrap();
+        assert!(rfc3339(last).unwrap().starts_with("9999-12-31"));
+        assert!(rfc3339(last.checked_add(Duration::from_secs(1)).unwrap()).is_none());
+        assert!(deadline_after(Duration::MAX).is_none());
     }
 }
