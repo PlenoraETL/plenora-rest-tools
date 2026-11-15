@@ -10,6 +10,15 @@
       "src/control.rs",
       "src/control_json.rs",
       "src/engine.rs",
+      "src/engine/artifacts.rs",
+      "src/engine/credentials.rs",
+      "src/engine/mapping.rs",
+      "src/engine/pagination.rs",
+      "src/engine/polling.rs",
+      "src/engine/records.rs",
+      "src/engine/request.rs",
+      "src/engine/responses.rs",
+      "src/engine/validation.rs",
       "src/error.rs",
       "src/exact.rs",
       "src/fuzzing.rs",
@@ -19,7 +28,14 @@
       "src/response_body.rs",
       "src/runtime.rs",
       "src/tls.rs",
-      "src/transport.rs"
+      "src/transport.rs",
+      "src/transport/admission.rs",
+      "src/transport/artifacts.rs",
+      "src/transport/auth.rs",
+      "src/transport/cache.rs",
+      "src/transport/circuit.rs",
+      "src/transport/retry.rs",
+      "src/transport/sessions.rs"
     ],
     "vcs_files": [
       ".cargo_vcs_info.json"

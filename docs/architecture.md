@@ -38,6 +38,35 @@ Runtime -> envelope + risorse --> | Engine persistente    | -> servizio REST
 | contracts | schemi component-owned, binding e baseline compatibile |
 | scripts | verifica, validazione e release riproducibile |
 
+## Moduli interni del core
+
+`engine.rs` conserva la facciata pubblica, il controllo dell'esecuzione e la
+composizione del risultato. I moduli privati separano le responsabilita:
+
+| Modulo sotto `crates/rest-engine-core/src/` | Responsabilita |
+| --- | --- |
+| `engine/validation.rs` | ammissione della configurazione di esecuzione |
+| `engine/request.rs` | codifica di parametri, query e body in PreparedRequest |
+| `engine/credentials.rs` | header, idempotenza e scope revocabile delle credenziali |
+| `engine/responses.rs` | esecuzione JSON e metadati pubblici della risposta |
+| `engine/records.rs`, `engine/mapping.rs` | piano/executor per record e trasformazioni |
+| `engine/pagination.rs`, `engine/polling.rs` | continuazioni delle pagine e lifecycle dei job remoti |
+| `engine/artifacts.rs` | autorizzazione dei path, integrita delle sorgenti e risultati dei trasferimenti |
+| `transport.rs` | invio/lettura HTTP, conteggio dei tentativi e limiti di concorrenza/rate |
+| `transport/admission.rs` | validazione wire, URL, endpoint DNS e policy del client |
+| `transport/auth.rs`, `transport/sessions.rs` | acquisizione token e sessioni cookie limitate |
+| `transport/cache.rs`, `transport/circuit.rs`, `transport/retry.rs` | cache HTTP, circuit breaker e decisione retry |
+| `transport/artifacts.rs` | streaming, staging privato, scrittura, pubblicazione e cleanup |
+
+La validazione del contratto precede la preparazione della richiesta; il
+trasporto verifica l'endpoint e gli header effettivi anche per i follow-up.
+Sono controlli su rappresentazioni e momenti diversi. La classificazione degli
+header sensibili appartiene a credentials; la proiezione degli errori appartiene
+a error. Gli artefatti usano quest'ultima anche per gli errori I/O, senza copie.
+Il solo proprietario della deadline e della cancellazione resta control:
+comprende invio, retry, polling e trasferimenti. Il drop dello staging rimuove
+il file parziale quando l'esecuzione viene interrotta.
+
 ## Ownership
 
 L'host possiede:

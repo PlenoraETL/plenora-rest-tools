@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from frozen_rust import run_target, rust_passed
+from frozen_rust import run_target, rust_passed, rust_source_paths
 
 
 class RustReceiptTests(unittest.TestCase):
@@ -27,3 +27,16 @@ class RustReceiptTests(unittest.TestCase):
                 receipts = run_target("binary", {}, Path(directory))
             self.assertEqual(run.call_count, 4)
             self.assertEqual([item["status"] for item in receipts], ["current-fail", "current-timeout", "current-pass"])
+
+    def test_source_inventory_includes_nested_modules_but_not_tests(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            names = ("crates/core/src/engine.rs", "crates/core/src/engine/records.rs",
+                     "crates/core/tests/records.rs", "crates/adapter/src/lib.rs")
+            for name in names:
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("// fixture\n", encoding="utf-8")
+            self.assertEqual([path.relative_to(root).as_posix() for path in rust_source_paths(root)],
+                             ["crates/adapter/src/lib.rs", "crates/core/src/engine/records.rs",
+                              "crates/core/src/engine.rs"])

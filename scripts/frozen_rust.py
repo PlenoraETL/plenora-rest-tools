@@ -81,6 +81,11 @@ def rust_passed(code, log):
     return code == 0 and summaries == [("ok", "1", "0", "0")]
 
 
+def rust_source_paths(root=ROOT):
+    """Production sources include private modules nested below src/."""
+    return sorted((root / "crates").glob("*/src/**/*.rs"))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--record", action="store_true", help="explicitly replace observed baseline after successful execution")
@@ -145,7 +150,7 @@ def main():
                 raise ValueError("no observations captured")
             BASELINE.write_text(json.dumps({"version":"0.4.0", "source_commit":receipt["commit"],
                 "source_identity":"sha256-git-clean",
-                "source_files":{p.relative_to(ROOT).as_posix(): value for p, value in source_digests(sorted((ROOT / "crates").glob("*/src/*.rs"))).items()},
+                "source_files":{p.relative_to(ROOT).as_posix(): value for p, value in source_digests(rust_source_paths()).items()},
                 "normalization":["execution metrics.elapsed_ms at explicit core/CLI/SDK/runtime payload paths", "runtime response plenora.message.id", "remote fixture loopback origin (asserted before replacement)"],
                 "contract_checked_cases":sorted(key for key,value in cases.items() if key.startswith("control-artifacts-") and "rule" in value),
                 "artifact_observations":"Raw files/bytes/results are retained in target/frozen/control-artifacts/<os>; contract_checked_cases freeze invariants, not scheduler outcomes.",
