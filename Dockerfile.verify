@@ -67,4 +67,5 @@ RUN /opt/verify/bin/maturin build --release --locked --out /tmp/wheels
 RUN /opt/python314/bin/python3.14 -m venv /tmp/wheel-test \
     && /tmp/wheel-test/bin/pip install /tmp/wheels/*.whl \
     && cd /tmp \
-    && /tmp/wheel-test/bin/python -m unittest discover -s /workspace/python/tests -v
+    && /tmp/wheel-test/bin/python /workspace/scripts/cli_fixture.py --build -- \
+        /tmp/wheel-test/bin/python -m unittest discover -s /workspace/python/tests -v
