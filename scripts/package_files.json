@@ -20,7 +20,8 @@
       "src/response_body.rs",
       "src/runtime.rs",
       "src/tls.rs",
-      "src/transport.rs"
+      "src/transport.rs",
+      "src/transport/retry.rs"
     ],
     "vcs_files": [
       ".cargo_vcs_info.json"

@@ -1,3 +1,8 @@
+mod retry;
+use retry::{AttemptOutcome, RetryDecision, RetrySession, is_retryable_transport_error};
+#[cfg(test)]
+use retry::{backoff_for, retry_delay, retry_wait};
+
 use crate::error::{ExecutionEvent, FailureContext};
 use std::{
     collections::{BTreeMap, HashMap},
@@ -1301,25 +1306,23 @@ impl Transport {
         &self,
         request: &PreparedRequest,
     ) -> Result<ResponseData, EngineError> {
-        let max_attempts = request.retry.max_attempts.max(1);
-        let can_retry = request.method.is_idempotent() || request.retry.retry_non_idempotent;
+        let mut retries = RetrySession::new(&request.retry, &request.method)?;
         let mut network_requests = 0_u64;
         let mut rate_limit_wait_ms = 0_u64;
-        let mut backoff = backoff_for(&request.retry)?;
 
-        for attempt in 1..=max_attempts {
+        for attempt in retries.attempts() {
             match self.send_once(request, attempt > 1).await {
                 Ok(mut response) => {
                     network_requests = network_requests.saturating_add(response.network_requests);
                     rate_limit_wait_ms =
                         rate_limit_wait_ms.saturating_add(response.rate_limit_wait_ms);
-                    let retry_status = request.retry.retry_on_status.contains(&response.status);
-                    if can_retry
-                        && retry_status
-                        && attempt < max_attempts
-                        && let Some(delay) =
-                            retry_wait(&request.retry, &mut backoff, response.retry_after_ms)
-                    {
+                    if let RetryDecision::After(delay) = retries.decide(
+                        attempt,
+                        AttemptOutcome::Response {
+                            status: response.status,
+                            retry_after_ms: response.retry_after_ms,
+                        },
+                    ) {
                         sleep(delay).await;
                         continue;
                     }
@@ -1328,14 +1331,14 @@ impl Transport {
                     response.rate_limit_wait_ms = rate_limit_wait_ms;
                     return Ok(response);
                 }
-                Err(error)
-                    if can_retry
-                        && attempt < max_attempts
-                        && is_retryable_transport_error(&error) =>
-                {
-                    sleep(retry_delay(&request.retry, &mut backoff, None)).await;
+                Err(error) => {
+                    let RetryDecision::After(delay) =
+                        retries.decide(attempt, AttemptOutcome::Failed(&error))
+                    else {
+                        return Err(error);
+                    };
+                    sleep(delay).await;
                 }
-                Err(error) => return Err(error),
             }
         }
 
@@ -1399,13 +1402,11 @@ impl Transport {
         success_statuses: &[u16],
         state: &mut DownloadState,
     ) -> Result<DownloadData, EngineError> {
-        let max_attempts = request.retry.max_attempts.max(1);
-        let can_retry = request.method.is_idempotent() || request.retry.retry_non_idempotent;
+        let mut retries = RetrySession::new(&request.retry, &request.method)?;
         let mut network_requests = 0_u64;
         let mut rate_limit_wait_ms = 0_u64;
-        let mut backoff = backoff_for(&request.retry)?;
 
-        for attempt in 1..=max_attempts {
+        for attempt in retries.attempts() {
             let mut attempt_request = request.clone();
             let resume_etag = if target.resume && state.bytes_written > 0 {
                 state.etag.clone()
@@ -1423,25 +1424,27 @@ impl Transport {
             }
             let pending = match self.send_once_response(&attempt_request, attempt > 1).await {
                 Ok(pending) => pending,
-                Err(error)
-                    if can_retry
-                        && attempt < max_attempts
-                        && is_retryable_transport_error(&error) =>
-                {
-                    sleep(retry_delay(&request.retry, &mut backoff, None)).await;
+                Err(error) => {
+                    let RetryDecision::After(delay) =
+                        retries.decide(attempt, AttemptOutcome::Failed(&error))
+                    else {
+                        return Err(error);
+                    };
+                    sleep(delay).await;
                     continue;
                 }
-                Err(error) => return Err(error),
             };
             network_requests = network_requests.saturating_add(pending.network_requests);
             rate_limit_wait_ms = rate_limit_wait_ms.saturating_add(pending.rate_limit_wait_ms);
             let status = pending.response.status().as_u16();
             let retry_after_ms = response_retry_after(&pending.response);
-            if can_retry
-                && request.retry.retry_on_status.contains(&status)
-                && attempt < max_attempts
-                && let Some(delay) = retry_wait(&request.retry, &mut backoff, retry_after_ms)
-            {
+            if let RetryDecision::After(delay) = retries.decide(
+                attempt,
+                AttemptOutcome::Response {
+                    status,
+                    retry_after_ms,
+                },
+            ) {
                 sleep(delay).await;
                 continue;
             }
@@ -1456,20 +1459,20 @@ impl Transport {
                     response.rate_limit_wait_ms = rate_limit_wait_ms;
                     return Ok(response);
                 }
-                Err(error)
-                    if can_retry
-                        && attempt < max_attempts
-                        && is_retryable_transport_error(&error) =>
-                {
+                Err(error) => {
+                    let RetryDecision::After(delay) =
+                        retries.decide(attempt, AttemptOutcome::Failed(&error))
+                    else {
+                        return Err(error);
+                    };
                     if !(target.resume
                         && state.bytes_written > 0
                         && state.etag.as_deref().is_some())
                     {
                         reset_download_state(state).await?;
                     }
-                    sleep(retry_delay(&request.retry, &mut backoff, None)).await;
+                    sleep(delay).await;
                 }
-                Err(error) => return Err(error),
             }
         }
 
@@ -2905,59 +2908,6 @@ fn map_reqwest_error(error: reqwest::Error) -> EngineError {
     } else {
         EngineError::Transport(ErrorDetail::from("request failed"))
     }
-}
-
-fn is_retryable_transport_error(error: &EngineError) -> bool {
-    matches!(
-        error,
-        EngineError::Timeout | EngineError::Transport(_) | EngineError::DnsResolution(_)
-    )
-}
-
-/// Wait before retrying a response the server asked to retry later, or
-/// `None` when the retry must not happen.
-///
-/// A `Retry-After` longer than `max_retry_after_ms` is not shortened to fit:
-/// retrying before the time the server named would ignore its instruction and
-/// add load where it asked for less. The response is returned as it is, so
-/// the operation fails with its HTTP status instead of retrying early.
-fn retry_wait(
-    policy: &RetryPolicy,
-    backoff: &mut crate::exact::Backoff,
-    retry_after_ms: Option<u64>,
-) -> Option<Duration> {
-    match retry_after_ms {
-        Some(delay) if policy.respect_retry_after && delay > policy.max_retry_after_ms => None,
-        _ => Some(retry_delay(policy, backoff, retry_after_ms)),
-    }
-}
-
-/// The backoff of a retry loop. The factor is validated before any request,
-/// so a refusal here is an internal invariant failure.
-fn backoff_for(policy: &RetryPolicy) -> Result<crate::exact::Backoff, EngineError> {
-    crate::exact::Backoff::new(
-        policy.backoff_base_ms,
-        policy.backoff_factor,
-        policy.max_backoff_ms,
-    )
-    .ok_or_else(|| EngineError::Runtime(ErrorDetail::from("retry backoff factor is invalid")))
-}
-
-/// Wait before the next retry: the server's `Retry-After` when honoured,
-/// otherwise the next exact backoff delay. The backoff advances on every
-/// retry either way, so the n-th retry always uses the n-th delay.
-fn retry_delay(
-    policy: &RetryPolicy,
-    backoff: &mut crate::exact::Backoff,
-    retry_after_ms: Option<u64>,
-) -> Duration {
-    let backoff_ms = backoff.next_ms();
-    if policy.respect_retry_after
-        && let Some(delay) = retry_after_ms
-    {
-        return Duration::from_millis(delay.min(policy.max_retry_after_ms));
-    }
-    Duration::from_millis(backoff_ms)
 }
 
 pub(crate) fn parse_retry_after(value: &str, now: SystemTime) -> Option<u64> {
