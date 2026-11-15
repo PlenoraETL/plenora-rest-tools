@@ -1,4 +1,7 @@
-use std::time::{Duration, Instant};
+use std::{
+    future::{Future, pending},
+    time::{Duration, Instant},
+};
 
 use crate::error::ErrorDetail;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
@@ -75,19 +78,43 @@ impl ExecutionControl {
         Ok(self)
     }
 
-    pub(crate) fn with_optional_deadline(
-        mut self,
-        deadline: Option<&str>,
-    ) -> Result<Self, EngineError> {
-        self.deadline = deadline.map(parse_deadline).transpose()?;
-        Ok(self)
+    /// Admission deliberately checks only the deadline: cancellation is observed
+    /// after validation/resource resolution, when the execution is first polled.
+    /// Preserve this precedence for every Rust/JSON/runtime/SDK entry point.
+    pub(crate) fn check_admission(&self) -> Result<(), EngineError> {
+        if self
+            .deadline
+            .is_some_and(|deadline| deadline <= Instant::now())
+        {
+            Err(EngineError::DeadlineExpired)
+        } else {
+            Ok(())
+        }
     }
 
-    /// Whether the deadline, if any, has already passed.
-    pub(crate) fn deadline_expired(&self) -> bool {
-        self.deadline
-            .is_some_and(|deadline| deadline <= Instant::now())
+    /// One poll order for all executions: cancellation, elapsed deadline, work.
+    /// A missing deadline is a pending future, not a second execution path.
+    pub(crate) async fn run<F: Future>(&self, execution: F) -> ControlOutcome<F::Output> {
+        let deadline = self.deadline.map(tokio::time::Instant::from_std);
+        let elapsed = async {
+            match deadline {
+                Some(deadline) => tokio::time::sleep_until(deadline).await,
+                None => pending::<()>().await,
+            }
+        };
+        tokio::select! {
+            biased;
+            _ = self.cancellation.cancelled() => ControlOutcome::Cancelled,
+            _ = elapsed => ControlOutcome::Deadline,
+            result = execution => ControlOutcome::Finished(result),
+        }
     }
+}
+
+pub(crate) enum ControlOutcome<T> {
+    Finished(T),
+    Cancelled,
+    Deadline,
 }
 
 /// Whether `value` is an RFC 3339 timestamp in UTC.
@@ -145,4 +172,71 @@ fn parse_deadline(value: &str) -> Result<Instant, EngineError> {
     Instant::now()
         .checked_add(duration)
         .ok_or_else(|| EngineError::InvalidInput(ErrorDetail::from("deadline is out of range")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[tokio::test(start_paused = true)]
+    async fn admission_and_running_control_have_explicit_precedence() {
+        let token = CancellationToken::new();
+        token.cancel();
+        let control = ExecutionControl {
+            cancellation: token,
+            deadline: Some(Instant::now() - Duration::from_secs(1)),
+        };
+        assert!(matches!(
+            control.check_admission(),
+            Err(EngineError::DeadlineExpired)
+        ));
+        let polled = Cell::new(false);
+        let outcome = control
+            .run(async {
+                polled.set(true);
+            })
+            .await;
+        assert!(matches!(outcome, ControlOutcome::Cancelled));
+        assert!(
+            !polled.get(),
+            "cancellation must win even over ready work and deadline"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_same_race_handles_absent_and_elapsed_deadlines() {
+        let control = ExecutionControl::default();
+        assert!(matches!(
+            control.run(async { 7 }).await,
+            ControlOutcome::Finished(7)
+        ));
+        let control = ExecutionControl {
+            deadline: Some((tokio::time::Instant::now() + Duration::from_secs(10)).into_std()),
+            ..ExecutionControl::default()
+        };
+        assert!(matches!(
+            control.run(pending::<()>()).await,
+            ControlOutcome::Deadline
+        ));
+    }
+
+    #[tokio::test]
+    async fn cancellation_during_execution_drops_the_inflight_future() {
+        struct Dropped<'a>(&'a Cell<bool>);
+        impl Drop for Dropped<'_> {
+            fn drop(&mut self) {
+                self.0.set(true);
+            }
+        }
+        let dropped = Cell::new(false);
+        let control = ExecutionControl::default();
+        let work = async {
+            let _guard = Dropped(&dropped);
+            control.cancellation.cancel();
+            pending::<()>().await;
+        };
+        assert!(matches!(control.run(work).await, ControlOutcome::Cancelled));
+        assert!(dropped.get());
+    }
 }

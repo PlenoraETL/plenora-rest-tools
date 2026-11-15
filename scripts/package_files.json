@@ -10,6 +10,7 @@
       "src/control.rs",
       "src/control_json.rs",
       "src/engine.rs",
+      "src/engine/records.rs",
       "src/error.rs",
       "src/exact.rs",
       "src/fuzzing.rs",

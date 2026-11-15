@@ -9,7 +9,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::error::ErrorDetail;
+use crate::{control::ControlOutcome, error::ErrorDetail};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use futures_util::{StreamExt, stream};
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
@@ -115,13 +115,7 @@ struct PollCompletion {
     active_key: Option<String>,
 }
 
-struct EnrichmentOutcome {
-    index: usize,
-    record: JsonObject,
-    result: Result<Vec<JsonObject>, EngineError>,
-    metrics: ExecutionMetrics,
-    responses: Vec<HttpResponseMetadata>,
-}
+mod records;
 
 impl Engine {
     /// Creates an engine with the given configuration. Nothing is validated
@@ -195,41 +189,21 @@ impl Engine {
         // An expired deadline refuses the operation before anything runs:
         // nothing was sent, so the failure is in validation with no remote
         // effect, unlike a deadline that fires during the execution.
-        if control.deadline_expired() {
-            return failed_result(EngineError::DeadlineExpired);
+        if let Err(error) = control.check_admission() {
+            return failed_result(error);
         }
         let active_jobs = Arc::new(Mutex::new(BTreeMap::new()));
-        let deadline = control.deadline.map(tokio::time::Instant::from_std);
         let tally = Arc::new(ExecutionTally::default());
         let execution = EXECUTION_TALLY.scope(
             tally.clone(),
             ACTIVE_ASYNC_JOBS.scope(active_jobs.clone(), self.execute_inner(request)),
         );
-        enum Controlled<T> {
-            Finished(T),
-            Cancelled,
-            Deadline,
-        }
-        let outcome = match deadline {
-            Some(deadline) => {
-                tokio::select! {
-                    biased;
-                    _ = control.cancellation.cancelled() => Controlled::Cancelled,
-                    _ = tokio::time::sleep_until(deadline) => Controlled::Deadline,
-                    result = execution => Controlled::Finished(result),
-                }
-            }
-            None => {
-                tokio::select! {
-                    biased;
-                    _ = control.cancellation.cancelled() => Controlled::Cancelled,
-                    result = execution => Controlled::Finished(result),
-                }
-            }
-        };
+        // Keep the large operation future off the caller's stack when the
+        // shared control race polls it (notably the Windows CLI main thread).
+        let outcome = control.run(Box::pin(execution)).await;
         let mut result = match outcome {
-            Controlled::Finished(result) => result,
-            Controlled::Cancelled => {
+            ControlOutcome::Finished(result) => result,
+            ControlOutcome::Cancelled => {
                 // The remote cancellation is a request of this execution too.
                 EXECUTION_TALLY
                     .scope(
@@ -239,7 +213,7 @@ impl Engine {
                     .await;
                 failed_result_with_recoveries(EngineError::Cancelled, recoveries_from(&active_jobs))
             }
-            Controlled::Deadline => {
+            ControlOutcome::Deadline => {
                 // The remote cancellation is a request of this execution too.
                 EXECUTION_TALLY
                     .scope(
@@ -866,309 +840,7 @@ impl Engine {
         metrics: &mut ExecutionMetrics,
         responses: &mut Vec<HttpResponseMetadata>,
     ) -> Result<OperationResult, EngineError> {
-        if let Some(batch) = request
-            .connection
-            .batch
-            .as_ref()
-            .filter(|batch| batch.enabled)
-        {
-            return self.enrich_batch(request, batch, metrics, responses).await;
-        }
-        if request.options.enrichment_concurrency == 0 {
-            return Err(EngineError::InvalidInput(ErrorDetail::from(
-                "enrichment_concurrency must be greater than zero",
-            )));
-        }
-        if request.options.enrichment_concurrency > 1 && request.options.continue_on_error {
-            return self.enrich_concurrent(request, metrics, responses).await;
-        }
-        let mut output = Vec::with_capacity(request.input.records.len());
-        let mut errors = Vec::new();
-        let mut succeeded = 0;
-
-        for (index, record) in request.input.records.iter().enumerate() {
-            let scoped_options = scoped_execution_options(&request.options, index);
-            let mut source = request.input.params.clone();
-            source.extend(record.clone());
-            let result = match resolve_parameters(&request.connection, &source) {
-                Ok(parameters) => RECORD_SCOPE
-                    .scope(
-                        Arc::from([index]),
-                        self.request_json(
-                            &request.connection,
-                            &parameters,
-                            None,
-                            metrics,
-                            responses,
-                            &scoped_options,
-                        ),
-                    )
-                    .await
-                    .map(|(value, _, _, _)| value)
-                    .and_then(|value| {
-                        response_records(&request.connection, &value)
-                            .and_then(|values| map_records(values, &request.connection.response))
-                    }),
-                Err(error) => Err(error),
-            };
-
-            match result {
-                Ok(additions) => {
-                    if additions.is_empty() {
-                        output.push(record.clone());
-                        succeeded += 1;
-                    } else {
-                        for additions in additions {
-                            let mut enriched = record.clone();
-                            enriched.extend(additions);
-                            output.push(enriched);
-                            succeeded += 1;
-                        }
-                    }
-                }
-                Err(error) => {
-                    output.push(record.clone());
-                    errors.push(error.execution_error(Some(index)));
-                    if !request.options.continue_on_error {
-                        break;
-                    }
-                }
-            }
-        }
-
-        Ok(OperationResult {
-            output: ExecutionOutput::Records { records: output },
-            errors,
-            succeeded,
-        })
-    }
-
-    async fn enrich_concurrent(
-        &self,
-        request: &ExecutionRequest,
-        metrics: &mut ExecutionMetrics,
-        responses: &mut Vec<HttpResponseMetadata>,
-    ) -> Result<OperationResult, EngineError> {
-        let concurrency = request.options.enrichment_concurrency;
-        let outcomes = stream::iter(request.input.records.iter().cloned().enumerate().map(
-            |(index, record)| {
-                RECORD_SCOPE.scope(Arc::from([index]), async move {
-                    let mut local_metrics = ExecutionMetrics::default();
-                    let mut local_responses = Vec::new();
-                    let scoped_options = scoped_execution_options(&request.options, index);
-                    let mut source = request.input.params.clone();
-                    source.extend(record.clone());
-                    let result = match resolve_parameters(&request.connection, &source) {
-                        Ok(parameters) => self
-                            .request_json(
-                                &request.connection,
-                                &parameters,
-                                None,
-                                &mut local_metrics,
-                                &mut local_responses,
-                                &scoped_options,
-                            )
-                            .await
-                            .map(|(value, _, _, _)| value)
-                            .and_then(|value| {
-                                response_records(&request.connection, &value).and_then(|values| {
-                                    map_records(values, &request.connection.response)
-                                })
-                            }),
-                        Err(error) => Err(error),
-                    };
-                    EnrichmentOutcome {
-                        index,
-                        record,
-                        result,
-                        metrics: local_metrics,
-                        responses: local_responses,
-                    }
-                })
-            },
-        ))
-        .buffer_unordered(concurrency)
-        .collect::<Vec<_>>()
-        .await;
-
-        // Every record yields exactly one outcome at its own index. A missing,
-        // repeated or out-of-range outcome would silently drop or duplicate a
-        // record, so it fails the operation instead.
-        let mut ordered: Vec<Option<EnrichmentOutcome>> =
-            (0..request.input.records.len()).map(|_| None).collect();
-        for outcome in outcomes {
-            let slot = ordered.get_mut(outcome.index).ok_or_else(|| {
-                EngineError::Runtime(ErrorDetail::from(
-                    "enrichment outcome index is out of range",
-                ))
-            })?;
-            if slot.replace(outcome).is_some() {
-                return Err(EngineError::Runtime(ErrorDetail::from(
-                    "enrichment record produced more than one outcome",
-                )));
-            }
-        }
-        let ordered = ordered
-            .into_iter()
-            .collect::<Option<Vec<_>>>()
-            .ok_or_else(|| {
-                EngineError::Runtime(ErrorDetail::from("enrichment record produced no outcome"))
-            })?;
-
-        let mut output = Vec::with_capacity(request.input.records.len());
-        let mut errors = Vec::new();
-        let mut succeeded = 0_usize;
-        for outcome in ordered {
-            merge_execution_metrics(metrics, &outcome.metrics);
-            responses.extend(outcome.responses);
-            match outcome.result {
-                Ok(additions) if additions.is_empty() => {
-                    output.push(outcome.record);
-                    succeeded = succeeded.saturating_add(1);
-                }
-                Ok(additions) => {
-                    for additions in additions {
-                        let mut enriched = outcome.record.clone();
-                        enriched.extend(additions);
-                        output.push(enriched);
-                        succeeded = succeeded.saturating_add(1);
-                    }
-                }
-                Err(error) => {
-                    output.push(outcome.record);
-                    errors.push(error.execution_error(Some(outcome.index)));
-                }
-            }
-        }
-
-        Ok(OperationResult {
-            output: ExecutionOutput::Records { records: output },
-            errors,
-            succeeded,
-        })
-    }
-
-    async fn enrich_batch(
-        &self,
-        request: &ExecutionRequest,
-        batch: &BatchConfig,
-        metrics: &mut ExecutionMetrics,
-        responses: &mut Vec<HttpResponseMetadata>,
-    ) -> Result<OperationResult, EngineError> {
-        if batch.max_size == 0 {
-            return Err(EngineError::InvalidInput(ErrorDetail::from(
-                "batch max_size must be greater than zero",
-            )));
-        }
-        let mut connection = request.connection.clone();
-        connection.batch = None;
-        connection.pagination = None;
-        if let Some(url) = &batch.endpoint_override {
-            connection.url = url.clone();
-        }
-        if let Some(method) = &batch.method_override {
-            connection.method = method.clone();
-        }
-
-        let mut output = Vec::with_capacity(request.input.records.len());
-        let mut errors = Vec::new();
-        let mut succeeded = 0_usize;
-        for (chunk_index, records) in request.input.records.chunks(batch.max_size).enumerate() {
-            let scoped_options = scoped_execution_options(&request.options, chunk_index);
-            let base_index = chunk_index.saturating_mul(batch.max_size);
-            let mut parameters = Vec::new();
-            let mut valid = Vec::new();
-            let mut resolution_errors = Vec::new();
-            for (offset, record) in records.iter().enumerate() {
-                let mut source = request.input.params.clone();
-                source.extend(record.clone());
-                let resolved = resolve_parameters(&connection, &source).and_then(|value| {
-                    if batch.input_format == BatchInputFormat::FlatArray {
-                        flat_batch_item(&value)?;
-                    }
-                    Ok(value)
-                });
-                match resolved {
-                    Ok(value) => {
-                        parameters.push(value);
-                        valid.push(offset);
-                    }
-                    Err(error) => resolution_errors.push((offset, error)),
-                }
-            }
-
-            let batch_result = if parameters.is_empty() {
-                Ok(Vec::new())
-            } else {
-                let payload = batch_payload(batch, parameters);
-                let scope = valid
-                    .iter()
-                    .map(|offset| base_index + offset)
-                    .collect::<Arc<[usize]>>();
-                RECORD_SCOPE
-                    .scope(
-                        scope,
-                        self.request_json(
-                            &connection,
-                            &payload,
-                            None,
-                            metrics,
-                            responses,
-                            &scoped_options,
-                        ),
-                    )
-                    .await
-                    .and_then(|(value, _, _, _)| {
-                        batch_response(&value, batch, &connection.response)
-                    })
-            };
-            let mapped = match batch_result {
-                Ok(mapped) if mapped.len() == valid.len() => Some(mapped),
-                Ok(_) => {
-                    let error = EngineError::InvalidResponse(ErrorDetail::from(
-                        "batch returned a different number of results than input records",
-                    ));
-                    for offset in &valid {
-                        errors.push(error.execution_error(Some(base_index + offset)));
-                    }
-                    None
-                }
-                Err(error) => {
-                    for offset in &valid {
-                        errors.push(error.execution_error(Some(base_index + offset)));
-                    }
-                    None
-                }
-            };
-
-            let mut mapped = mapped.map(IntoIterator::into_iter);
-            for (offset, record) in records.iter().enumerate() {
-                if let Some((_, error)) = resolution_errors
-                    .iter()
-                    .find(|(error_offset, _)| *error_offset == offset)
-                {
-                    errors.push(error.execution_error(Some(base_index + offset)));
-                    output.push(record.clone());
-                    continue;
-                }
-                let Some(additions) = mapped.as_mut().and_then(Iterator::next) else {
-                    output.push(record.clone());
-                    continue;
-                };
-                let mut enriched = record.clone();
-                enriched.extend(additions);
-                output.push(enriched);
-                succeeded = succeeded.saturating_add(1);
-            }
-            if !request.options.continue_on_error && !errors.is_empty() {
-                break;
-            }
-        }
-        Ok(OperationResult {
-            output: ExecutionOutput::Records { records: output },
-            errors,
-            succeeded,
-        })
+        records::execute(self, request, metrics, responses).await
     }
 
     async fn paginated(

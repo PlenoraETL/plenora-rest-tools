@@ -6333,3 +6333,46 @@ async fn token_control_document_rejects_duplicate_members() {
         assert!(!result.to_string().contains("secret"));
     }
 }
+
+#[tokio::test]
+async fn record_plan_batch_failure_preserves_error_order_and_stops_after_the_chunk() {
+    for (status, body, code) in [
+        (400, "{}", "HTTP_STATUS"),
+        (200, r#"{"results":[{"remote":1}]}"#, "INVALID_RESPONSE"),
+    ] {
+        let (url, server, observed) = recorded_server(vec![(status, body, vec![])]).await;
+        let records = json!([{"other":0},{"id":1},{"id":2},{"id":3}]);
+        let result = execute(&local_engine(), json!({
+            "schema_version":1,"operation":"enrich",
+            "connection":{"url":url,"method":"POST", "request":{"body_type":"json"},
+                "parameters":[{"name":"id","mode":"mapped","source":"id","required":true,"location":"body"}],
+                "batch":{"enabled":true,"max_size":3,"input_key":"items","output_path":"results"}},
+            "input":{"records":records},
+            "options":{"continue_on_error":false,"enrichment_concurrency":4}
+        })).await;
+        server.await.unwrap();
+        assert_eq!(observed.lock().unwrap().len(), 1);
+        assert_eq!(result["status"], "failed");
+        assert_eq!(
+            result["output"]["records"],
+            json!([{"other":0},{"id":1},{"id":2}])
+        );
+        assert_eq!(result["metrics"]["input_records"], 4);
+        assert_eq!(result["metrics"]["output_records"], 0);
+        assert_eq!(result["metrics"]["requests"], 1);
+        let errors = result["errors"].as_array().unwrap();
+        assert_eq!(
+            errors
+                .iter()
+                .map(|error| (&error["input_index"], &error["code"]))
+                .collect::<Vec<_>>(),
+            vec![
+                (&json!(1), &json!(code)),
+                (&json!(2), &json!(code)),
+                (&json!(0), &json!("MISSING_PARAMETER"))
+            ]
+        );
+        assert_eq!(errors[2]["remote_effect"], "none");
+        assert_eq!(errors[0]["remote_effect"], "unknown");
+    }
+}

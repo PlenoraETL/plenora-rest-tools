@@ -157,8 +157,8 @@ where
             };
         // Checked before any resource is resolved: an expired deadline refuses
         // the message with nothing done, local or remote.
-        if control.deadline_expired() {
-            return error_message(&request, EngineError::DeadlineExpired.payload());
+        if let Err(error) = control.check_admission() {
+            return error_message(&request, error.payload());
         }
         if let Err(error) = resolve_runtime_inputs(&mut execution, operation, self.resources) {
             return error_message(&request, error.payload());
@@ -246,14 +246,10 @@ where
         validate_grammar(message)?;
         let (operation, output_contract) = validate_support(message)?;
         let metadata_deadline = message.metadata.get(DEADLINE_KEY);
-        if let Some(deadline) = metadata_deadline {
-            let control = ExecutionControl::default()
-                .with_deadline(deadline)
-                .map_err(|error| error.payload())?;
-            if control.deadline_expired() {
-                return Err(EngineError::DeadlineExpired.payload());
-            }
-        }
+        let control = ExecutionControl::new(cancellation)
+            .with_request_deadline(metadata_deadline.map(String::as_str))
+            .map_err(|error| error.payload())?;
+        control.check_admission().map_err(|error| error.payload())?;
         // A JSON value has no line or column, and serde's message can quote
         // the payload, so only the fact is kept.
         let mut execution = serde_json::from_value::<ExecutionRequest>(message.payload.clone())
@@ -283,9 +279,6 @@ where
         if execution.options.deadline.is_some() {
             return Err(deadline_in_payload());
         }
-        let control = ExecutionControl::new(cancellation)
-            .with_optional_deadline(metadata_deadline.map(String::as_str))
-            .map_err(|error| error.payload())?;
         if let Some(key) = message.metadata.get(IDEMPOTENCY_KEY) {
             execution.options.idempotency_key = Some(key.clone());
         }
