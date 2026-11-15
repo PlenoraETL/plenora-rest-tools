@@ -228,6 +228,9 @@ pub async fn run(plan: RunPlan) -> Result<Report, CampaignError> {
     let started = Instant::now();
     let profile = plan.profile.clone();
     profile.validate()?;
+    plenora_rest_core::temporal::timer_millis(plan.limits.cancellation_slack_ms)
+        .ok_or_else(|| CampaignError::new("timing tolerance is out of range"))?;
+    profile.validate()?;
 
     let run_dir = plan
         .work_dir
@@ -351,10 +354,12 @@ pub async fn run(plan: RunPlan) -> Result<Report, CampaignError> {
             }));
         }
         let mut chooser = SplitMix64::new(rng::derive(plan.seed, u64::MAX));
-        let period = Duration::from_secs_f64(1.0 / profile.ops_per_second);
+        let period = plenora_rest_core::temporal::positive_seconds(1.0 / profile.ops_per_second)
+            .ok_or_else(|| CampaignError::new("ticker period is out of range"))?;
         let mut ticker = tokio::time::interval(period);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let end = load_started + load_duration;
+        let end = plenora_rest_core::temporal::instant_after(load_started, load_duration)
+            .ok_or_else(|| CampaignError::new("load deadline is out of range"))?;
         loop {
             ticker.tick().await;
             if Instant::now() >= end {
@@ -377,7 +382,11 @@ pub async fn run(plan: RunPlan) -> Result<Report, CampaignError> {
             ticket += 1;
         }
         drop(sender);
-        let drain = Duration::from_secs(profile.drain_timeout_s) + watchdog;
+        let drain = plenora_rest_core::temporal::timer_sum(
+            Duration::from_secs(profile.drain_timeout_s),
+            watchdog,
+        )
+        .ok_or_else(|| CampaignError::new("drain budget is out of range"))?;
         let drained = tokio::time::timeout(drain, async {
             for task in &mut worker_tasks {
                 let _ = task.await;

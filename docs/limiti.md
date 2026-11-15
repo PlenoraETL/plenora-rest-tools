@@ -199,3 +199,34 @@ non è una scadenza rigida e non annulla effetti remoti già completati. Per le
 operazioni senza token (sessioni, discovery, chiusura) attende la conclusione.
 `close` chiude l'ammissione; le altre operazioni già ammesse continuano. Un
 ingresso nel context manager cancellato chiude il motore appena costruito.
+
+## Aritmetica temporale e valori remoti
+
+Decisione di sicurezza per i contratti v1: il modulo interno `temporal`
+applica un orizzonte portabile di 315 537 897 599 000 ms ai timer attivi.
+Il valore non dipende dalla rappresentazione di `Instant` del sistema operativo.
+Una somma usa comunque `checked_add`; non si costruiscono timer mediante `+`.
+La superficie JSON e gli export v1 restano invariati. I valori prima capaci di
+causare panic, oppure sostituiti con un fallback pur essendo presenti e invalidi,
+sono rifiutati esplicitamente come indicato sotto.
+
+| Campo / origine | Semantica al limite e oltre |
+| --- | --- |
+| Engine `connect_timeout_ms`, `request_timeout_ms`, `pool_idle_timeout_ms`; richiesta `timeout_ms` | oltre l'orizzonte: `INVALID_INPUT` prima della rete; restano le regole su zero della tabella sopra |
+| Retry `backoff_base_ms`, `max_backoff_ms`; polling `interval_ms`, `max_interval_ms`, `max_wait_ms`, `cancel.timeout_ms` | oltre l'orizzonte: `INVALID_INPUT`; nessun accorciamento implicito |
+| OAuth `expires_in`, ArcGIS `expires` | assente: fallback del protocollo; presente ma non intero u64 (anche stringa decimale), negativo, nullo o fuori intervallo: `AUTHENTICATION_FAILED`; TTL oltre l'orizzonte: stesso errore, nessun token in cache |
+| TTL OAuth zero / ArcGIS scaduto | durata in cache zero; il margine di refresh sottrae tempo senza mai aggiungere un secondo alla durata remota |
+| `Retry-After` secondi | overflow decimale o della conversione in ms: sentinella `u64::MAX`, sempre senza retry, anche con `max_retry_after_ms = u64::MAX`; oltre l'orizzonte: senza retry; risposta HTTP originale |
+| `Retry-After` data HTTP | parser `httpdate` fissato; data passata: zero; millisecondi arrotondati per eccesso, mai retry prima della data; sintassi invalida: header ignorato secondo la politica esistente |
+| `Cache-Control: max-age` | conversione saturata a `u64::MAX` ms; resta applicato il minimo con la freschezza configurata; overflow non diventa assenza del vincolo |
+| Freschezza cache / recupero circuit breaker | confronto con tempo trascorso, senza costruire una scadenza: tutto il dominio u64 ms ammesso |
+| Lease del probe circuit breaker | somma e prodotto saturanti, poi limite di 15 minuti; stima per liberare un probe abbandonato, non attesa richiesta dal server |
+| Rate limiter | aritmetica esatta del rate invariata; overflow della prenotazione o coda oltre l'orizzonte: `RUNTIME_ERROR` statico, nessuna prenotazione anticipata |
+| Deadline RFC 3339 | calendario fino al 9999; data passata mantiene `DEADLINE_EXPIRED`; conversione non rappresentabile: `INVALID_INPUT` |
+| Cookie `Expires` / `Max-Age` | parser e aritmetica delle dipendenze fissate `cookie` / `cookie_store`: positivi limitati al 9999; zero/negativi scadono; attributi sintatticamente invalidi ignorati secondo il protocollo (il cookie puo restare di sessione); nessuna conversione `SystemTime -> OffsetDateTime` del valore remoto |
+| Campagna operativa | periodi float non finiti, negativi, zero o arrotondati a zero, durate e somme oltre l'orizzonte: `CampaignError` o violazione `HarnessError`; date del report oltre il 9999 rifiutate |
+
+Queste saturazioni sono deliberate: il retry rinuncia, la cache puo rivalidare
+prima, la lease limita risorse, e i cookie seguono il proprio protocollo. Nessuna
+saturazione autorizza un retry anticipato. Il binding Python inoltra i valori al
+core e non esegue aritmetica temporale indipendente.

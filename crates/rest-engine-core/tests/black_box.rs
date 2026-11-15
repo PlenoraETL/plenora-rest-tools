@@ -6376,3 +6376,36 @@ async fn record_plan_batch_failure_preserves_error_order_and_stops_after_the_chu
         assert_eq!(errors[0]["remote_effect"], "unknown");
     }
 }
+
+#[tokio::test]
+async fn remote_time_oauth_huge_expiration_is_typed_and_never_cached() {
+    for body in [
+        r#"{"access_token":"PRIVATE_TOKEN","expires_in":18446744073709551615}"#,
+        r#"{"access_token":"PRIVATE_TOKEN","expires_in":"18446744073709551616"}"#,
+        r#"{"access_token":"PRIVATE_TOKEN","expires_in":-1}"#,
+        r#"{"access_token":"PRIVATE_TOKEN","expires_in":"NaN"}"#,
+    ] {
+        let (base_url, server, observed) =
+            recorded_server(vec![(200, body, vec![]), (200, body, vec![])]).await;
+        let engine = local_engine();
+        let request = json!({"schema_version":1,"operation":"test","connection":{
+            "url":format!("{base_url}resource"),"auth":{"type":"oauth2_client_credentials",
+            "token_url":format!("{base_url}token"),"client_id":"client","client_secret":"PRIVATE_SECRET"}}});
+        for _ in 0..2 {
+            let result = execute(&engine, request.clone()).await;
+            assert_eq!(
+                result["errors"][0]["code"], "AUTHENTICATION_FAILED",
+                "{result}"
+            );
+            assert!(!result.to_string().contains("PRIVATE_"));
+        }
+        server.await.unwrap();
+        assert!(
+            observed
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|request| request.starts_with("POST /token "))
+        );
+    }
+}

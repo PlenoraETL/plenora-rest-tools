@@ -7,6 +7,10 @@
 //! qualcosa va in panic.
 
 #![forbid(unsafe_code)]
+#![cfg_attr(
+    not(test),
+    deny(clippy::arithmetic_side_effects, clippy::disallowed_methods)
+)]
 
 mod args;
 mod commands;

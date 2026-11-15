@@ -90,6 +90,12 @@ def remote_headers() -> dict[str, bytes]:
     # 3 Cache-Control, 4 Set-Cookie); secondo byte: lunghezza minima dei
     # Set-Cookie in multipli di 64 byte; poi il valore.
     return {
+        "oauth_expiration_enorme": b'\x05\x00{"expires_in":18446744073709551615}',
+        "oauth_expiration_oltre_u64": b'\x05\x00{"expires_in":"18446744073709551616"}',
+        "cache_max_age_enorme": b'\x03\x00max-age=18446744073709551616',
+        "cookie_max_age_enorme": b'\x04\x00id=1; Max-Age=18446744073709551616',
+        "cookie_expires_9999": b'\x04\x00id=1; Expires=Fri, 31 Dec 9999 23:59:59 GMT',
+        "retry_after_u64_max": b'\x00\x0018446744073709551615',
         "retry_after_secondi": b"\x00\x00120",
         "retry_after_enorme": b"\x00\x0099999999999999999999999",
         "retry_after_data": b"\x00\x00Wed, 21 Oct 2015 07:28:00 GMT",

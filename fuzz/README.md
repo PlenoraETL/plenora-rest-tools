@@ -112,3 +112,9 @@ sulle pull request che toccano `fuzz/**` (vedi `.github/workflows/fuzz.yml`).
 Un crash o un timeout rendono rosso il job; i reperti restano come artefatto
 della run. Un reperto riprodotto diventa un test di regressione nel
 workspace principale, accanto al parser che corregge.
+
+Il target `remote_headers` riserva il selettore esatto 5 alle risposte JSON
+OAuth: raggiunge lo stesso parser `expires_in` e lo stesso calcolo checked della
+scadenza usati dal trasporto. Gli altri selettori conservano la selezione modulo
+5. Il corpus include TTL OAuth, Retry-After e Max-Age oltre u64, e cookie con
+Expires al 9999. Il target non contatta un token endpoint.

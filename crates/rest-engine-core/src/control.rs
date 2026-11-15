@@ -169,8 +169,7 @@ fn parse_deadline(value: &str) -> Result<Instant, EngineError> {
     }
     let duration = Duration::try_from(remaining)
         .map_err(|_| EngineError::InvalidInput(ErrorDetail::from("deadline is out of range")))?;
-    Instant::now()
-        .checked_add(duration)
+    crate::temporal::instant_after(Instant::now(), duration)
         .ok_or_else(|| EngineError::InvalidInput(ErrorDetail::from("deadline is out of range")))
 }
 
@@ -178,6 +177,19 @@ fn parse_deadline(value: &str) -> Result<Instant, EngineError> {
 mod tests {
     use super::*;
     use std::cell::Cell;
+
+    #[test]
+    fn remote_time_deadline_calendar_boundaries() {
+        for value in ["1970-01-01T00:00:00Z", "9999-12-31T23:59:59Z"] {
+            assert!(parse_deadline(value).is_ok());
+        }
+        for value in ["10000-01-01T00:00:00Z", "NaN", "-1", "infinity"] {
+            assert!(matches!(
+                parse_deadline(value),
+                Err(EngineError::InvalidInput(_))
+            ));
+        }
+    }
 
     #[tokio::test(start_paused = true)]
     async fn admission_and_running_control_have_explicit_precedence() {

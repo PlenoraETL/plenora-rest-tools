@@ -834,7 +834,7 @@ proptest! {
         before in "[ \t]{0,2}",
         after in "[ \t]{0,2}",
     ) {
-        let now = UNIX_EPOCH + Duration::from_millis(1_700_000_000_250);
+        let now = UNIX_EPOCH + crate::temporal::millis(1_700_000_000_250);
         prop_assert_eq!(
             crate::transport::parse_retry_after(&format!("{before}{digits}{after}"), now),
             Some(reference_retry_seconds(&digits))
@@ -842,8 +842,8 @@ proptest! {
     }
 
     #[test]
-    fn retry_after_dates_wait_until_the_date(offset in -1_000_000_i64..1_000_000) {
-        let now = UNIX_EPOCH + Duration::from_millis(1_700_000_000_250);
+    fn retry_after_dates_wait_until_the_date(offset in -1_000_000_i64..1_000_000, nanos in 0_u32..1_000_000_000) {
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000) + Duration::from_nanos(u64::from(nanos));
         let whole = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
         let date = if offset < 0 {
             whole - Duration::from_secs(offset.unsigned_abs())
@@ -852,7 +852,7 @@ proptest! {
         };
         let expected = date
             .duration_since(now)
-            .map_or(0, |delay| u64::try_from(delay.as_millis()).unwrap());
+            .map_or(0, |delay| u64::try_from(delay.as_nanos().div_ceil(1_000_000)).unwrap());
         prop_assert_eq!(
             crate::transport::parse_retry_after(&httpdate::fmt_http_date(date), now),
             Some(expected)
@@ -1142,7 +1142,7 @@ proptest! {
         max in prop_oneof![Just(30_000_u64), 0_u64..=1_000_000, any::<u64>()],
         passi in 1_usize..=48,
     ) {
-        let mut backoff = crate::exact::Backoff::new(base, fattore.valore(), max).unwrap();
+        let mut backoff = crate::temporal::Backoff::new(base, fattore.valore(), max).unwrap();
         for n in 0..passi {
             let ideale = fattore.potenza(base, n, max);
             let ottenuto = backoff.next_ms();
@@ -1179,7 +1179,7 @@ proptest! {
             .map(|denominatore| {
                 Duration::from_nanos(u64::try_from(numeratore.div_ceil(denominatore)).unwrap())
             });
-        prop_assert_eq!(crate::exact::rate_interval(rate), atteso, "{:?}", fattore);
+        prop_assert_eq!(crate::temporal::rate_interval(rate), atteso, "{:?}", fattore);
     }
 }
 
@@ -1187,6 +1187,6 @@ proptest! {
 fn the_rate_oracle_rejects_the_documented_cases() {
     // 2^-35 al secondo: 10^9 · 2^35 ns, oltre u64::MAX ns (circa 584 anni)
     // anche se una Duration lo conterrebbe.
-    assert_eq!(crate::exact::rate_interval(2_f64.powi(-35)), None);
-    assert!(crate::exact::rate_interval(2_f64.powi(-34)).is_some());
+    assert_eq!(crate::temporal::rate_interval(2_f64.powi(-35)), None);
+    assert!(crate::temporal::rate_interval(2_f64.powi(-34)).is_some());
 }

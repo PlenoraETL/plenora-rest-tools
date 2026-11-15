@@ -2,8 +2,8 @@
 
 use super::{
     ApiKeyLocation, AuthConfig, BTreeMap, CONTENT_LENGTH, CONTENT_TYPE, Client, ClientKey,
-    Duration, EngineError, ErrorDetail, HeaderMap, HeaderName, HeaderValue, Host, HttpMethod,
-    IpAddr, Ipv4Addr, Ipv6Addr, Method, Policy, PooledClient, PreparedBody, PreparedRequest, Proxy,
+    EngineError, ErrorDetail, HeaderMap, HeaderName, HeaderValue, Host, HttpMethod, IpAddr,
+    Ipv4Addr, Ipv6Addr, Method, Policy, PooledClient, PreparedBody, PreparedRequest, Proxy,
     ProxyConfig, SocketAddr, TlsConfig, Transport, Url, fingerprint, lookup_host,
 };
 impl Transport {
@@ -98,8 +98,8 @@ impl Transport {
 
         let mut builder = Client::builder()
             .tls_backend_preconfigured(crate::tls::client_config(tls)?)
-            .connect_timeout(Duration::from_millis(self.config.connect_timeout_ms))
-            .pool_idle_timeout(Duration::from_millis(self.config.pool_idle_timeout_ms))
+            .connect_timeout(crate::temporal::millis(self.config.connect_timeout_ms))
+            .pool_idle_timeout(crate::temporal::millis(self.config.pool_idle_timeout_ms))
             .pool_max_idle_per_host(self.config.pool_max_idle_per_host)
             .redirect(Policy::none())
             .no_proxy()

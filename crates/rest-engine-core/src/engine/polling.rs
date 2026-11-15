@@ -289,7 +289,7 @@ impl Engine {
             )));
         }
         let poll_started = Instant::now();
-        let budget = polling.max_wait_ms.map(Duration::from_millis);
+        let budget = polling.max_wait_ms.map(crate::temporal::millis);
         // `max_wait_ms` is a hard bound: it caps the backoff sleep *and* the
         // request itself, so a slow poll cannot run past the configured limit.
         let remaining = |elapsed: Duration| budget.map(|budget| budget.saturating_sub(elapsed));
@@ -297,8 +297,8 @@ impl Engine {
         // The factor is validated (finite, at least one) before any request.
         // The first wait is interval_ms itself; the backoff then gives
         // min(max_interval_ms, interval_ms · interval_backoff^n), see
-        // crate::exact::Backoff.
-        let mut backoff = crate::exact::Backoff::new(
+        // crate::temporal::Backoff.
+        let mut backoff = crate::temporal::Backoff::new(
             polling.interval_ms,
             polling.interval_backoff,
             polling.max_interval_ms,
@@ -315,7 +315,7 @@ impl Engine {
             #[cfg(test)]
             crate::injection::visit(crate::injection::Point::Polling);
             if interval_ms > 0 {
-                let delay = Duration::from_millis(interval_ms);
+                let delay = crate::temporal::millis(interval_ms);
                 let delay = remaining(poll_started.elapsed()).map_or(delay, |left| delay.min(left));
                 sleep(delay).await;
             }
@@ -474,7 +474,7 @@ impl Engine {
             headers: connection.headers.clone(),
             auth: connection.auth.clone(),
             body: PreparedBody::None,
-            timeout: Duration::from_millis(timeout_ms),
+            timeout: crate::temporal::millis(timeout_ms),
             allow_redirects: connection.request.allow_redirects,
             max_redirects: connection.request.max_redirects,
             retry: connection.retry.clone(),
@@ -550,7 +550,7 @@ impl Engine {
             headers: connection.headers.clone(),
             auth: connection.auth.clone(),
             body: PreparedBody::None,
-            timeout: Duration::from_millis(
+            timeout: crate::temporal::millis(
                 connection
                     .request
                     .timeout_ms

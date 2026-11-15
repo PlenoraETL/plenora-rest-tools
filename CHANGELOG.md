@@ -15,6 +15,11 @@ release finché una release non viene preparata.
   non applicabilità dei nuovi contratti Arrow/geometria e scambio file a REST.
   La deviazione RT-024 resta aperta. Versioni e digest di release restano quelli
   registrati fino alla preparazione e qualifica della prossima release.
+- Aritmetica temporale checked condivisa: TTL OAuth e ArcGIS estremi producono
+  errori tipizzati; timer fuori orizzonte rifiutati prima della rete.
+- Retry-After enorme impedisce il retry anche con limite configurato massimo;
+  le date HTTP arrotondano l'attesa per eccesso. Max-age della cache satura
+  esplicitamente. Guardia Clippy sui tipi temporali e corpus fuzz ampliato.
 
 ## 0.4.0 (2026-11-14)
 

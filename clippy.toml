@@ -1,0 +1,8 @@
+# Keep compiler type checking for temporal arithmetic; primitive arithmetic is
+# governed by the engine's existing numeric checks and exact-arithmetic tests.
+arithmetic-side-effects-allowed = ["u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128", "isize", "f32", "f64"]
+arithmetic-side-effects-allowed-binary = [["time::OffsetDateTime", "time::OffsetDateTime"]]
+disallowed-methods = [
+    { path = "std::time::Duration::from_secs_f64", reason = "Use temporal::positive_seconds or checked conversion" },
+    { path = "std::time::Duration::from_secs_f32", reason = "Use checked duration conversion" },
+]

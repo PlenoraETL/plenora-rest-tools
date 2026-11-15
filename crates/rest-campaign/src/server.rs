@@ -384,8 +384,18 @@ async fn route(
             .await
         }
         "slow" => {
-            let delay = number(segments.get(2)).unwrap_or(0);
-            tokio::time::sleep(Duration::from_millis(delay)).await;
+            let Some(delay) =
+                number(segments.get(2)).and_then(plenora_rest_core::temporal::timer_millis)
+            else {
+                return respond(
+                    connection,
+                    in_flight,
+                    request,
+                    Response::json(400, &json!({"error":"timer is out of range"})),
+                )
+                .await;
+            };
+            tokio::time::sleep(delay).await;
             respond(
                 connection,
                 in_flight,
@@ -713,6 +723,40 @@ async fn download(
 mod tests {
     use super::{content_chunk, content_sha256, key_seed};
     use sha2::{Digest, Sha256};
+
+    #[tokio::test]
+    async fn remote_time_server_rejects_out_of_horizon_delays() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let server = super::TestServer::start(String::new(), std::time::Duration::from_secs(1))
+            .await
+            .unwrap();
+        for (value, status) in [
+            ("0", "200"),
+            ("315537897599001", "400"),
+            ("18446744073709551615", "400"),
+            ("18446744073709551616", "400"),
+            ("-1", "400"),
+            ("NaN", "400"),
+        ] {
+            let mut stream = tokio::net::TcpStream::connect(server.address)
+                .await
+                .unwrap();
+            stream.write_all(format!("GET /slow/time/{value} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+            let mut response = String::new();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                stream.read_to_string(&mut response),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert!(
+                response.starts_with(&format!("HTTP/1.1 {status}")),
+                "{response}"
+            );
+        }
+        server.shutdown();
+    }
 
     #[test]
     fn content_is_deterministic_and_hash_matches_chunks() {

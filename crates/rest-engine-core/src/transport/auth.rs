@@ -2,10 +2,10 @@
 
 type TokenRequestParts = (String, BTreeMap<String, String>, AuthConfig, bool, u64);
 use super::{
-    AuthConfig, BTreeMap, CachePolicy, CachedToken, CircuitBreakerPolicy, CookiePolicy, Duration,
+    AuthConfig, BTreeMap, CachePolicy, CachedToken, CircuitBreakerPolicy, CookiePolicy,
     EngineError, ErrorDetail, ErrorPhase, HttpMethod, Instant, MAX_CACHED_TOKENS, OAuthClientAuth,
-    PreparedBody, PreparedRequest, RequestStats, RetryPolicy, SystemTime, TokenKey, Transport,
-    UNIX_EPOCH, Url, Value, enter_phase, fingerprint, number_as_u64,
+    PreparedBody, PreparedRequest, RequestStats, RetryPolicy, SystemTime, TokenKey, Transport, Url,
+    Value, enter_phase, fingerprint, number_as_u64,
 };
 impl Transport {
     pub(super) async fn resolve_auth(
@@ -75,7 +75,7 @@ impl Transport {
             headers: BTreeMap::new(),
             auth: request_auth,
             body: PreparedBody::Form(form.into_iter().collect()),
-            timeout: Duration::from_millis(self.config.request_timeout_ms),
+            timeout: crate::temporal::millis(self.config.request_timeout_ms),
             allow_redirects: false,
             max_redirects: 0,
             retry: RetryPolicy {
@@ -136,26 +136,13 @@ impl Transport {
                 "only bearer OAuth tokens are supported",
             )));
         }
-        let expires_in = if is_arcgis {
-            payload
-                .get("expires")
-                .and_then(number_as_u64)
-                .and_then(|expires_ms| {
-                    let now_ms = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .ok()?
-                        .as_millis() as u64;
-                    expires_ms.checked_sub(now_ms).map(|value| value / 1_000)
-                })
-                .unwrap_or(fallback_ttl)
-        } else {
-            payload
-                .get("expires_in")
-                .and_then(number_as_u64)
-                .unwrap_or(fallback_ttl)
-        };
-        let refresh_margin = (expires_in / 10).clamp(1, 30);
-        let ttl = expires_in.saturating_sub(refresh_margin).max(1);
+        let expires_at = token_deadline(
+            &payload,
+            is_arcgis,
+            fallback_ttl,
+            Instant::now(),
+            SystemTime::now(),
+        )?;
         let sequence = self.next_sequence();
         {
             let mut tokens = self.tokens.lock().await;
@@ -175,7 +162,7 @@ impl Transport {
                 key,
                 CachedToken {
                     token: token.clone(),
-                    expires_at: now + Duration::from_secs(ttl),
+                    expires_at,
                     sequence,
                 },
             );
@@ -289,5 +276,79 @@ fn token_request_parts(auth: &AuthConfig) -> Result<TokenRequestParts, EngineErr
         _ => Err(EngineError::Runtime(ErrorDetail::from(
             "token requested for non-token authentication",
         ))),
+    }
+}
+
+pub(crate) fn token_deadline(
+    payload: &Value,
+    arcgis: bool,
+    fallback: u64,
+    now: Instant,
+    wall: SystemTime,
+) -> Result<Instant, EngineError> {
+    let seconds = token_seconds(payload, arcgis, fallback, wall)?;
+    crate::temporal::token_expiry(now, seconds).ok_or_else(token_time_error)
+}
+
+fn token_time_error() -> EngineError {
+    EngineError::Authentication(ErrorDetail::from(
+        "token expiration is invalid or out of range",
+    ))
+}
+
+pub(crate) fn token_seconds(
+    payload: &Value,
+    arcgis: bool,
+    fallback: u64,
+    now: SystemTime,
+) -> Result<u64, EngineError> {
+    let field = if arcgis { "expires" } else { "expires_in" };
+    let Some(value) = payload.get(field) else {
+        return Ok(fallback);
+    };
+    let value = number_as_u64(value).ok_or_else(token_time_error)?;
+    if arcgis {
+        crate::temporal::epoch_ttl(now, value).ok_or_else(token_time_error)
+    } else {
+        Ok(value)
+    }
+}
+
+#[cfg(test)]
+mod time_tests {
+    use super::*;
+    use std::time::UNIX_EPOCH;
+    #[test]
+    fn remote_token_expiration_boundaries() {
+        for arcgis in [false, true] {
+            let key = if arcgis { "expires" } else { "expires_in" };
+            for value in [
+                serde_json::json!(-1),
+                serde_json::json!(1.5),
+                serde_json::json!("NaN"),
+                serde_json::json!("inf"),
+                serde_json::json!("18446744073709551616"),
+                Value::Null,
+            ] {
+                assert!(matches!(
+                    token_seconds(&serde_json::json!({key: value}), arcgis, 300, UNIX_EPOCH),
+                    Err(EngineError::Authentication(_))
+                ));
+            }
+            for value in [0, 1, u64::MAX] {
+                let seconds =
+                    token_seconds(&serde_json::json!({key: value}), arcgis, 300, UNIX_EPOCH)
+                        .unwrap();
+                assert_eq!(seconds, if arcgis { value / 1_000 } else { value });
+                assert_eq!(
+                    crate::temporal::token_expiry(Instant::now(), seconds).is_some(),
+                    value != u64::MAX
+                );
+            }
+            assert_eq!(
+                token_seconds(&serde_json::json!({}), arcgis, 300, UNIX_EPOCH).unwrap(),
+                300
+            );
+        }
     }
 }

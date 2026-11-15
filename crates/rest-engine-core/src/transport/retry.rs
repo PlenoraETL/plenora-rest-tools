@@ -23,7 +23,7 @@ pub(super) enum RetryDecision {
 pub(super) struct RetrySession<'a> {
     policy: &'a RetryPolicy,
     permitted: bool,
-    backoff: crate::exact::Backoff,
+    backoff: crate::temporal::Backoff,
 }
 
 impl<'a> RetrySession<'a> {
@@ -76,19 +76,26 @@ pub(super) fn is_retryable_transport_error(error: &EngineError) -> bool {
 /// the operation fails with its HTTP status instead of retrying early.
 pub(super) fn retry_wait(
     policy: &RetryPolicy,
-    backoff: &mut crate::exact::Backoff,
+    backoff: &mut crate::temporal::Backoff,
     retry_after_ms: Option<u64>,
 ) -> Option<Duration> {
     match retry_after_ms {
-        Some(delay) if policy.respect_retry_after && delay > policy.max_retry_after_ms => None,
+        Some(delay)
+            if policy.respect_retry_after
+                && (delay > policy.max_retry_after_ms
+                    || delay == u64::MAX
+                    || crate::temporal::timer_millis(delay).is_none()) =>
+        {
+            None
+        }
         _ => Some(retry_delay(policy, backoff, retry_after_ms)),
     }
 }
 
 /// The backoff of a retry loop. The factor is validated before any request,
 /// so a refusal here is an internal invariant failure.
-pub(super) fn backoff_for(policy: &RetryPolicy) -> Result<crate::exact::Backoff, EngineError> {
-    crate::exact::Backoff::new(
+pub(super) fn backoff_for(policy: &RetryPolicy) -> Result<crate::temporal::Backoff, EngineError> {
+    crate::temporal::Backoff::new(
         policy.backoff_base_ms,
         policy.backoff_factor,
         policy.max_backoff_ms,
@@ -101,16 +108,16 @@ pub(super) fn backoff_for(policy: &RetryPolicy) -> Result<crate::exact::Backoff,
 /// retry either way, so the n-th retry always uses the n-th delay.
 pub(super) fn retry_delay(
     policy: &RetryPolicy,
-    backoff: &mut crate::exact::Backoff,
+    backoff: &mut crate::temporal::Backoff,
     retry_after_ms: Option<u64>,
 ) -> Duration {
     let backoff_ms = backoff.next_ms();
     if policy.respect_retry_after
         && let Some(delay) = retry_after_ms
     {
-        return Duration::from_millis(delay.min(policy.max_retry_after_ms));
+        return crate::temporal::millis(delay.min(policy.max_retry_after_ms));
     }
-    Duration::from_millis(backoff_ms)
+    crate::temporal::millis(backoff_ms)
 }
 
 #[cfg(test)]
