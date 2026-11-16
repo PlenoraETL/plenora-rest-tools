@@ -7,9 +7,13 @@ import uuid
 import subprocess
 import tempfile
 import threading
+import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from plenora_rest import AsyncEngine, Engine, PlenoraError
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
+from frozen_compare import assert_observation
 
 
 def cases():
@@ -95,7 +99,7 @@ class FrozenPrivateTests(unittest.IsolatedAsyncioTestCase):
                                         json.dump(observed,stream,indent=2)
                                 if not os.environ.get("SEMPL_CAPTURE_DIR"):
                                     expected = json.loads((root / "tests/frozen/0.4.0/observed.json").read_text())
-                                    self.assertEqual(observed,expected["cases"][identity])
+                                    assert_observation(identity, observed, expected["cases"][identity])
         finally:
             server.shutdown()
             server.server_close()

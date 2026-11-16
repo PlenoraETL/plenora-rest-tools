@@ -10,6 +10,8 @@ import sys
 import tempfile
 import threading
 
+from frozen_compare import assert_observation
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -141,7 +143,7 @@ def main():
                 json.dump(value, stream, indent=2)
         if not os.environ.get("SEMPL_CAPTURE_DIR"):
             expected = json.loads((ROOT / "tests/frozen/0.4.0/observed.json").read_text(encoding="utf-8"))["cases"][f"cli-signals-{args.mode}"]
-            assert value == expected
+            assert_observation(f"cli-signals-{args.mode}", value, expected)
         print("CLI OS signals: current-pass")
     return 0
 

@@ -93,6 +93,17 @@ test.
 
 ## Fuzz e test di proprietà
 
+Gli oracoli osservati storici conservano versione e SHA dell'acquisizione.
+Il confronto comportamentale normalizza a `<workspace-version>` soltanto
+`document.component_version` dei casi `private-cli-*` e `cli-signals-*`, e
+`cli.component_version` dei casi `remote-surfaces-*`. Prima del confronto,
+la versione osservata deve coincidere con quella corrente del workspace:
+`CARGO_PKG_VERSION` ereditata da Cargo.toml in Rust; Cargo.toml, verificato
+anche contro release-metadata.json, nel helper Python `scripts/frozen_compare.py`.
+Gli altri campi, inclusi eventuali omonimi nei dati applicativi, restano
+integrali. Le copie normalizzate non modificano fixture, catture o ricevute;
+SHA e digest storici attestano l'acquisizione e non devono coincidere con HEAD.
+
 I parser dell'input remoto non fidato (corpo della risposta JSON, NDJSON,
 CSV, XML, testo e binario; percorsi JSON; header Link, Retry-After,
 Content-Range, ETag, Cache-Control, Set-Cookie) e dell'input di richiesta

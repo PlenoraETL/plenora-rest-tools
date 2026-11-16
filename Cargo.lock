@@ -930,7 +930,7 @@ checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 
 [[package]]
 name = "plenora-rest-campaign"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "plenora-rest-core",
  "serde",
@@ -941,7 +941,7 @@ dependencies = [
 
 [[package]]
 name = "plenora-rest-cli"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "plenora-rest-core",
  "serde_json",
@@ -951,7 +951,7 @@ dependencies = [
 
 [[package]]
 name = "plenora-rest-core"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "base64",
  "csv",
@@ -977,7 +977,7 @@ dependencies = [
 
 [[package]]
 name = "plenora-rest-python"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "plenora-rest-core",
  "pyo3",

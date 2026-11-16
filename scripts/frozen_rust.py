@@ -9,6 +9,7 @@ import sys
 import tempfile
 
 from frozen_proofs import ROOT
+from frozen_compare import assert_inventory
 from source_identity import source_digests
 
 TARGETS = [("plenora-rest-core", "--lib", None),
@@ -135,7 +136,9 @@ def main():
         cases = {p.stem: json.loads(p.read_text(encoding="utf-8")) for p in sorted(Path(capture).glob("*.json"))}
         if not args.record:
             expected = json.loads(BASELINE.read_text(encoding="utf-8"))["cases"]
-            if cases != expected:
+            try:
+                assert_inventory(cases, expected)
+            except (AssertionError, KeyError):
                 results.append({"id":"complete-snapshot-inventory","status":"current-fail",
                                 "missing":sorted(set(expected)-set(cases)),"extra":sorted(set(cases)-set(expected))})
                 passed = False

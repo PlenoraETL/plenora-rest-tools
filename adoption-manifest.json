@@ -10,7 +10,7 @@
     {
       "name": "plenora-rest-core",
       "surface": "rust",
-      "version": "0.4.0",
+      "version": "0.5.0",
       "digest": "sha256:2c613914ccb10537753be03c240fe92cbb615b06ede079bb46ca631c4e78e0da",
       "verification": [
         "powershell -File scripts/release.ps1",
@@ -21,7 +21,7 @@
     {
       "name": "plenora-rest",
       "surface": "python_sdk",
-      "version": "0.4.0",
+      "version": "0.5.0",
       "digest": "sha256:d28636cc6ab0a4e2062255eab3e7e5034554cd0d19f2091f07a2938999a03aae",
       "api_modes": [
         "sync",
@@ -35,7 +35,7 @@
     {
       "name": "plenora-rest-linux-x86_64",
       "surface": "cli",
-      "version": "0.4.0",
+      "version": "0.5.0",
       "digest": "sha256:7f9fba7cb8d1ba9d4f611aea64d2103da34d319d997f9c95352e374fc341c91f",
       "verification": [
         "powershell -File scripts/release.ps1",
@@ -45,7 +45,7 @@
     {
       "name": "plenora.rest-tools",
       "surface": "runtime",
-      "version": "0.4.0",
+      "version": "0.5.0",
       "digest": "sha256:2c613914ccb10537753be03c240fe92cbb615b06ede079bb46ca631c4e78e0da",
       "verification": [
         "powershell -File scripts/release.ps1",
