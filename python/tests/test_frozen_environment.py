@@ -20,6 +20,9 @@ class FrozenEnvironmentTests(unittest.TestCase):
             tests.mkdir(parents=True)
             shutil.copyfile(repository / "python/tests/test_frozen_private.py", tests / "test_frozen_private.py")
             shutil.copytree(repository / "tests/frozen", root / "tests/frozen")
+            # The private oracle test imports its comparison from scripts/.
+            (root / "scripts").mkdir()
+            shutil.copyfile(repository / "scripts/frozen_compare.py", root / "scripts/frozen_compare.py")
             outside = Path(directory) / "elsewhere"
             outside.mkdir()
             env = {key: value for key, value in os.environ.items()
