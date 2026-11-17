@@ -25,15 +25,23 @@ def line(value):
     result = a if a != '0' else f'0.{b}' if b != '0' else f'0.0.{c}'
     return result + ('-' + semver.split('-', 1)[1] if '-' in semver else '')
 
+def identita_pacchetto(nome, versione, source):
+    """Identita di policy; path:percorso e' la provenienza dei fork."""
+    return nome if source == 'path' or source.startswith('path:') else nome + '@' + versione
+
 def identity(p):
-    return p['name'], p['version'], p.get('source', 'path')
+    source = p.get('source', 'path')
+    package = identita_pacchetto(p['name'], p['version'], source)
+    return p['name'], package.partition('@')[2], source
 
 def label(p):
-    return p['name'] + '@' + p['version']
+    return identita_pacchetto(p['name'], p['version'], p.get('source', 'path'))
 
 def graph(packages):
     """Risoluzione Cargo.lock delle forme name, name version, name version (source)."""
     parents = defaultdict(list)
+    if len({identity(p) for p in packages}) != len(packages):
+        raise ValueError('identita pacchetto duplicata nel lock')
     for parent in packages:
         for dep in parent.get('dependencies', []):
             match = re.fullmatch(r'([^ ]+)(?: ([^ ]+))?(?: \((.+)\))?', dep)
@@ -71,7 +79,13 @@ def dependency_tables(doc):
 
 def fingerprint(f):
     keys = ('repo', 'file', 'rule', 'crate', 'version', 'source', 'parent', 'parent_source', 'detail')
-    return hashlib.sha256(json.dumps({k: f.get(k, '') for k in keys}, sort_keys=True).encode()).hexdigest()[:24]
+    canonical = {k: f.get(k, '') for k in keys}
+    package = identita_pacchetto(canonical['crate'], canonical['version'], canonical['source'])
+    canonical['version'] = package.partition('@')[2]
+    parent, sep, version = canonical['parent'].partition('@')
+    if sep:
+        canonical['parent'] = identita_pacchetto(parent, version, canonical['parent_source'])
+    return hashlib.sha256(json.dumps(canonical, sort_keys=True).encode()).hexdigest()[:24]
 
 def finding(repo, file, rule, p, **kwargs):
     f = dict(repo=repo, file=file, rule=rule, crate=p['name'],
@@ -108,24 +122,29 @@ def collect(policy, roots):
             parents = graph(packages)
             local_lines = defaultdict(set)
             for p in packages:
-                local_lines[p['name']].add(line(p['version']))
+                if '@' in label(p):
+                    local_lines[p['name']].add(line(p['version']))
             for p in packages:
-                name, ver, source = identity(p)
+                name, ver, source = p['name'], p['version'], p.get('source', 'path')
+                versioned = '@' in label(p)
                 iface = interfaces.get(name)
-                ref = references.get((name, line(ver)))
+                # Un path non ha linea semver, ma non puo' sostituire di nascosto
+                # una provenienza di registro deliberata per lo stesso nome.
+                ref = references.get((name, line(ver))) if versioned else next(
+                    (r for r in policy['references'] if r['crate'] == name), None)
                 def add(rule, **kw):
                     findings.append(finding(repo, file, rule, p, **kw))
-                if iface and (ver != iface['version'] or source != iface['source']):
+                if iface and (label(p) != identita_pacchetto(name, iface['version'], iface['source']) or source != iface['source']):
                     add('interface', detail='identita interfaccia diversa dalla baseline')
                 if ref:
-                    if ver != ref['version']:
+                    if versioned and label(p) != identita_pacchetto(name, ref['version'], ref['source']):
                         add('reference', detail='versione diversa dal riferimento della linea')
                     if source != ref['source']:
                         add('source', detail='source diversa dal riferimento')
-                    if ver == ref['version'] and source == ref['source'] and ref.get('checksum') and p.get('checksum') != ref['checksum']:
+                    if versioned and ver == ref['version'] and source == ref['source'] and ref.get('checksum') and p.get('checksum') != ref['checksum']:
                         add('checksum', detail='checksum lock diverso dalla baseline')
                 base_line = preferred.get(name)
-                if (base_line and line(ver) != base_line) or (not base_line and len(local_lines[name]) > 1):
+                if versioned and ((base_line and line(ver) != base_line) or (not base_line and len(local_lines[name]) > 1)):
                     for parent in parents.get(identity(p), [None]):
                         add('duplicate', parent=label(parent) if parent else '<root>',
                             parent_source=parent.get('source', 'path') if parent else 'path',
@@ -158,11 +177,11 @@ def collect(policy, roots):
                         allowed = [(root / f['source'].removeprefix('path:')).resolve()
                                    for f in policy.get('forks', []) if f['repo'] == repo and f['crate'] == name]
                         wrong_path = actual_path not in allowed
-                    if requirement != '=' + iface['version'] or source != iface['source'] or wrong_path:
+                    if (identita_pacchetto(name, requirement, source) != identita_pacchetto(name, '=' + iface['version'], iface['source']) or source != iface['source'] or wrong_path):
                         findings.append(finding(repo, file, 'manifest_interface',
                             dict(name=name, version=requirement, source=source),
                             detail=section + '|' + target))
-                elif requirement.startswith('='):
+                elif 'path' not in dep and requirement.startswith('='):
                     ver = requirement[1:]
                     ref = references.get((name, line(ver)))
                     desired = policy.get('direct_migrations', {}).get(repo, {}).get(name)
@@ -178,7 +197,7 @@ def collect(policy, roots):
         for file, doc in documents(root):
             if file.endswith('Cargo.lock'):
                 for p in doc.get('package', []):
-                    if p.get('source'):
+                    if '@' in label(p):
                         global_packages[p['name']].append((sample, file, p))
     for name, occurrences in global_packages.items():
         if name not in preferred and len({line(p['version']) for _, _, p in occurrences}) > 1:
