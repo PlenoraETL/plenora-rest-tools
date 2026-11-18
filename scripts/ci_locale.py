@@ -74,7 +74,6 @@ PRECONDITIONS = (
     (r"\bpwsh\b", "tool", "pwsh"),
     (r"\bcargo\b", "tool", "cargo"),
     (r"\bgit\b", "tool", "git"),
-    (r"scripts/compare_historical_readers\.py.*--old", "historical", "scripts/compare_historical_readers.py"),
 )
 
 
@@ -106,20 +105,6 @@ def preconditions(job, step, root, command, offline):
             return value
         if kind == "tool" and not shutil.which(value):
             return f"strumento di sistema assente: {value}"
-        if kind == "historical":
-            source = inside(root, value)
-            if not source.is_file():
-                return f"precondizione storica assente: {value}"
-            pin = re.search(r"BASELINE_REVISION\s*=\s*['\"]([^'\"]+)", source.read_text(encoding="utf-8"))
-            if not pin:
-                return "revisione storica non dichiarata"
-            try:
-                git(root, "rev-parse", "--verify", pin[1] + "^{commit}")
-            except (OSError, subprocess.SubprocessError):
-                return f"storia/tag git richiesti assenti: {pin[1]}"
-            for name in re.findall(r"--(?:old|new)\s+([^\s]+)", direct):
-                if not inside(root, name).is_file():
-                    return f"binario storico/corrente assente: {name}"
     if step.get("mapping") == "checkout" and not step["with"].get("path") and step["with"].get("fetch-depth") == "0":
         if git(root, "rev-parse", "--is-shallow-repository") == "true":
             return "storia git completa richiesta; clone shallow"
