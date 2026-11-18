@@ -1,0 +1,2 @@
+# Parser YAML dei workflow, stesso pin del runner ci_locale di IO.
+PyYAML==6.0.3

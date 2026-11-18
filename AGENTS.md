@@ -67,3 +67,7 @@ I comandi stanno in [`docs/development.md`](docs/development.md) e nei
 workflow sotto `.github/workflows/`: sono la fonte, e ricopiarli qui li farebbe
 divergere al primo cambiamento. Il gate completo è `scripts/verify.ps1` (lo
 stesso della CI Linux); il job Windows del workflow Verify è parte del gate.
+
+Il piano locale e le ricevute sono descritti in
+[`docs/development.md`](docs/development.md#ci-locale-derivata-dai-workflow);
+`scripts/ci_locale.py --piano` deriva i passi dai workflow senza eseguirli.
