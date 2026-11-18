@@ -516,3 +516,47 @@ compila operazioni proibite e operazioni checked di controllo; negli ambienti
 Python senza toolchain dichiara lo skip, mentre il gate Rust resta obbligatorio.
 Il modulo interno nascosto `temporal`, condiviso con la campagna, non appartiene
 alla superficie v1 congelata.
+
+## CI locale derivata dai workflow
+
+`python scripts/ci_locale.py --piano` stampa JSON senza eseguire i gate.
+Il runner legge tutti i workflow, espande matrici e chiamate locali e conserva
+filtri, needs, condizioni, shell, directory, ambiente, servizi e toolchain.
+Il profilo PR è il sovrainsieme delle PR: i filtri di percorso sono conservati,
+ma non simulano un evento GitHub. Nessun job viene omesso dal piano.
+
+```sh
+python -m pip install -r requirements-ci-locale.txt
+python scripts/ci_locale.py --piano --profilo pr
+python scripts/ci_locale.py --esegui --profilo pr
+```
+
+La struttura e l'interfaccia seguono il runner di data. `--job` seleziona un
+identificatore o una chiave; `--offline` vieta i download riconoscibili;
+`--servizi-live` abilita i comandi live senza predisporre servizi;
+`--timeout` limita i secondi di ogni passo. Qualifica e release sono solo
+piani (`--profilo qualifica` o `--profilo release`), mai pubblicazioni locali.
+Il runner impone `CARGO_BUILD_JOBS=4` e `CARGO_INCREMENTAL=0`.
+
+La mappa dichiarativa `ACTION_MAP` verifica checkout, Python e Rust già
+installati. Cache, trasferimenti di artefatti, attestazioni, action ignote,
+piattaforme diverse, needs non riprodotti e container non predisposti danno
+`NON ESEGUITO` con motivo. Docker verify e ABI3 restano nei workflow e in
+`scripts/verify.ps1`; non equivalgono ai job Windows, audit, coverage o campagne.
+Un passo assente o uno script mancante non può risultare verde.
+
+I checkout aggiuntivi mantengono repository/ref/path del workflow; il checkout
+dei contratti deve coincidere con `contracts/upstream/source.json` e
+`adoption-manifest.json`. Il ref risolto e lo SHA ottenuto sono verificati.
+`CI_LOCALE_SORGENTE_PLENORA_CONTRACTS` può indicare una sorgente locale;
+in offline è necessaria. Il clone separato può scrivere il proprio `.git`,
+mai quello del checkout principale. Nessun checkout aggiuntivo è richiesto
+dai workflow correnti. I comandi che mutano Git sono dichiarati non eseguibili.
+
+Ogni esecuzione conserva in `target/ci-locale/` ricevuta JSON, script e log:
+SHA iniziale/finale, stato dirty, digest delle fonti, comando completo,
+toolchain richiesta, ambiente, servizi, durata ed exit code. `PASS` richiede
+un processo realmente terminato con zero; uno skip esplicito resta
+`NON ESEGUITO`. Exit 1 indica FAIL, 2 incompletezza, 0 tutti i passi PASS.
+Le ricevute non attestano la CI Linux/Windows né l'equivalenza delle immagini
+hosted. I self-test del runner entrano nella discovery assurance già esistente.
