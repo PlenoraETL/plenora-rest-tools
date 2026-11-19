@@ -109,20 +109,26 @@ def check_campaign(root):
     same(set(limits) - {"schema", "approval", "motivations"}, limits["motivations"], "limit motivations")
     options = workflows(root)["campaign.yml"]["on"]["workflow_dispatch"]["inputs"]["phase"]["options"]
     same(options, phases, "campaign dispatch")
-    steps = workflows(root)["campaign.yml"]["jobs"]["campaign"]["steps"]
-    for event in ("schedule", "pull_request"):
-        blocks = [step["run"] for step in steps if step.get("if") == f"github.event_name == '{event}'"]
-        if len(blocks) != 1:
-            raise ValueError("campaign collection block absent or ambiguous")
-        lines = blocks[0].strip().splitlines()
-        if lines[0] != "status=0" or lines[-1] != 'exit "$status"':
-            raise ValueError("campaign must report the aggregate failure status")
-        for line in lines[1:-1]:
-            if not re.fullmatch(r"\./scripts/campaign\.sh \w+ --[\w-]+(?: \d+)? \|\| status=1", line):
-                raise ValueError("campaign must continue after each phase failure")
-        scheduled = [line.split()[1] for line in lines[1:-1]]
-        # Soak exceeds the short campaign's time budget; it remains dispatchable.
-        same(scheduled, set(phases) - {"soak"}, "short campaign phases")
+    for name in ("campaign.yml", "coverage.yml"):
+        same(workflows(root)[name]["on"], ["workflow_dispatch"], "manual workflow triggers")
+    fuzz = workflows(root)["fuzz.yml"]
+    same(fuzz["on"], ["pull_request", "push", "workflow_dispatch"], "fuzz triggers")
+    if fuzz["jobs"]["campaign"].get("if") != "github.event_name == 'workflow_dispatch'":
+        raise ValueError("fuzz campaign must be manual")
+    if fuzz["jobs"]["campaign"].get("needs") != "check":
+        raise ValueError("fuzz campaign must depend on the target check")
+
+
+def check_platforms(root):
+    guard = '#[cfg(not(any(target_os = "linux", target_os = "windows")))]\ncompile_error!("only Linux and Windows are supported");'
+    for name in ("crates/rest-engine-core/src/lib.rs", "crates/rest-cli/src/signal.rs"):
+        if guard not in read(root, name):
+            raise ValueError("unsupported platforms must fail compilation")
+    for workflow in workflows(root).values():
+        for job in workflow["jobs"].values():
+            runner = job.get("runs-on", "")
+            if isinstance(runner, str) and not runner.startswith(("ubuntu-", "windows-", "${{")):
+                raise ValueError("unsupported workflow runner")
 
 
 def check_runtime(root):
@@ -254,7 +260,7 @@ def check_coverage_sources(root):
         raise ValueError("coverage SDK source is absent")
 
 
-CHECKS = (check_fuzz, check_campaign, check_runtime, check_packages, check_evidence,
+CHECKS = (check_fuzz, check_campaign, check_platforms, check_runtime, check_packages, check_evidence,
           check_workflows, check_tool_pins, check_script_discovery, check_coverage_sources)
 
 

@@ -4,6 +4,11 @@ Le modifiche che cambiano il comportamento osservabile, l'API pubblica o la
 politica delle dipendenze. La versione dei manifest resta quella dell'ultima
 release finché una release non viene preparata.
 
+## Non rilasciato
+
+- Supporto limitato a Linux e Windows, con errore di compilazione altrove.
+- Copertura completa e campagne operative/fuzz solo su avvio manuale.
+
 ## 0.5.0 (2026-11-15)
 
 - Rimozioni incompatibili: eliminati il freeze storico delle superfici pubbliche,

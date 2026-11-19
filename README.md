@@ -202,7 +202,8 @@ risolve artifact_source e artifact_sink tramite risorse autorizzate dall'host.
 | Python | CPython 3.14, ABI3 py314, API sincrona e asincrona, wheel Linux e Windows |
 | Distribuzione | crate, wheel e binari CLI (Linux x86_64, Windows x86_64) allegati alla GitHub Release |
 
-macOS, ARM, musl e PyPy non fanno parte della matrice supportata attuale.
+Solo Linux e Windows sono supportati; le altre piattaforme sono rifiutate
+in compilazione. ARM, musl e PyPy non fanno parte della matrice supportata attuale.
 Le versioni CPython successive al minimo non sono ancora qualificate dai gate.
 
 La base funzionale e i gate di qualità sono consolidati. Il go-live richiede

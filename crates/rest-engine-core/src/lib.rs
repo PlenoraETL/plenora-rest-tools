@@ -11,6 +11,9 @@
 )]
 #![deny(missing_docs)]
 
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+compile_error!("only Linux and Windows are supported");
+
 mod capability;
 mod contract;
 mod control;

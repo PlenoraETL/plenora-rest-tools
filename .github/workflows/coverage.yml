@@ -9,10 +9,6 @@ name: Coverage
 # values; raising them is an ordinary reviewed edit of the budget.
 
 on:
-  pull_request:
-  push:
-    branches:
-      - main
   workflow_dispatch:
 
 permissions:

@@ -20,8 +20,8 @@ Per lavorare senza Docker sono utili:
 - CPython 3.14 o successivo;
 - Maturin compatibile con pyproject.toml.
 
-La CI usa Linux (gate Docker) e Windows (job nativo). macOS puÃ² essere un
-ambiente di sviluppo, ma non Ã¨ una piattaforma distribuita o supportata.
+Le piattaforme supportate sono Linux (gate Docker) e Windows (job nativo).
+Le altre piattaforme sono rifiutate in compilazione.
 
 ## Struttura del repository
 
@@ -130,8 +130,7 @@ che la configurazione di default rifiuta: nessuna connessione, nessun DNS.
 
 Il workflow Fuzz controlla formattazione e compilazione dei target e
 l'allineamento del corpus iniziale su ogni pull request e push a main; la
-campagna gira ogni lunedÃ¬ e a mano per 600 secondi a target, sulle pull
-request che toccano `fuzz/` per 60 secondi. Un crash o un timeout rendono rosso
+campagna gira solo su avvio manuale per 600 secondi a target di default. Un crash o un timeout rendono rosso
 il job e i reperti restano come artefatto. libFuzzer non gira su Windows MSVC:
 in locale le campagne si lanciano su Linux.
 
@@ -192,7 +191,7 @@ Profili, soglie, criteri e lavoro residuo sono descritti nella
 
 ## Copertura
 
-Il workflow Coverage misura, su ogni pull request e push a main, tre superfici
+Il workflow Coverage misura, solo su avvio manuale, tre superfici
 separate con cargo-llvm-cov 0.9.1 e coverage.py 7.16.1:
 
 - il core Rust (crates/rest-engine-core/src), con i test del workspace;

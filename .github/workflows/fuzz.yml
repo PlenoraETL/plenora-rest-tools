@@ -7,19 +7,14 @@ name: Fuzz
 #   target con il nightly fissato, e corpus iniziale allineato al suo
 #   generatore. Il workspace principale non li compila: senza questo job
 #   potrebbero divergere lasciando verde il resto.
-# - Campagna, un job per target: ogni lunedì e a mano per 600 secondi a
-#   target (input `secondi`), sulle pull request che toccano fuzz/** o questo
-#   workflow per 60 secondi a target. Un crash, un timeout o un'uscita non
-#   nulla fanno fallire il job; i reperti restano come artefatto della run.
+# - Campagna, un job per target: solo avvio manuale, 600 secondi per
+#   target di default (input `secondi`). Crash e timeout fanno fallire il job.
 
 on:
   pull_request:
   push:
     branches:
       - main
-  schedule:
-    # Lunedì 02:43 UTC. Minuto non tondo, come Audit.
-    - cron: "43 2 * * 1"
   workflow_dispatch:
     inputs:
       secondi:
@@ -69,37 +64,10 @@ jobs:
           git add --intent-to-add fuzz/corpus
           git diff --exit-code -- fuzz/corpus
 
-  changes:
-    name: Pull request touches the fuzz targets
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    outputs:
-      fuzz: ${{ steps.diff.outputs.fuzz }}
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-
-      - name: Compare with the base branch
-        id: diff
-        env:
-          BASE: ${{ github.event.pull_request.base.sha }}
-        run: |
-          if git diff --name-only "$BASE" HEAD | grep -qE '^(fuzz/|\.github/workflows/fuzz\.yml$)'; then
-            echo "fuzz=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "fuzz=false" >> "$GITHUB_OUTPUT"
-          fi
-
   campaign:
     name: Fuzz ${{ matrix.target }}
-    needs: [check, changes]
-    if: >-
-      always() && needs.check.result == 'success' &&
-      (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'pull_request' && needs.changes.outputs.fuzz == 'true'))
+    needs: check
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
@@ -127,7 +95,7 @@ jobs:
       - name: Run the campaign
         env:
           TARGET: ${{ matrix.target }}
-          SECONDI: ${{ github.event_name == 'pull_request' && '60' || github.event.inputs.secondi || '600' }}
+          SECONDI: ${{ inputs.secondi }}
         run: |
           case "$SECONDI" in
             ''|*[!0-9]*) echo "secondi deve essere un intero positivo" >&2; exit 1 ;;

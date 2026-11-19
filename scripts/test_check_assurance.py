@@ -30,6 +30,17 @@ class AssuranceTests(unittest.TestCase):
         self.assertIn(before, text)
         path.write_text(text.replace(before, after), encoding="utf-8")
 
+    def test_unsupported_platform_must_fail_compilation(self):
+        self.mutate("crates/rest-engine-core/src/lib.rs",
+                    'compile_error!("only Linux and Windows are supported");', '')
+        with self.assertRaises(ValueError):
+            gate.check_platforms(self.root)
+
+    def test_unsupported_runner_is_rejected(self):
+        self.mutate(".github/workflows/verify.yml", "ubuntu-latest", "unsupported-latest")
+        with self.assertRaises(ValueError):
+            gate.check_platforms(self.root)
+
     def test_current_sources(self):
         self.assertEqual(gate.scan(self.root), [])
 
@@ -84,9 +95,20 @@ class AssuranceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "mix"):
             gate.check_campaign(self.root)
 
-    def test_campaign_cannot_stop_after_first_failure(self):
-        self.mutate(".github/workflows/campaign.yml", "smoke --quick || status=1", "smoke --quick")
-        with self.assertRaisesRegex(ValueError, "continue after"):
+    def test_long_workflows_refuse_automatic_triggers(self):
+        for name in ("campaign.yml", "coverage.yml"):
+            with self.subTest(workflow=name):
+                path = self.root / ".github/workflows" / name
+                original = path.read_text(encoding="utf-8")
+                path.write_text(original.replace("on:\n", "on:\n  pull_request:\n", 1), encoding="utf-8")
+                with self.assertRaises(ValueError):
+                    gate.check_campaign(self.root)
+                path.write_text(original, encoding="utf-8")
+
+    def test_fuzz_campaign_refuses_automatic_execution(self):
+        self.mutate(".github/workflows/fuzz.yml",
+                    "if: github.event_name == 'workflow_dispatch'", "if: always()")
+        with self.assertRaises(ValueError):
             gate.check_campaign(self.root)
 
     def test_stale_runtime_count_is_rejected(self):

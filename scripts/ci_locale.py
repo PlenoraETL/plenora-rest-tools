@@ -173,7 +173,7 @@ def matrices(matrix):
 def runner_os(label):
     labels = label if isinstance(label, list) else [label]
     for value in labels:
-        for prefix, name in (("windows", "Windows"), ("ubuntu", "Linux"), ("macos", "macOS")):
+        for prefix, name in (("windows", "Windows"), ("ubuntu", "Linux")):
             if str(value).lower().startswith(prefix):
                 return name
     return "sconosciuta"
@@ -339,7 +339,7 @@ def flatten(items):
 
 
 def host_os():
-    return {"Darwin": "macOS"}.get(platform.system(), platform.system())
+    return platform.system()
 
 
 def classify(job, step, root, allow_services=False, offline=False):
