@@ -107,7 +107,7 @@ cargo +nightly-2026-07-21 fuzz run response_body \
 ```
 
 La CI controlla formattazione e compilazione dei target su ogni pull
-request e push a `main`, ed esegue la campagna solo su avvio manuale (vedi `.github/workflows/fuzz.yml`).
+request e push a `main`, ed esegue la campagna ogni settimana, sulle PR che toccano fuzz e su avvio manuale (vedi `.github/workflows/fuzz.yml`).
 Un crash o un timeout rendono rosso il job; i reperti restano come artefatto
 della run. Un reperto riprodotto diventa un test di regressione nel
 workspace principale, accanto al parser che corregge.

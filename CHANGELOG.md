@@ -7,7 +7,7 @@ release finché una release non viene preparata.
 ## Non rilasciato
 
 - Supporto limitato a Linux e Windows, con errore di compilazione altrove.
-- Copertura completa e campagne operative/fuzz solo su avvio manuale.
+- Copertura e campagne brevi automatiche; campagne operative lunghe su avvio manuale.
 
 ## 0.5.0 (2026-11-15)
 

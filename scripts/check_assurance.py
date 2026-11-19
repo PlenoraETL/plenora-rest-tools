@@ -109,14 +109,61 @@ def check_campaign(root):
     same(set(limits) - {"schema", "approval", "motivations"}, limits["motivations"], "limit motivations")
     options = workflows(root)["campaign.yml"]["on"]["workflow_dispatch"]["inputs"]["phase"]["options"]
     same(options, phases, "campaign dispatch")
-    for name in ("campaign.yml", "coverage.yml"):
-        same(workflows(root)[name]["on"], ["workflow_dispatch"], "manual workflow triggers")
-    fuzz = workflows(root)["fuzz.yml"]
-    same(fuzz["on"], ["pull_request", "push", "workflow_dispatch"], "fuzz triggers")
-    if fuzz["jobs"]["campaign"].get("if") != "github.event_name == 'workflow_dispatch'":
-        raise ValueError("fuzz campaign must be manual")
-    if fuzz["jobs"]["campaign"].get("needs") != "check":
-        raise ValueError("fuzz campaign must depend on the target check")
+    steps = workflows(root)["campaign.yml"]["jobs"]["campaign"]["steps"]
+    for event in ("schedule", "pull_request"):
+        blocks = [step["run"] for step in steps if step.get("if") == f"github.event_name == '{event}'"]
+        if len(blocks) != 1:
+            raise ValueError("campaign collection block absent or ambiguous")
+        lines = blocks[0].strip().splitlines()
+        if lines[0] != "status=0" or lines[-1] != 'exit "$status"':
+            raise ValueError("campaign must report the aggregate failure status")
+        for line in lines[1:-1]:
+            if not re.fullmatch(r"\./scripts/campaign\.sh \w+ --[\w-]+(?: \d+)? \|\| status=1", line):
+                raise ValueError("campaign must continue after each phase failure")
+        scheduled = [line.split()[1] for line in lines[1:-1]]
+        # Soak exceeds the short campaign's time budget; it remains dispatchable.
+        same(scheduled, set(phases) - {"soak"}, "short campaign phases")
+
+
+def check_automatic_jobs(root):
+    sources = workflows(root)
+    required = {
+        "coverage.yml": {
+            "rust-product": "Rust core",
+            "python": "Python SDK and native binding, from the installed wheel",
+        },
+        "verify.yml": {
+            "docker": "Docker verification gate",
+            "windows": "Windows gate and wheel",
+        },
+        "audit.yml": {"dependencies": "Dependency advisories, licences, and sources"},
+        "fuzz.yml": {"check": "Fuzz targets (fmt, check, corpus)"},
+    }
+    for filename, jobs in required.items():
+        workflow = sources[filename]
+        triggers = workflow["on"]
+        if "pull_request" not in triggers or triggers["pull_request"] not in ("", {}):
+            raise ValueError("required checks need unfiltered pull requests")
+        if triggers.get("push") != {"branches": ["main"]}:
+            raise ValueError("required checks need pushes to main")
+        for key, name in jobs.items():
+            job = workflow["jobs"].get(key, {})
+            if job.get("name") != name or "if" in job or "needs" in job:
+                raise ValueError("required check renamed or conditional")
+    campaign = sources["campaign.yml"]
+    same(campaign["on"], ["pull_request", "schedule", "workflow_dispatch"],
+         "short campaign triggers")
+    if "if" in campaign["jobs"]["campaign"]:
+        raise ValueError("short campaign must remain automatic")
+    fuzz = sources["fuzz.yml"]
+    same(fuzz["on"], ["pull_request", "push", "schedule", "workflow_dispatch"], "fuzz triggers")
+    job = fuzz["jobs"]["campaign"]
+    same(job.get("needs", []), ["check", "changes"], "fuzz dependencies")
+    expected = ("always() && needs.check.result == 'success' && "
+                "(github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || "
+                "(github.event_name == 'pull_request' && needs.changes.outputs.fuzz == 'true'))")
+    if job.get("if") != expected:
+        raise ValueError("short fuzz campaigns must remain automatic")
 
 
 def check_platforms(root):
@@ -260,7 +307,7 @@ def check_coverage_sources(root):
         raise ValueError("coverage SDK source is absent")
 
 
-CHECKS = (check_fuzz, check_campaign, check_platforms, check_runtime, check_packages, check_evidence,
+CHECKS = (check_fuzz, check_campaign, check_automatic_jobs, check_platforms, check_runtime, check_packages, check_evidence,
           check_workflows, check_tool_pins, check_script_discovery, check_coverage_sources)
 
 

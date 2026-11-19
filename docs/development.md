@@ -130,7 +130,8 @@ che la configurazione di default rifiuta: nessuna connessione, nessun DNS.
 
 Il workflow Fuzz controlla formattazione e compilazione dei target e
 l'allineamento del corpus iniziale su ogni pull request e push a main; la
-campagna gira solo su avvio manuale per 600 secondi a target di default. Un crash o un timeout rendono rosso
+campagna gira ogni settimana e su avvio manuale per 600 secondi a target di default,
+e sulle PR che toccano fuzz per 60 secondi a target. Un crash o un timeout rendono rosso
 il job e i reperti restano come artefatto. libFuzzer non gira su Windows MSVC:
 in locale le campagne si lanciano su Linux.
 
@@ -191,7 +192,7 @@ Profili, soglie, criteri e lavoro residuo sono descritti nella
 
 ## Copertura
 
-Il workflow Coverage misura, solo su avvio manuale, tre superfici
+Il workflow Coverage misura, su pull request, push a main e avvio manuale, tre superfici
 separate con cargo-llvm-cov 0.9.1 e coverage.py 7.16.1:
 
 - il core Rust (crates/rest-engine-core/src), con i test del workspace;

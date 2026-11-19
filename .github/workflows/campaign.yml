@@ -5,7 +5,8 @@ name: Campaign
 #
 # È separata da Verify: dura da minuti a ore e misura risorse del runner, quindi
 # il suo esito dipende dalla macchina. Gira su avvio manuale (fase e durata a
-# scelta), anche in modalita --quick. Nessuna campagna automatica.
+# scelta), una volta alla settimana in forma breve (smoke 5 min e load 15 min)
+# e, in modalità --quick, sulle pull request che toccano la campagna.
 #
 # Tetto: un job su runner GitHub ospitato dura al più 6 ore. Un soak più lungo
 # di 330 minuti di carico (più passaggio funzionale, compilazione e attesa
@@ -31,6 +32,14 @@ on:
         description: Profilo quick (prova dell'harness, poche decine di secondi)
         type: boolean
         default: false
+  schedule:
+    - cron: "41 3 * * 1"
+  pull_request:
+    paths:
+      - crates/rest-campaign/**
+      - campaign/*.json
+      - scripts/campaign.sh
+      - .github/workflows/campaign.yml
 
 permissions:
   contents: read
@@ -89,6 +98,22 @@ jobs:
           if [ "$QUICK" = "true" ]; then arguments+=(--quick); fi
           if [ -n "$DURATION" ]; then arguments+=(--duration-min "$DURATION"); fi
           ./scripts/campaign.sh "${arguments[@]}"
+
+      - name: Run short smoke and load (weekly)
+        if: github.event_name == 'schedule'
+        run: |
+          status=0
+          ./scripts/campaign.sh smoke --duration-min 5 || status=1
+          ./scripts/campaign.sh load --duration-min 15 || status=1
+          exit "$status"
+
+      - name: Exercise the harness (quick)
+        if: github.event_name == 'pull_request'
+        run: |
+          status=0
+          ./scripts/campaign.sh smoke --quick || status=1
+          ./scripts/campaign.sh load --quick || status=1
+          exit "$status"
 
       - name: Publish the summaries
         if: always()
