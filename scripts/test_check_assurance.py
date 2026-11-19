@@ -30,6 +30,17 @@ class AssuranceTests(unittest.TestCase):
         self.assertIn(before, text)
         path.write_text(text.replace(before, after), encoding="utf-8")
 
+    def test_unsupported_platform_must_fail_compilation(self):
+        self.mutate("crates/rest-engine-core/src/lib.rs",
+                    'compile_error!("only Linux and Windows are supported");', '')
+        with self.assertRaises(ValueError):
+            gate.check_platforms(self.root)
+
+    def test_unsupported_runner_is_rejected(self):
+        self.mutate(".github/workflows/verify.yml", "ubuntu-latest", "unsupported-latest")
+        with self.assertRaises(ValueError):
+            gate.check_platforms(self.root)
+
     def test_current_sources(self):
         self.assertEqual(gate.scan(self.root), [])
 
@@ -88,6 +99,41 @@ class AssuranceTests(unittest.TestCase):
         self.mutate(".github/workflows/campaign.yml", "smoke --quick || status=1", "smoke --quick")
         with self.assertRaisesRegex(ValueError, "continue after"):
             gate.check_campaign(self.root)
+
+    def test_short_workflows_require_automatic_triggers(self):
+        for name in ("coverage.yml", "campaign.yml", "fuzz.yml"):
+            with self.subTest(workflow=name):
+                path = self.root / ".github/workflows" / name
+                original = path.read_text(encoding="utf-8")
+                path.write_text(original.replace("  pull_request:", "  disabled_event:", 1), encoding="utf-8")
+                with self.assertRaises(ValueError):
+                    gate.check_automatic_jobs(self.root)
+                path.write_text(original, encoding="utf-8")
+
+    def test_required_checks_reject_renames_conditions_and_filters(self):
+        cases = [
+            ("    name: Rust core", "    name: Renamed core"),
+            ("    name: Python SDK and native binding, from the installed wheel",
+             "    name: Renamed SDK"),
+            ("    name: Rust core", "    name: Rust core\n    if: github.event_name == 'workflow_dispatch'"),
+            ("  pull_request:", "  pull_request:\n    paths: ['crates/**']"),
+            ("  push:", "  disabled_push:"),
+        ]
+        path = self.root / ".github/workflows/coverage.yml"
+        original = path.read_text(encoding="utf-8")
+        for before, after in cases:
+            with self.subTest(mutation=after):
+                self.mutate(".github/workflows/coverage.yml", before, after)
+                with self.assertRaises(ValueError):
+                    gate.check_automatic_jobs(self.root)
+                path.write_text(original, encoding="utf-8")
+
+    def test_short_fuzz_campaign_cannot_be_manual_only(self):
+        self.mutate(".github/workflows/fuzz.yml",
+                    "always() && needs.check.result == 'success' &&",
+                    "github.event_name == 'workflow_dispatch' &&")
+        with self.assertRaises(ValueError):
+            gate.check_automatic_jobs(self.root)
 
     def test_stale_runtime_count_is_rejected(self):
         self.mutate("crates/rest-engine-core/tests/runtime_vectors.rs", "exercised, 20,", "exercised, 19,")

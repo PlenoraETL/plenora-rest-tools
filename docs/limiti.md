@@ -230,3 +230,8 @@ Queste saturazioni sono deliberate: il retry rinuncia, la cache puo rivalidare
 prima, la lease limita risorse, e i cookie seguono il proprio protocollo. Nessuna
 saturazione autorizza un retry anticipato. Il binding Python inoltra i valori al
 core e non esegue aritmetica temporale indipendente.
+
+## Piattaforme
+
+Sono supportati solo Linux e Windows. Le altre piattaforme sono rifiutate
+in compilazione con `compile_error!` nel core condiviso da tutti i crate.

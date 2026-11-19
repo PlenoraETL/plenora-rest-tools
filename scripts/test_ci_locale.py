@@ -121,11 +121,11 @@ class CiLocaleTests(unittest.TestCase):
         self.workflow({'first': self.job([{'run': 'print(1)', 'shell': 'python'}]),
                        'matrix': self.job([{'run': 'print(2)', 'shell': 'python'}],
                            needs=['first'], strategy={'matrix': {'os': ['ubuntu-latest', 'windows-latest'],
-                               'exclude': [{'os': 'ubuntu-latest'}], 'include': [{'os': 'macos-latest'}]}})})
+                               'exclude': [{'os': 'ubuntu-latest'}], 'include': [{'os': 'windows-2025'}]}})})
         plan = ci.derive(self.root)
         self.assertEqual(len(plan['jobs']), 3)
         self.assertEqual([j['matrix']['os'] for j in plan['jobs'] if j['key'] == 'matrix'],
-                         ['windows-latest', 'macos-latest'])
+                         ['windows-latest', 'windows-2025'])
         receipt = self.run_plan()
         self.assertEqual([j['status'] for j in receipt['jobs']], ['PASS', 'NON ESEGUITO', 'NON ESEGUITO'])
 

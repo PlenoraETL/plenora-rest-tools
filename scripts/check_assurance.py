@@ -125,6 +125,59 @@ def check_campaign(root):
         same(scheduled, set(phases) - {"soak"}, "short campaign phases")
 
 
+def check_automatic_jobs(root):
+    sources = workflows(root)
+    required = {
+        "coverage.yml": {
+            "rust-product": "Rust core",
+            "python": "Python SDK and native binding, from the installed wheel",
+        },
+        "verify.yml": {
+            "docker": "Docker verification gate",
+            "windows": "Windows gate and wheel",
+        },
+        "audit.yml": {"dependencies": "Dependency advisories, licences, and sources"},
+        "fuzz.yml": {"check": "Fuzz targets (fmt, check, corpus)"},
+    }
+    for filename, jobs in required.items():
+        workflow = sources[filename]
+        triggers = workflow["on"]
+        if "pull_request" not in triggers or triggers["pull_request"] not in ("", {}):
+            raise ValueError("required checks need unfiltered pull requests")
+        if triggers.get("push") != {"branches": ["main"]}:
+            raise ValueError("required checks need pushes to main")
+        for key, name in jobs.items():
+            job = workflow["jobs"].get(key, {})
+            if job.get("name") != name or "if" in job or "needs" in job:
+                raise ValueError("required check renamed or conditional")
+    campaign = sources["campaign.yml"]
+    same(campaign["on"], ["pull_request", "schedule", "workflow_dispatch"],
+         "short campaign triggers")
+    if "if" in campaign["jobs"]["campaign"]:
+        raise ValueError("short campaign must remain automatic")
+    fuzz = sources["fuzz.yml"]
+    same(fuzz["on"], ["pull_request", "push", "schedule", "workflow_dispatch"], "fuzz triggers")
+    job = fuzz["jobs"]["campaign"]
+    same(job.get("needs", []), ["check", "changes"], "fuzz dependencies")
+    expected = ("always() && needs.check.result == 'success' && "
+                "(github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || "
+                "(github.event_name == 'pull_request' && needs.changes.outputs.fuzz == 'true'))")
+    if job.get("if") != expected:
+        raise ValueError("short fuzz campaigns must remain automatic")
+
+
+def check_platforms(root):
+    guard = '#[cfg(not(any(target_os = "linux", target_os = "windows")))]\ncompile_error!("only Linux and Windows are supported");'
+    for name in ("crates/rest-engine-core/src/lib.rs", "crates/rest-cli/src/signal.rs"):
+        if guard not in read(root, name):
+            raise ValueError("unsupported platforms must fail compilation")
+    for workflow in workflows(root).values():
+        for job in workflow["jobs"].values():
+            runner = job.get("runs-on", "")
+            if isinstance(runner, str) and not runner.startswith(("ubuntu-", "windows-", "${{")):
+                raise ValueError("unsupported workflow runner")
+
+
 def check_runtime(root):
     source = read(root, "crates/rest-engine-core/tests/runtime_vectors.rs")
     pins = document(read(root, "contracts/upstream/source.json"))["files"]
@@ -254,7 +307,7 @@ def check_coverage_sources(root):
         raise ValueError("coverage SDK source is absent")
 
 
-CHECKS = (check_fuzz, check_campaign, check_runtime, check_packages, check_evidence,
+CHECKS = (check_fuzz, check_campaign, check_automatic_jobs, check_platforms, check_runtime, check_packages, check_evidence,
           check_workflows, check_tool_pins, check_script_discovery, check_coverage_sources)
 
 

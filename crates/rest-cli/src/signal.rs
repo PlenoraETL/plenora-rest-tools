@@ -1,6 +1,6 @@
 //! Ctrl-C come cancellazione cooperativa (CLI 2.0 §9).
 //!
-//! Su Unix SIGINT e SIGTERM, su Windows Ctrl-C e Ctrl-Break: il primo segnale
+//! Su Linux SIGINT e SIGTERM, su Windows Ctrl-C e Ctrl-Break: il primo segnale
 //! cancella il token dell'esecuzione, e il motore chiude l'operazione con un
 //! errore `cancelled` (exit 130) che descrive comunque fase, effetto remoto e
 //! retry. I segnali successivi sono assorbiti: la chiusura cooperativa, che
@@ -16,7 +16,7 @@ use plenora_rest_core::CancellationToken;
 use tokio::sync::watch;
 
 /// Installa il gestore. Va chiamata dentro il runtime tokio.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 pub(crate) fn install(token: CancellationToken, cancelled: watch::Sender<bool>) -> io::Result<()> {
     use tokio::signal::unix::{SignalKind, signal};
     let mut interrupt = signal(SignalKind::interrupt())?;
@@ -41,7 +41,7 @@ pub(crate) fn install(token: CancellationToken, cancelled: watch::Sender<bool>) 
 }
 
 /// Installa il gestore. Va chiamata dentro il runtime tokio.
-#[cfg(windows)]
+#[cfg(target_os = "windows")]
 pub(crate) fn install(token: CancellationToken, cancelled: watch::Sender<bool>) -> io::Result<()> {
     use tokio::signal::windows::{ctrl_break, ctrl_c};
     let mut interrupt = ctrl_c()?;
@@ -65,16 +65,10 @@ pub(crate) fn install(token: CancellationToken, cancelled: watch::Sender<bool>) 
     Ok(())
 }
 
-/// Su una piattaforma senza segnali supportati il comando si rifiuta.
-#[cfg(not(any(unix, windows)))]
-pub(crate) fn install(
-    _token: CancellationToken,
-    _cancelled: watch::Sender<bool>,
-) -> io::Result<()> {
-    Err(io::Error::from(io::ErrorKind::Unsupported))
-}
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+compile_error!("only Linux and Windows are supported");
 
-#[cfg(any(unix, windows))]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 fn cancel(token: &CancellationToken, cancelled: &watch::Sender<bool>) {
     token.cancel();
     // Nessun ricevitore vuol dire che la lettura è già finita: il token

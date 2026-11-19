@@ -97,9 +97,8 @@ scripts/campaign.sh soak                      # 4 h (profilo), solo Linux
 scripts/campaign.sh smoke --quick             # prova dell'harness, ~40 s
 ~~~
 
-Il workflow Campaign esegue la fase scelta su avvio manuale, smoke da 5 minuti
-e load da 15 ogni settimana, e le due fasi in modalità quick sulle pull
-request che toccano la campagna; carica i report come artefatto. Un job su
+Il workflow Campaign esegue la fase scelta solo su avvio manuale e carica
+i report come artefatto. Un job su
 runner GitHub dura al più 6 ore: il workflow rifiuta un soak con più di 330
 minuti di carico, che va eseguito su una macchina dedicata.
 
@@ -325,7 +324,6 @@ La libreria può essere dichiarata pronta per la produzione quando:
 Dopo il go-live iniziale possono essere valutati:
 
 - supporto Linux ARM;
-- wheel per macOS;
 - target musl;
 - ulteriori formati o strategie di paginazione generiche;
 - pubblicazione su crates.io e PyPI.
